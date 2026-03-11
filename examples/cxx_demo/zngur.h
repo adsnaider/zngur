@@ -917,7 +917,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< int8_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -1012,7 +1012,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< int8_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -1030,7 +1030,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< int8_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -1060,8 +1060,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< int8_t, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -1184,7 +1184,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::rust::Ref<int8_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -1279,7 +1279,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::Ref<int8_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -1297,7 +1297,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::Ref<int8_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -1327,8 +1327,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::rust::Ref<int8_t>, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -1432,7 +1432,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::rust::RefMut<int8_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -1527,7 +1527,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::RefMut<int8_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -1545,7 +1545,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::RefMut<int8_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -1575,8 +1575,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::rust::RefMut<int8_t>, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -1680,7 +1680,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< uint8_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -1775,7 +1775,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< uint8_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -1793,7 +1793,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< uint8_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -1823,8 +1823,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< uint8_t, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -1947,7 +1947,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::rust::Ref<uint8_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -2042,7 +2042,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::Ref<uint8_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -2060,7 +2060,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::Ref<uint8_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -2090,8 +2090,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::rust::Ref<uint8_t>, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -2195,7 +2195,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::rust::RefMut<uint8_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -2290,7 +2290,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::RefMut<uint8_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -2308,7 +2308,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::RefMut<uint8_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -2338,8 +2338,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::rust::RefMut<uint8_t>, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -2443,7 +2443,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< int16_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -2538,7 +2538,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< int16_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -2556,7 +2556,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< int16_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -2586,8 +2586,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< int16_t, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -2710,7 +2710,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::rust::Ref<int16_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -2805,7 +2805,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::Ref<int16_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -2823,7 +2823,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::Ref<int16_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -2853,8 +2853,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::rust::Ref<int16_t>, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -2958,7 +2958,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::rust::RefMut<int16_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -3053,7 +3053,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::RefMut<int16_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -3071,7 +3071,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::RefMut<int16_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -3101,8 +3101,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::rust::RefMut<int16_t>, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -3206,7 +3206,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< uint16_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -3301,7 +3301,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< uint16_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -3319,7 +3319,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< uint16_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -3349,8 +3349,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< uint16_t, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -3473,7 +3473,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::rust::Ref<uint16_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -3568,7 +3568,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::Ref<uint16_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -3586,7 +3586,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::Ref<uint16_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -3616,8 +3616,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::rust::Ref<uint16_t>, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -3721,7 +3721,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::rust::RefMut<uint16_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -3816,7 +3816,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::RefMut<uint16_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -3834,7 +3834,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::RefMut<uint16_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -3864,8 +3864,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::rust::RefMut<uint16_t>, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -3969,7 +3969,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< int32_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -4064,7 +4064,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< int32_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -4082,7 +4082,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< int32_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -4112,8 +4112,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< int32_t, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -4236,7 +4236,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::rust::Ref<int32_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -4331,7 +4331,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::Ref<int32_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -4349,7 +4349,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::Ref<int32_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -4379,8 +4379,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::rust::Ref<int32_t>, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -4484,7 +4484,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::rust::RefMut<int32_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -4579,7 +4579,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::RefMut<int32_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -4597,7 +4597,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::RefMut<int32_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -4627,8 +4627,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::rust::RefMut<int32_t>, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -4732,7 +4732,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< uint32_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -4827,7 +4827,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< uint32_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -4845,7 +4845,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< uint32_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -4875,8 +4875,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< uint32_t, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -4999,7 +4999,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::rust::Ref<uint32_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -5094,7 +5094,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::Ref<uint32_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -5112,7 +5112,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::Ref<uint32_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -5142,8 +5142,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::rust::Ref<uint32_t>, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -5247,7 +5247,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::rust::RefMut<uint32_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -5342,7 +5342,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::RefMut<uint32_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -5360,7 +5360,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::RefMut<uint32_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -5390,8 +5390,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::rust::RefMut<uint32_t>, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -5495,7 +5495,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< int64_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -5590,7 +5590,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< int64_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -5608,7 +5608,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< int64_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -5638,8 +5638,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< int64_t, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -5762,7 +5762,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::rust::Ref<int64_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -5857,7 +5857,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::Ref<int64_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -5875,7 +5875,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::Ref<int64_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -5905,8 +5905,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::rust::Ref<int64_t>, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -6010,7 +6010,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::rust::RefMut<int64_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -6105,7 +6105,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::RefMut<int64_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -6123,7 +6123,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::RefMut<int64_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -6153,8 +6153,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::rust::RefMut<int64_t>, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -6258,7 +6258,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< uint64_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -6353,7 +6353,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< uint64_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -6371,7 +6371,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< uint64_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -6401,8 +6401,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< uint64_t, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -6525,7 +6525,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::rust::Ref<uint64_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -6620,7 +6620,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::Ref<uint64_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -6638,7 +6638,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::Ref<uint64_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -6668,8 +6668,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::rust::Ref<uint64_t>, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -6773,7 +6773,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::rust::RefMut<uint64_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -6868,7 +6868,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::RefMut<uint64_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -6886,7 +6886,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::RefMut<uint64_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -6916,8 +6916,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::rust::RefMut<uint64_t>, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -7021,7 +7021,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::double_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -7116,7 +7116,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::double_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -7134,7 +7134,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::double_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -7164,8 +7164,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::double_t, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -7288,7 +7288,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::rust::Ref<::double_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -7383,7 +7383,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::Ref<::double_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -7401,7 +7401,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::Ref<::double_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -7431,8 +7431,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::rust::Ref<::double_t>, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -7536,7 +7536,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::rust::RefMut<::double_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -7631,7 +7631,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::RefMut<::double_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -7649,7 +7649,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::RefMut<::double_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -7679,8 +7679,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::rust::RefMut<::double_t>, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -7784,7 +7784,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::float_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -7879,7 +7879,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::float_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -7897,7 +7897,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::float_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -7927,8 +7927,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::float_t, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -8051,7 +8051,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::rust::Ref<::float_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -8146,7 +8146,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::Ref<::float_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -8164,7 +8164,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::Ref<::float_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -8194,8 +8194,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::rust::Ref<::float_t>, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -8299,7 +8299,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::rust::RefMut<::float_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -8394,7 +8394,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::RefMut<::float_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -8412,7 +8412,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::RefMut<::float_t>, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -8442,8 +8442,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::rust::RefMut<::float_t>, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -8547,7 +8547,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::rust::ZngurCppOpaqueOwnedObject, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -8642,7 +8642,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::ZngurCppOpaqueOwnedObject, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -8660,7 +8660,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::rust::ZngurCppOpaqueOwnedObject, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -8690,8 +8690,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::rust::ZngurCppOpaqueOwnedObject, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
@@ -8797,7 +8797,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     Ref(const FieldOwned< ::size_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -8892,7 +8892,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::size_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -8910,7 +8910,7 @@ namespace rust {
         typename Offset,
         typename... Offsets,
         typename ::std::enable_if<
-            !zngur_detail::is_static_offset<Offset, Offsets...>::value,
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldOwned< ::size_t, Offset, Offsets... >& f) {
       constexpr bool heap_allocated = __zngur_internal_calc_field<Offset, Offsets...>::heap_allocated();
@@ -8940,8 +8940,8 @@ namespace rust {
     template <
         typename Offset,
         typename... Offsets,
-        typename ::std::enable_if<!
-            zngur_detail::all_static_offset<Offset, Offsets...>::value,
+        typename ::std::enable_if<
+            !zngur_detail::all_static_offset<Offset, Offsets...>::value,
             bool>::type = true>
     RefMut(const FieldRefMut< ::size_t, Offset, Offsets...>& f) {
       size_t offset = __zngur_internal_calc_field<Offset, Offsets...>::offset();
