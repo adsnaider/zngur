@@ -2,22 +2,22 @@ a.out: main.cpp generated1.h src/generated1.rs generated2.h src/generated2.rs zn
 	${CXX} -std=c++17 -Werror -I. main.cpp -g -L ../../target/release/ -l example_multiple_zngur_files
 
 ../../target/release/libexample_multiple_zngur_files.a:
-	cargo build --release
+	/usr/local/google/home/asnaider/.cargo/bin/cargo build --release
 
 generated1.h ./src/generated1.rs: main.zng
-	cd ../../zngur-cli && cargo run g ../examples/multiple_zngur_files/main.zng \
+	cd ../../zngur-cli && /usr/local/google/home/asnaider/.cargo/bin/cargo run g ../examples/multiple_zngur_files/main.zng \
 		--h-file=../examples/multiple_zngur_files/generated1.h \
 		--rs-file=../examples/multiple_zngur_files/src/generated1.rs \
 		--cpp-namespace=m1
 
 generated2.h ./src/generated2.rs: main.zng
-	cd ../../zngur-cli && cargo run g ../examples/multiple_zngur_files/main.zng \
+	cd ../../zngur-cli && /usr/local/google/home/asnaider/.cargo/bin/cargo run g ../examples/multiple_zngur_files/main.zng \
 		--h-file=../examples/multiple_zngur_files/generated2.h \
 		--rs-file=../examples/multiple_zngur_files/src/generated2.rs \
 		--cpp-namespace=m2
 
 zngur.h:
-	cd ../../zngur-cli && cargo run -- make-zng-header --panic-to-exception ../examples/multiple_zngur_files/zngur.h
+	cd ../../zngur-cli && /usr/local/google/home/asnaider/.cargo/bin/cargo run -- make-zng-header --panic-to-exception ../examples/multiple_zngur_files/zngur.h
 
 
 .PHONY: ../../target/release/libexample_multiple_zngur_files.a generated1.h generated2.h clean
