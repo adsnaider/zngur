@@ -46,15 +46,15 @@ impl CppPath {
     }
 
     fn need_header(&self) -> bool {
-        self.0.first().map(|x| x.as_str()) == Some("rust")
-            && self.0 != ["rust", "Unit"]
-            && self.0 != ["rust", "Ref"]
-            && self.0 != ["rust", "RefMut"]
+        if self.0.len() == 1 && self.0[0].ends_with("_t") {
+            return false;
+        }
+        self.0 != ["rust", "Unit"] && self.0 != ["rust", "Ref"] && self.0 != ["rust", "RefMut"]
     }
 
-    pub(crate) fn from_rust_path(path: &[String]) -> CppPath {
+    pub(crate) fn from_rust_path(path: &[String], ns: &str) -> CppPath {
         CppPath(
-            iter::once("rust")
+            iter::once(ns)
                 .chain(path.iter().map(|x| x.as_str()))
                 .map(cpp_handle_keyword)
                 .map(|x| x.to_owned())
@@ -351,7 +351,11 @@ pub struct CppFile {
 }
 
 impl CppFile {
-    fn emit_h_file(&self, state: &mut State) -> std::fmt::Result {
+    fn emit_h_file(
+        &self,
+        state: &mut State,
+        ctx: &crate::rust::GeneratorContext,
+    ) -> std::fmt::Result {
         let template = CppHeaderTemplate {
             panic_to_exception: self.panic_to_exception,
             additional_includes: &self.additional_includes,
@@ -361,6 +365,7 @@ impl CppFile {
             exported_impls: &self.exported_impls,
             exported_fn_defs: &self.exported_fn_defs,
             rust_cfg_defines: &self.rust_cfg_defines,
+            ctx,
         };
         state.text += template.render().unwrap().as_str();
         Ok(())
@@ -382,7 +387,7 @@ impl CppFile {
         Ok(())
     }
 
-    pub fn render(self) -> (String, Option<String>) {
+    pub fn render(self, ctx: &crate::rust::GeneratorContext) -> (String, Option<String>) {
         let mut h_file = State {
             text: "".to_owned(),
             panic_to_exception: self.panic_to_exception,
@@ -391,7 +396,7 @@ impl CppFile {
             text: "".to_owned(),
             panic_to_exception: self.panic_to_exception,
         };
-        self.emit_h_file(&mut h_file).unwrap();
+        self.emit_h_file(&mut h_file, ctx).unwrap();
         let mut is_cpp_needed = false;
         self.emit_cpp_file(&mut cpp_file, &mut is_cpp_needed)
             .unwrap();

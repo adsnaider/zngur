@@ -4,17 +4,17 @@ a.out: main.cpp generated1.h src/generated1.rs generated2.h src/generated2.rs zn
 ../../target/release/libexample_multiple_zngur_files.a:
 	/usr/local/google/home/asnaider/.cargo/bin/cargo build --release
 
-generated1.h ./src/generated1.rs: main.zng
-	cd ../../zngur-cli && /usr/local/google/home/asnaider/.cargo/bin/cargo run g ../examples/multiple_zngur_files/main.zng \
+generated1.h ./src/generated1.rs: main1.zng
+	cd ../../zngur-cli && /usr/local/google/home/asnaider/.cargo/bin/cargo run g ../examples/multiple_zngur_files/main1.zng \
 		--h-file=../examples/multiple_zngur_files/generated1.h \
 		--rs-file=../examples/multiple_zngur_files/src/generated1.rs \
-		--cpp-namespace=m1
+		--mangling-base=m1
 
-generated2.h ./src/generated2.rs: main.zng
-	cd ../../zngur-cli && /usr/local/google/home/asnaider/.cargo/bin/cargo run g ../examples/multiple_zngur_files/main.zng \
+generated2.h ./src/generated2.rs: main2.zng
+	cd ../../zngur-cli && /usr/local/google/home/asnaider/.cargo/bin/cargo run g ../examples/multiple_zngur_files/main2.zng \
 		--h-file=../examples/multiple_zngur_files/generated2.h \
 		--rs-file=../examples/multiple_zngur_files/src/generated2.rs \
-		--cpp-namespace=m2
+		--mangling-base=m2
 
 zngur.h:
 	cd ../../zngur-cli && /usr/local/google/home/asnaider/.cargo/bin/cargo run -- make-zng-header --panic-to-exception ../examples/multiple_zngur_files/zngur.h

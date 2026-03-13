@@ -925,8 +925,11 @@ type mod_alias.Type {
     );
     assert_eq!(parsed.spec.imported_modules.len(), 1);
     assert_eq!(parsed.spec.imported_modules[0].alias, "mod_alias");
-    assert_eq!(parsed.spec.imported_modules[0].path.to_str().unwrap(), "module.zng");
-    
+    assert_eq!(
+        parsed.spec.imported_modules[0].path.to_str().unwrap(),
+        "module.zng"
+    );
+
     let ty = parsed.spec.types.first().expect("no type parsed");
     assert_ty_path!(["Type"], &ty.ty);
 }
