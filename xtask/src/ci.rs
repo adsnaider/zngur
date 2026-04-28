@@ -130,11 +130,11 @@ fn check_examples(sh: &Shell, fix: bool) -> Result<()> {
                 println!("Skipping {example}, no NMakefile for this example");
             }
         }
-        if fix {
-            sh.copy_file("./actual_output.txt", "./expected_output.txt")?;
-        }
 
         if !skip {
+            if fix {
+                sh.copy_file("./actual_output.txt", "./expected_output.txt")?;
+            }
             #[cfg(not(target_os = "windows"))]
             cmd!(sh, "diff actual_output.txt expected_output.txt")
                 .run()
