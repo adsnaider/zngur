@@ -129,7 +129,9 @@ impl ZngurGenerator {
                 let (size, align) = match layout {
                     LayoutPolicy::StackAllocated { size, align }
                     | LayoutPolicy::Conservative { size, align } => (size, align),
-                    _ => unreachable!("Validation ensures cpp_stack_owned has StackAllocated or Conservative layout"),
+                    _ => unreachable!(
+                        "Validation ensures cpp_stack_owned has StackAllocated or Conservative layout"
+                    ),
                 };
                 cpp_mod_content.push_str(&format!(
                     r#"

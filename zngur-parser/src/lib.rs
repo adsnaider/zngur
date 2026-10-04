@@ -2186,12 +2186,9 @@ impl ZngurSpecBuilder {
                     Some(LayoutPolicy::HeapAllocated | LayoutPolicy::OnlyByRef)
                 )
             {
-                let stack_owned_spans = ctx.fetch_spans_global(
-                    &PartialSpanKey::CppStackOwned(ty.ty.clone()),
-                );
-                let layout_spans = ctx.fetch_spans_global(
-                    &PartialSpanKey::Layout(ty.ty.clone()),
-                );
+                let stack_owned_spans =
+                    ctx.fetch_spans_global(&PartialSpanKey::CppStackOwned(ty.ty.clone()));
+                let layout_spans = ctx.fetch_spans_global(&PartialSpanKey::Layout(ty.ty.clone()));
                 let report_span = stack_owned_spans
                     .last()
                     .copied()
@@ -2210,7 +2207,9 @@ impl ZngurSpecBuilder {
                         "`#cpp_stack_owned` cannot be used with `{layout_name}` for type {}.",
                         ty.ty
                     ))
-                    .with_note("`#cpp_stack_owned` types must use `#layout` or `#layout_conservative`.");
+                    .with_note(
+                        "`#cpp_stack_owned` types must use `#layout` or `#layout_conservative`.",
+                    );
 
                 if let Some(span) = stack_owned_spans.last() {
                     report = report.with_label(
