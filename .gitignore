@@ -14,3 +14,4 @@ perf.data.old
 actual_output.txt
 flamegraph.svg
 generated*.*
+.direnv/
