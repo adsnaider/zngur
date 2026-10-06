@@ -16,3 +16,4 @@ flamegraph.svg
 generated*.*
 .direnv/
 *.dSYM/
+.envrc
