@@ -413,3 +413,121 @@ extern "C++" {
         "#]],
     );
 }
+
+/// Recursively collects every `.zng` file under `dir`.
+fn collect_zng_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            collect_zng_files(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "zng") {
+            out.push(path);
+        }
+    }
+}
+
+fn print_spec(spec: &ZngurSpec) -> String {
+    let mut buf = std::io::BufWriter::new(Vec::new());
+    IDLPrinter::new(&mut buf)
+        .write_idl(spec)
+        .expect("printing failure");
+    String::from_utf8(buf.into_inner().expect("buffer flush error")).expect("utf8 error")
+}
+
+/// Every `.zng` file in `examples/` must survive parse -> print -> parse unchanged.
+///
+/// `merge`d files are flattened into the printed output, so the reparse needs
+/// no import resolution.
+#[test]
+fn reparse_all_examples() {
+    let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples");
+    let mut files = vec![];
+    collect_zng_files(&examples, &mut files);
+    assert!(!files.is_empty(), "no example .zng files found");
+
+    let mut failures = vec![];
+    for path in &files {
+        let mut sink = ErrorSink::default();
+        let parsed = ParsedZngFile::parse(path, NullCfg, &mut sink);
+        if parsed.errors > 0 {
+            failures.push(format!(
+                "{}: original failed to parse:\n{}",
+                path.display(),
+                String::from_utf8_lossy(&sink.error_buffer)
+            ));
+            continue;
+        }
+        let printed = print_spec(&parsed.spec);
+        let mut sink = ErrorSink::default();
+        let reparsed = ParsedZngFile::parse_str_with_resolver(
+            &printed,
+            &path.to_string_lossy(),
+            NullCfg,
+            &DefaultImportResolver,
+            &mut sink,
+        );
+        if reparsed.errors > 0 {
+            failures.push(format!(
+                "{}: printed output failed to parse:\n{}\n--- printed ---\n{printed}",
+                path.display(),
+                strip_ansi_escapes::strip_str(String::from_utf8_lossy(&sink.error_buffer)),
+            ));
+            continue;
+        }
+        let (a, b) = (&parsed.spec, &reparsed.spec);
+        // `ZngurSpec` and some of its fields don't implement `PartialEq`, so
+        // compare their `Debug` representations instead.
+        macro_rules! debug_fields {
+            ($($field:ident),*) => {
+                [$((
+                    stringify!($field),
+                    format!("{:#?}", a.$field),
+                    format!("{:#?}", b.$field),
+                )),*]
+            };
+        }
+        let fields = debug_fields!(
+            types,
+            traits,
+            funcs,
+            extern_cpp_funcs,
+            extern_cpp_impls,
+            imported_modules,
+            additional_includes,
+            convert_panic_to_exception
+        );
+        for (name, before, after) in fields {
+            if before != after {
+                let first_diff = before
+                    .lines()
+                    .zip(after.lines())
+                    .position(|(x, y)| x != y)
+                    .unwrap_or(0);
+                let context = |s: &str| {
+                    s.lines()
+                        .skip(first_diff.saturating_sub(3))
+                        .take(8)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                failures.push(format!(
+                    "{}: `{name}` changed after round trip\n--- before ---\n{}\n--- after ---\n{}",
+                    path.display(),
+                    context(&before),
+                    context(&after),
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} example round trips failed:\n\n{}",
+        failures.len(),
+        files.len(),
+        failures.join("\n\n========\n\n")
+    );
+}
