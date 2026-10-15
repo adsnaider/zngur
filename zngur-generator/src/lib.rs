@@ -10,7 +10,7 @@ use cpp::CppTypeDefinition;
 use cpp::CppVariant;
 use cpp::cpp_handle_keyword;
 use cpp::{CppRef, CppStackOwned};
-use cpp_template::{CppTemplates, cpp_template};
+use cpp_template::{CppTemplates, cpp_template, struct_name};
 use indexmap::map::Entry;
 use itertools::Itertools;
 use rust::CoroSupport;
@@ -140,7 +140,13 @@ impl ZngurGenerator {
             namespace: default_ns,
             crate_name: &sanitized_crate_name,
         };
-        let mut cpp_templates = CppTemplates::default();
+        let cpp_templates = CppTemplates::new(
+            &zng.cpp_template_homes,
+            &zng.imported_modules,
+            &zng.types,
+            &mut rust_file,
+            &mut cpp_tree,
+        );
         for ty_def in zng.types {
             let ty = &ty_def.ty;
             // What Rust can do with a C++ (`c++::`) type: hold it by value if it has a layout and
@@ -243,8 +249,12 @@ impl ZngurGenerator {
             if is_copy {
                 rust_file.add_static_is_copy_assert(&ty);
             }
-            // The Rust wrapper of a C++ type is in the module of its `c++::` path.
+            // The Rust wrapper of a C++ type is in the module of its `c++::` path, except for
+            // instantiations of C++ class templates, which are structs at the root that their
+            // template's alias names.
+            let template = cpp_template(ty);
             let (type_name, module_path) = match &ty {
+                RustType::Cpp(path) if template.is_some() => (struct_name(path), vec![]),
                 RustType::Cpp(path) => {
                     let (name, path) = path
                         .path
@@ -253,6 +263,13 @@ impl ZngurGenerator {
                     (name.clone(), path.to_vec())
                 }
                 _ => (String::new(), vec![]),
+            };
+            let mut insert_struct = |rust_file: &mut RustFile, def: &str| {
+                if template.is_some() {
+                    rust_file.text.push_str(def);
+                } else {
+                    cpp_tree.insert(&module_path, def);
+                }
             };
             let mut stack_owned_destructor = None;
             if cpp_stack_owned.is_some() {
@@ -277,18 +294,11 @@ impl ZngurGenerator {
                     | LayoutPolicy::Conservative { size, align } => (size, align),
                     _ => unreachable!("C++ types held by value have a size and alignment"),
                 };
-                if let Some(template) = cpp_template(ty) {
-                    cpp_templates.add_instantiation(
-                        &mut rust_file,
-                        &mut cpp_tree,
-                        template,
-                        Some((size, align, &mangled_name)),
-                    );
-                } else {
-                    let struct_def = format!(
-                        r#"
+                let struct_def = format!(
+                    r#"
     #[repr(C)]
     #[repr(align({align}))]
+    #[allow(non_camel_case_types)]
     pub struct {type_name} {{
       pub(crate) buffer: ::core::cell::UnsafeCell<::core::mem::MaybeUninit<[u8; {size}]>>,
       _no_auto_traits: ::core::marker::PhantomData<*mut ()>,
@@ -333,23 +343,22 @@ impl ZngurGenerator {
         }}
     }}
 "#
-                    );
-                    cpp_tree.insert(&module_path, &struct_def);
-                }
+                );
+                insert_struct(&mut rust_file, &struct_def);
             }
             if cpp_ref.is_some() {
-                if let Some(template) = cpp_template(ty) {
-                    cpp_templates.add_instantiation(&mut rust_file, &mut cpp_tree, template, None);
-                } else {
-                    cpp_tree.insert(
-                        &module_path,
-                        &format!(
-                            r#"
+                insert_struct(
+                    &mut rust_file,
+                    &format!(
+                        r#"
+    #[allow(non_camel_case_types)]
     pub struct {type_name}(());
 "#
-                        ),
-                    );
-                }
+                    ),
+                );
+            }
+            if let Some(template) = template {
+                cpp_templates.add_instantiation(&mut rust_file, template);
             }
             let mut cpp_methods = vec![];
             let mut constructor = None;
@@ -782,6 +791,7 @@ mod tests {
                     vec!["ns".to_owned(), "Bar".to_owned()],
                     vec!["Top".to_owned()],
                 ],
+                cpp_template_homes: vec![],
             }],
             // A local `c++::` type in the same namespace shares the module.
             types: vec![minimal_ref_type(cpp(&["ns", "Local"]))],
@@ -915,7 +925,7 @@ mod tests {
     }
 
     #[test]
-    fn cpp_template_instantiations_share_a_generic_struct() {
+    fn cpp_template_instantiations_share_an_alias() {
         let b = cpp(&["a", "B"]);
         let unique_ptr = |arg: RustType| {
             RustType::Cpp(CppTypePath {
@@ -934,28 +944,97 @@ mod tests {
         let (rust_code, _h, _cpp) =
             ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
 
-        // One generic struct (and trait) for the template, in the template's module.
-        assert_eq!(rust_code.matches("pub struct unique_ptr<T0>").count(), 1);
+        // One trait and alias for the template, in the template's module.
+        assert!(rust_code.contains("pub mod std {"), "{rust_code}");
         assert_eq!(
             rust_code
-                .matches("pub unsafe trait __ZngurCppTemplate_unique_ptr")
+                .matches("pub trait __ZngurCppTemplate_unique_ptr {")
                 .count(),
-            1
+            1,
+            "{rust_code}"
         );
-        assert!(rust_code.contains("pub mod std {"));
-        // Each instantiation implements the trait for the tuple of its arguments.
-        assert!(rust_code.contains("unsafe impl std::__ZngurCppTemplate_unique_ptr for (a::B,)"));
-        assert!(rust_code.contains("unsafe impl std::__ZngurCppTemplate_unique_ptr for (i32,)"));
+        assert_eq!(
+            rust_code
+                .matches("pub type unique_ptr<T0> = <T0 as __ZngurCppTemplate_unique_ptr>::Type;")
+                .count(),
+            1,
+            "{rust_code}"
+        );
+        // Each instantiation is a struct that the trait names for its arguments.
+        assert!(
+            rust_code.contains(
+                "impl std::__ZngurCppTemplate_unique_ptr for a::B {\n    type Type = \
+                 __zngur_cpp_std__unique_ptr__a__B;\n}"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "impl std::__ZngurCppTemplate_unique_ptr for i32 {\n    type Type = \
+                 __zngur_cpp_std__unique_ptr__i32;\n}"
+            ),
+            "{rust_code}"
+        );
         // Only by-value instantiations are `ZngCppStackObject`s.
         assert!(
             rust_code.contains(
-                "unsafe impl ::zngur_lib::ZngCppStackObject for std::unique_ptr::<a::B> {}"
-            )
+                "unsafe impl ::zngur_lib::ZngCppStackObject for __zngur_cpp_std__unique_ptr__a__B {}"
+            ),
+            "{rust_code}"
         );
         assert!(
             !rust_code.contains(
-                "unsafe impl ::zngur_lib::ZngCppStackObject for std::unique_ptr::<i32> {}"
-            )
+                "unsafe impl ::zngur_lib::ZngCppStackObject for __zngur_cpp_std__unique_ptr__i32 {}"
+            ),
+            "{rust_code}"
+        );
+    }
+
+    #[test]
+    fn cpp_template_instantiations_use_an_imported_home() {
+        let b = cpp(&["a", "B"]);
+        let unique_ptr_path = vec!["std".to_owned(), "unique_ptr".to_owned()];
+        let spec = ZngurSpec {
+            types: vec![
+                minimal_ref_type(b.clone()),
+                minimal_stack_owned_type(
+                    RustType::Cpp(CppTypePath {
+                        path: unique_ptr_path.clone(),
+                        generics: vec![b.clone()],
+                    }),
+                    8,
+                    8,
+                ),
+            ],
+            imported_modules: vec![ModuleImport {
+                path: "./bar.zng".into(),
+                crate_name: Some("bar".to_owned()),
+                cpp_types: vec![],
+                cpp_template_homes: vec![CppTemplateHome {
+                    path: unique_ptr_path,
+                    arity: 1,
+                    explicit: true,
+                }],
+            }],
+            ..Default::default()
+        };
+        let (rust_code, _h, _cpp) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+
+        assert!(
+            !rust_code.contains("pub trait __ZngurCppTemplate_unique_ptr"),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains("pub use ::bar::generated::std::unique_ptr;"),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "impl ::bar::generated::std::__ZngurCppTemplate_unique_ptr for a::B {\n    type Type = \
+                 __zngur_cpp_std__unique_ptr__a__B;\n}"
+            ),
+            "{rust_code}"
         );
     }
 

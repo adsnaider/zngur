@@ -12,11 +12,16 @@ int main() {
       rust::receiver::Receiver::new_());
   auto stats =
       rust::Impl<rust::cpp::cpp_stats::StatsAccumulator, rust::Inherent>::create();
+  // Rust reads the config through `std::unique_ptr<RunConfig>`, an instantiation declared in
+  // processor.zng with the members of aggregation.zng's `type<T> c++::std::unique_ptr<T>`.
+  auto config =
+      rust::cpp::std::unique_ptr<rust::cpp::cpp_processor::RunConfig>::build(
+          new ::cpp_processor::RunConfig{5});
 
   std::cout << "Starting LatencyAnalysis simulation..." << std::endl;
 
   // `stats` is a `std::unique_ptr`; Rust takes a reference to the object it owns.
-  processor.unwrap().run(receiver.unwrap(), *stats.cpp(), 5);
+  processor.unwrap().run(receiver.unwrap(), *stats.cpp(), config);
 
   rust::Impl<rust::cpp::cpp_stats::StatsAccumulator, rust::Inherent>::print_report(
       *stats.cpp());

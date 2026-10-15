@@ -122,6 +122,11 @@ fn check_round_trip_with_resolver(
     assert_eq!(parsed.spec.funcs, reparsed.spec.funcs);
     assert_eq!(parsed.spec.extern_cpp_funcs, reparsed.spec.extern_cpp_funcs);
     assert_eq!(parsed.spec.extern_cpp_impls, reparsed.spec.extern_cpp_impls);
+    assert_eq!(parsed.spec.cpp_templates, reparsed.spec.cpp_templates);
+    assert_eq!(
+        parsed.spec.cpp_template_homes,
+        reparsed.spec.cpp_template_homes
+    );
 
     (parsed.spec, reparsed.spec)
 }
@@ -462,6 +467,36 @@ type c++::std::map<i32, const c++::a::B*> {
             type c++::std::map<i32, const c++::a::B*> {
             }
         "##]],
+    );
+}
+
+#[test]
+fn reparse_cpp_template_home() {
+    let _ = check_round_trip(
+        r#"
+type<T> c++::std::unique_ptr<T> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+    unsafe fn get() const -> T*;
+}
+type c++::std::unique_ptr<i32> {
+}
+        "#,
+        expect![[r#"
+            type<T> c++::std::unique_ptr<T> {
+                #layout(size = 8, align = 8);
+                #trivially_relocatable;
+
+                unsafe fn get() const -> T*;
+            }
+
+            type c++::std::unique_ptr<i32> {
+                #layout(size = 8, align = 8);
+                #trivially_relocatable;
+
+                unsafe fn get() const -> i32*;
+            }
+        "#]],
     );
 }
 

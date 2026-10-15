@@ -10,12 +10,12 @@ use chumsky::{input::MapExtra, prelude::*};
 use itertools::{Either, Itertools};
 
 use zngur_def::{
-    AdditionalIncludes, ConflictSource, ConvertPanicToException, CppIndirection, CppTypePath,
-    Import, LayoutPolicy, Merge, MergeFailure, ModuleImport, Mutability, PrimitiveRustType,
-    RustPathAndGenerics, RustTrait, RustType, TypeVar, ZngurConstructor, ZngurCppConstructor,
-    ZngurCppField, ZngurCppFn, ZngurCppMethod, ZngurExternCppFn, ZngurExternCppImpl, ZngurField,
-    ZngurFn, ZngurMethod, ZngurMethodDetails, ZngurMethodReceiver, ZngurSpec, ZngurTrait,
-    ZngurType, ZngurVariant, ZngurWellknownTrait,
+    AdditionalIncludes, ConflictSource, ConvertPanicToException, CppIndirection, CppTemplateHome,
+    CppTypePath, Import, LayoutPolicy, Merge, MergeFailure, ModuleImport, Mutability,
+    PrimitiveRustType, RustPathAndGenerics, RustTrait, RustType, TypeVar, ZngurConstructor,
+    ZngurCppConstructor, ZngurCppField, ZngurCppFn, ZngurCppMethod, ZngurExternCppFn,
+    ZngurExternCppImpl, ZngurField, ZngurFn, ZngurMethod, ZngurMethodDetails, ZngurMethodReceiver,
+    ZngurSpec, ZngurTrait, ZngurType, ZngurVariant, ZngurWellknownTrait,
 };
 
 pub type Span = SimpleSpan<usize>;
@@ -753,6 +753,7 @@ impl ProcessedItem<'_> {
                     path: path.clone(),
                     crate_name: None,
                     cpp_types: vec![],
+                    cpp_template_homes: vec![],
                 });
                 r.module_import_spans.push(span);
             }
@@ -1224,6 +1225,7 @@ impl ProcessedItem<'_> {
                         ty: zngur_type,
                         source_id: ctx.source_id(),
                         span: ty.span,
+                        imported: false,
                     });
                 } else {
                     ctx.record_span(&zngur_type, ty.span.into_range());
@@ -1788,6 +1790,11 @@ struct ReportCounter {
     pub warnings: usize,
 }
 
+/// How many levels of `import`s are parsed: the module's imports, to find their `#crate`, `c++::`
+/// types and the C++ class templates they're the home of, and their imports, to find the explicit
+/// homes (`type<T> c++::...`) those modules see.
+const MAX_MODULE_IMPORT_DEPTH: usize = 2;
+
 /// The parse context. Holds references to the current source path and text and tracks
 /// errors and declaration spans. Also holds the [configuration provider](RustCfgProvider)
 /// and [report sink](ReportSink) used for this parse.
@@ -1796,9 +1803,8 @@ struct ParseContext<'this, 'source, 'cfg> {
     source: &'source str,
     source_id: SourceId,
     depth: usize,
-    /// Whether `import`ed modules are parsed (to find their `#crate` and `c++::` types). Only
-    /// for the module being generated, not for the imported modules themselves.
-    resolve_module_imports: bool,
+    /// How many levels of `import`ed modules are still parsed (see `MAX_MODULE_IMPORT_DEPTH`).
+    module_import_depth: usize,
     cfg_provider: &'cfg dyn RustCfgProvider,
     report_sink: &'cfg mut dyn ReportSink,
     /// All .zng files processed during parsing (main file + imports)
@@ -1826,7 +1832,7 @@ impl<'this, 'source, 'cfg> ParseContext<'this, 'source, 'cfg> {
             source_id,
             source,
             depth: 0,
-            resolve_module_imports: true,
+            module_import_depth: MAX_MODULE_IMPORT_DEPTH,
             cfg_provider: cfg,
             report_sink,
             processed_files,
@@ -1853,7 +1859,7 @@ impl<'this, 'source, 'cfg> ParseContext<'this, 'source, 'cfg> {
             source_id,
             source,
             depth: self.depth + 1,
-            resolve_module_imports: self.resolve_module_imports,
+            module_import_depth: self.module_import_depth,
             cfg_provider: self.cfg_provider,
             report_sink: self.report_sink,
             processed_files: self.processed_files.into_borrowed(),
@@ -1864,15 +1870,16 @@ impl<'this, 'source, 'cfg> ParseContext<'this, 'source, 'cfg> {
     }
 
     /// build a parse context for the top-level file of an `import`ed module, which is parsed
-    /// into its own spec (it's the top level of that module, but its own imports aren't parsed)
+    /// into its own spec (it's the top level of that module)
     fn nested_module<'borrowed, 'src>(
         &'borrowed mut self,
         path: &'src std::path::Path,
         source: &'src str,
     ) -> ParseContext<'borrowed, 'src, 'borrowed> {
+        let module_import_depth = self.module_import_depth.saturating_sub(1);
         let mut ctx = self.nested(path, source);
         ctx.depth = 0;
-        ctx.resolve_module_imports = false;
+        ctx.module_import_depth = module_import_depth;
         ctx
     }
 
@@ -2169,23 +2176,32 @@ impl<'a> ParsedZngFile<'a> {
                 continue;
             };
             let path = dirname.join(&import_path);
-            let imported = {
+            let (imported, imported_templates) = {
                 let mut module_ctx = ctx.nested_module(&path, &text);
                 let mut module = ZngurSpecBuilder::default();
                 Self::parse_into(&mut module, &mut module_ctx, resolver);
-                module.to_zngur(&mut module_ctx)
+                // Templates of C++ class templates (`type<T> c++::...`) declared in the imported
+                // module also apply to this module's instantiations. (Templates of Rust types
+                // stay local to their module.)
+                let cpp_templates: Vec<TemplateDef> = module
+                    .templates
+                    .iter()
+                    .filter(|t| matches!(t.ty.ty, RustType::Cpp(_)) && !t.imported)
+                    .cloned()
+                    .collect();
+                (module.to_zngur(&mut module_ctx), cpp_templates)
             };
-            // The paths of the Rust wrappers, which are generic for class templates (so all of
-            // a template's instantiations have the same path).
-            let mut cpp_types: Vec<Vec<String>> = vec![];
-            for ty in &imported.types {
-                if let RustType::Cpp(path) = &ty.ty
-                    && !cpp_types.contains(&path.path)
-                {
-                    cpp_types.push(path.path.clone());
-                }
-            }
-            if !cpp_types.is_empty() && imported.crate_name.is_none() {
+            let cpp_types: Vec<Vec<String>> = imported
+                .types
+                .iter()
+                .filter_map(|ty| match &ty.ty {
+                    RustType::Cpp(path) if path.generics.is_empty() => Some(path.path.clone()),
+                    _ => None,
+                })
+                .collect();
+            if (!cpp_types.is_empty() || !imported.cpp_template_homes.is_empty())
+                && imported.crate_name.is_none()
+            {
                 ctx.add_error_str(
                     &format!(
                         "imported module `{}` declares `c++::` types, so it needs a `#crate <name>` \
@@ -2196,9 +2212,16 @@ impl<'a> ParsedZngFile<'a> {
                     span,
                 );
             }
+            zngur
+                .templates
+                .extend(imported_templates.into_iter().map(|t| TemplateDef {
+                    imported: true,
+                    ..t
+                }));
             let module_import = &mut zngur.spec.imported_modules[index];
             module_import.crate_name = imported.crate_name;
             module_import.cpp_types = cpp_types;
+            module_import.cpp_template_homes = imported.cpp_template_homes;
         }
     }
     fn parse_into(
@@ -2235,7 +2258,7 @@ impl<'a> ParsedZngFile<'a> {
         if ctx.reports().errors > 0 {
             return;
         }
-        if ctx.resolve_module_imports {
+        if ctx.module_import_depth > 0 {
             Self::resolve_module_imports(zngur, first_new_module_import, ctx, resolver);
         }
 
@@ -2449,10 +2472,14 @@ impl<'a> ProcessedZngFile<'a> {
     }
 }
 
+#[derive(Clone)]
 struct TemplateDef {
     ty: ZngurType,
     source_id: SourceId,
     span: Span,
+    /// Whether the template comes from an imported module (only templates of C++ class templates
+    /// do), rather than from this one.
+    imported: bool,
 }
 
 #[derive(Default)]
@@ -2470,7 +2497,7 @@ impl ZngurSpecBuilder {
             mut spec,
             templates,
             imports: _,
-            module_import_spans: _,
+            module_import_spans,
         } = self;
         for ty in &mut spec.types {
             let mut template_locations = Vec::new();
@@ -2595,7 +2622,16 @@ impl ZngurSpecBuilder {
                 type_error(ctx, &ty.ty, &e);
             }
         }
-        check_cpp_templates(&spec, ctx);
+        let local_cpp_templates: Vec<&TemplateDef> = templates
+            .iter()
+            .filter(|t| matches!(t.ty.ty, RustType::Cpp(_)) && !t.imported)
+            .collect();
+        resolve_cpp_templates(&mut spec, &local_cpp_templates, &module_import_spans, ctx);
+        spec.cpp_templates = templates
+            .into_iter()
+            .filter(|t| matches!(t.ty.ty, RustType::Cpp(_)) && !t.imported)
+            .map(|t| t.ty)
+            .collect();
         spec
     }
 }
@@ -2616,17 +2652,89 @@ fn type_error(ctx: &mut ParseContext, ty: &RustType, message: &str) {
     );
 }
 
-/// Checks the instantiations of C++ class templates (`c++::` types with template arguments). All
-/// instantiations of a template are one generic Rust struct, which limits what they can be.
-fn check_cpp_templates(spec: &ZngurSpec, ctx: &mut ParseContext) {
-    let imported: Vec<&Vec<String>> = spec
-        .imported_modules
-        .iter()
-        .flat_map(|m| &m.cpp_types)
-        .collect();
-    // Template path -> (number of arguments, Rust types of the instantiations so far).
-    let mut templates: std::collections::HashMap<&[String], (usize, Vec<String>)> =
-        std::collections::HashMap::new();
+/// Works out the homes of the C++ class templates that this module instantiates or declares a
+/// template for (`spec.cpp_template_homes`), and checks their instantiations: each C++ class
+/// template is a Rust alias (in its home) that names one Rust struct per instantiation, which
+/// limits where instantiations can be declared and what they can be.
+fn resolve_cpp_templates(
+    spec: &mut ZngurSpec,
+    local_templates: &[&TemplateDef],
+    module_import_spans: &[Span],
+    ctx: &mut ParseContext,
+) {
+    let display = |path: &[String]| format!("c++::{}", path.join("::"));
+    // Template path -> the imported modules that are its home.
+    let mut imported_homes: Vec<(&[String], Vec<(usize, &CppTemplateHome)>)> = vec![];
+    for (index, module) in spec.imported_modules.iter().enumerate() {
+        for home in &module.cpp_template_homes {
+            match imported_homes
+                .iter_mut()
+                .find(|(p, _)| *p == home.path.as_slice())
+            {
+                Some((_, homes)) => homes.push((index, home)),
+                None => imported_homes.push((&home.path, vec![(index, home)])),
+            }
+        }
+    }
+    let import_name = |index: usize| spec.imported_modules[index].path.display().to_string();
+    for (path, homes) in &imported_homes {
+        if let [_, (second, _), ..] = homes.as_slice() {
+            ctx.add_error_str(
+                &format!(
+                    "imported modules `{}` and `{}` are both the home of `{}`; a C++ class \
+                     template can only have one home (declare `type<T> {}<...>` in a module that \
+                     both import)",
+                    import_name(homes[0].0),
+                    import_name(*second),
+                    display(path),
+                    display(path),
+                ),
+                module_import_spans
+                    .get(*second)
+                    .copied()
+                    .unwrap_or_else(|| (0..0).into()),
+            );
+        }
+    }
+    let imported_home = |path: &[String]| {
+        imported_homes
+            .iter()
+            .find(|(p, _)| *p == path)
+            .map(|(_, homes)| homes[0])
+    };
+
+    let mut homes = vec![];
+    for template in local_templates {
+        let RustType::Cpp(path) = &template.ty.ty else {
+            continue;
+        };
+        if homes.iter().any(|h: &CppTemplateHome| h.path == path.path) {
+            continue;
+        }
+        if let Some((index, _)) = imported_home(&path.path) {
+            let span = (template.source_id, template.span.into_range());
+            let message = format!(
+                "`{}` already has a home: imported module `{}`",
+                display(&path.path),
+                import_name(index)
+            );
+            ctx.add_fatal_report(
+                Report::build(ReportKind::Error, span.clone())
+                    .with_message(&message)
+                    .with_label(Label::new(span).with_message(&message))
+                    .finish(),
+            );
+            continue;
+        }
+        homes.push(CppTemplateHome {
+            path: path.path.clone(),
+            arity: path.generics.len(),
+            explicit: true,
+        });
+    }
+
+    // Template path -> number of template arguments and Rust types of its instantiations so far.
+    let mut instantiations: Vec<(&[String], usize, Vec<String>)> = vec![];
     for ty_def in &spec.types {
         let RustType::Cpp(path) = &ty_def.ty else {
             continue;
@@ -2634,46 +2742,94 @@ fn check_cpp_templates(spec: &ZngurSpec, ctx: &mut ParseContext) {
         if path.generics.is_empty() {
             continue;
         }
-        if imported.contains(&&path.path) {
+        let home = homes
+            .iter()
+            .find(|h| h.path == path.path)
+            .or_else(|| imported_home(&path.path).map(|(_, h)| h));
+        let first_arity = instantiations
+            .iter()
+            .find(|(p, _, _)| *p == path.path.as_slice())
+            .map(|(_, arity, _)| *arity);
+        let arity = home
+            .map(|h| h.arity)
+            .or(first_arity)
+            .unwrap_or(path.generics.len());
+        if arity != path.generics.len() {
             type_error(
                 ctx,
                 &ty_def.ty,
                 &format!(
-                    "`c++::{}` is declared in an imported module, so its instantiations must be \
-                     declared there too",
-                    path.path.join("::")
-                ),
-            );
-            continue;
-        }
-        let (arity, instantiations) = templates
-            .entry(&path.path)
-            .or_insert((path.generics.len(), vec![]));
-        if *arity != path.generics.len() {
-            type_error(
-                ctx,
-                &ty_def.ty,
-                &format!(
-                    "every instantiation of `c++::{}` must have the same number of template \
-                     arguments as its first instantiation, which has {arity}",
-                    path.path.join("::")
+                    "every instantiation of `{}` must have the same number of template \
+                     arguments as its template and its other instantiations, which have {arity}",
+                    display(&path.path)
                 ),
             );
             continue;
         }
         // `const T&` and `const T*` arguments are the same `CppPtr` in Rust.
         let rust_type = ty_def.ty.to_string();
-        if instantiations.contains(&rust_type) {
-            type_error(
-                ctx,
-                &ty_def.ty,
-                "another instantiation of this C++ class template is the same Rust type (C++ \
-                 pointers and references to the same type are the same `CppPtr` in Rust)",
-            );
+        match instantiations
+            .iter_mut()
+            .find(|(p, _, _)| *p == path.path.as_slice())
+        {
+            Some((_, _, seen)) if seen.contains(&rust_type) => {
+                type_error(
+                    ctx,
+                    &ty_def.ty,
+                    "another instantiation of this C++ class template is the same Rust type (C++ \
+                     pointers and references to the same type are the same `CppPtr` in Rust)",
+                );
+                continue;
+            }
+            Some((_, _, seen)) => seen.push(rust_type),
+            None => instantiations.push((&path.path, arity, vec![rust_type])),
+        }
+        if homes.iter().any(|h| h.path == path.path) {
             continue;
         }
-        instantiations.push(rust_type);
+        match imported_home(&path.path) {
+            // The instantiation's struct implements the home's trait, so (like Rust's orphan
+            // rule) one of the template arguments must be declared in this module.
+            Some((index, home)) if home.explicit => {
+                // Only `c++::` types declared here are local structs (builtins aren't).
+                let has_local_argument = path.generics.iter().any(|arg| {
+                    matches!(arg, RustType::Cpp(_)) && spec.types.iter().any(|t| &t.ty == arg)
+                });
+                if !has_local_argument {
+                    type_error(
+                        ctx,
+                        &ty_def.ty,
+                        &format!(
+                            "this instantiation of `{}`, whose home is imported module `{}`, can \
+                             only be declared there or in a module that declares one of its \
+                             template arguments (like Rust's orphan rule)",
+                            display(&path.path),
+                            import_name(index)
+                        ),
+                    );
+                }
+            }
+            Some((index, _)) => type_error(
+                ctx,
+                &ty_def.ty,
+                &format!(
+                    "`{}` is also instantiated in imported module `{}`; to share a C++ class \
+                     template between modules, declare `type<T> {}<...>` in one of them (its \
+                     home)",
+                    display(&path.path),
+                    import_name(index),
+                    display(&path.path),
+                ),
+            ),
+            // No home in sight: this module is the (implicit) home.
+            None => homes.push(CppTemplateHome {
+                path: path.path.clone(),
+                arity,
+                explicit: false,
+            }),
+        }
     }
+    spec.cpp_template_homes = homes;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -3470,16 +3626,19 @@ fn type_item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngParser
                 .allow_trailing()
                 .collect()
                 .delimited_by(just(Token::AngleOpen), just(Token::AngleClose))
-                .try_map_with(|vars, e: &mut MapExtra<_, ZngParserExtra>| {
-                    if !e.state().unstable_features.template_types {
-                        Err(Rich::custom(e.span(), "Template types are unstable. Enable them by using `#unstable(template_types)` at the top of the file."))
-                    } else {
-                        Ok(vars)
-                    }
-                })
                 .or_not(),
         )
         .then(spanned(rust_type()))
+        // Templates of C++ class templates (`type<T> c++::std::unique_ptr<T>`) are stable;
+        // templates of Rust types aren't yet.
+        .try_map_with(|(type_vars, ty), e: &mut MapExtra<_, ZngParserExtra>| {
+            let is_cpp = matches!(&ty.inner, ParsedRustType::Adt(pg) if pg.path.start == ParsedPathStart::Cpp);
+            if type_vars.is_some() && !is_cpp && !e.state().unstable_features.template_types {
+                Err(Rich::custom(e.span(), "Template types are unstable. Enable them by using `#unstable(template_types)` at the top of the file."))
+            } else {
+                Ok((type_vars, ty))
+            }
+        })
         .then(
             spanned(inner_type_item())
                 .repeated()

@@ -8,13 +8,19 @@ import "packet.zng";
 #include <stats.h>
 "
 
+// This module is the home of `std::unique_ptr`: modules that import it share its Rust alias
+// (`generated::std::unique_ptr<T>`), and these members are the defaults for every instantiation,
+// including theirs (see processor.zng).
+type<T> c++::std::unique_ptr<T> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+    unsafe fn get() const -> T*;
+}
+
 // Rust only refers to the C++ object, which is owned through a `std::unique_ptr`.
 type c++::cpp_stats::StatsAccumulator {}
 
-type c++::std::unique_ptr<c++::cpp_stats::StatsAccumulator> {
-    #layout(size = 8, align = 8);
-    #trivially_relocatable;
-}
+type c++::std::unique_ptr<c++::cpp_stats::StatsAccumulator> {}
 
 extern "C++" {
     impl c++::cpp_stats::StatsAccumulator {

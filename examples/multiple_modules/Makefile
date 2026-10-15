@@ -1,8 +1,8 @@
 EXAMPLES_CARGO_PROFILE ?= debug
 ZNGUR_CLI = cd ../../zngur-cli && cargo run
 
-a.out: main.cpp aggregation.a packet.zng.h receiver.zng.h aggregation/aggregation.zng.h processor.zng.h zngur.h ../../target/$(EXAMPLES_CARGO_PROFILE)/libexample_multiple_modules.a
-	${CXX} -std=c++11 -Werror -I. -Iaggregation main.cpp aggregation.a -g -L ../../target/$(EXAMPLES_CARGO_PROFILE)/ -l example_multiple_modules
+a.out: main.cpp aggregation.a processor.a packet.zng.h receiver.zng.h aggregation/aggregation.zng.h processor.zng.h zngur.h ../../target/$(EXAMPLES_CARGO_PROFILE)/libexample_multiple_modules.a
+	${CXX} -std=c++11 -Werror -I. -Iaggregation -Iprocessor main.cpp aggregation.a processor.a -g -L ../../target/$(EXAMPLES_CARGO_PROFILE)/ -l example_multiple_modules
 
 ../../target/$(EXAMPLES_CARGO_PROFILE)/libexample_multiple_modules.a:
 	cargo build --profile $(EXAMPLES_CARGO_PROFILE:debug=dev)
@@ -11,6 +11,10 @@ aggregation.a: aggregation/impls.cpp aggregation/generated.cpp aggregation/aggre
 	${CXX} -c -std=c++11 -Werror -I. -Iaggregation -o aggregation/generated.o aggregation/generated.cpp
 	${CXX} -c -std=c++11 -Werror -I. -Iaggregation -o aggregation/impls.o aggregation/impls.cpp
 	ld -r -o aggregation.a aggregation/impls.o aggregation/generated.o
+
+processor.a: processor/generated.cpp processor/run_config.h processor.zng.h zngur.h
+	${CXX} -c -std=c++11 -Werror -I. -Iaggregation -Iprocessor -o processor/generated.o processor/generated.cpp
+	ld -r -o processor.a processor/generated.o
 	
 
 packet.zng.h packet/src/packet.zng.rs: packet/packet.zng
@@ -31,7 +35,7 @@ aggregation/aggregation.zng.h aggregation/src/aggregation.zng.rs aggregation/gen
 		--rs-file=../examples/multiple_modules/aggregation/src/aggregation.zng.rs \
 		--crate-name "aggregation"
 
-processor.zng.h processor/src/processor.zng.rs: processor/processor.zng receiver.zng.h aggregation/aggregation.zng.h
+processor.zng.h processor/src/processor.zng.rs processor/generated.cpp: processor/processor.zng receiver.zng.h aggregation/aggregation.zng.h
 	${ZNGUR_CLI} g ../examples/multiple_modules/processor/processor.zng \
 		--h-file=../examples/multiple_modules/processor.zng.h \
 		--rs-file=../examples/multiple_modules/processor/src/processor.zng.rs \
@@ -46,4 +50,4 @@ run: a.out
 	./a.out
 
 clean:
-	rm -f *.zng.h aggregation/*.zng.h packet/src/*.zng.rs receiver/src/*.zng.rs aggregation/generated.cpp aggregation/src/*.zng.rs aggregation/*.o processor/src/*.zng.rs zngur.h a.out *.o *.a
+	rm -f *.zng.h aggregation/*.zng.h packet/src/*.zng.rs receiver/src/*.zng.rs aggregation/generated.cpp aggregation/src/*.zng.rs aggregation/*.o processor/src/*.zng.rs processor/generated.cpp processor/*.o zngur.h a.out *.o *.a

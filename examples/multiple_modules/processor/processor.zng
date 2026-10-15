@@ -1,10 +1,27 @@
 import "receiver.zng";
 import "../aggregation/aggregation.zng";
 
+#cpp_additional_includes "
+#include <run_config.h>
+"
+
+type c++::cpp_processor::RunConfig {
+    field const packets (type = u32);
+}
+
+// The home of `std::unique_ptr` is aggregation.zng, which gives this instantiation its layout and
+// `get()`. This module can declare it because it declares `RunConfig` (like Rust's orphan rule).
+type c++::std::unique_ptr<c++::cpp_processor::RunConfig> {}
+
 type crate::Processor {
     #layout(size = 0, align = 1);
     fn new() -> crate::Processor;
-    fn run(&self, &mut receiver::Receiver, &mut c++::cpp_stats::StatsAccumulator, u32);
+    fn run(
+        &self,
+        &mut receiver::Receiver,
+        &mut c++::cpp_stats::StatsAccumulator,
+        &c++::std::unique_ptr<c++::cpp_processor::RunConfig>,
+    );
 }
 
 // This isn't necessary for the example but we want to test that specialization

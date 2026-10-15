@@ -12,3 +12,4 @@ crate-type = ["rlib"]
 [dependencies]
 receiver = { path = "../receiver" }
 aggregation = { path = "../aggregation" }
+zngur-lib = { path = "../../../zngur-lib" }

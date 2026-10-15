@@ -182,6 +182,10 @@ pub struct RustFile {
     pub text: String,
     pub panic_to_exception: bool,
     pub mangling_base: String,
+    /// The Rust structs of instantiations of C++ class templates, by the Rust type they're
+    /// named by (e.g. `std::unique_ptr::<a::B>`, an alias). Inherent `impl` blocks must name the
+    /// struct itself.
+    pub impl_targets: std::collections::HashMap<String, String>,
 }
 
 impl RustFile {
@@ -394,6 +398,7 @@ macro_rules! __zngur_assert_field_offset {
             .to_owned(),
             panic_to_exception: false,
             mangling_base: mangling_base.to_owned(),
+            impl_targets: Default::default(),
         }
     }
 }
@@ -582,6 +587,12 @@ impl CoroSupport {
 impl RustFile {
     pub(crate) fn mangle_name(&self, name: &str) -> String {
         mangle_name(name, &self.mangling_base)
+    }
+
+    /// The type to name in an inherent `impl` block for `ty` (see `impl_targets`).
+    fn impl_target(&self, ty: &RustType) -> String {
+        let ty = ty.to_string();
+        self.impl_targets.get(&ty).cloned().unwrap_or(ty)
     }
 
     fn call_cpp_function(&mut self, name: &str, inputs: usize) {
@@ -1053,7 +1064,7 @@ pub extern "C" fn {mn}(i: *const u8) -> usize {{ unsafe {{
                     w!(self, r#"type {name} = {ty};"#);
                 }
             }
-            None => w!(self, r#"impl {owner} {{"#),
+            None => w!(self, r#"impl {} {{"#, self.impl_target(owner)),
         }
         for (mn, method) in mangled_names.iter().zip(methods) {
             if tr.is_none() {
@@ -1146,10 +1157,11 @@ unsafe extern "C" {{ fn {mangled_name}("#
             w!(self, "i{n}: *mut u8, ");
         }
         wln!(self, r#"o: *mut u8); }}"#);
+        let target = self.impl_target(owner);
         w!(
             self,
             r#"
-impl {owner} {{
+impl {target} {{
 #[allow(non_snake_case, clippy::too_many_arguments)]
 pub {}fn {rust_name}("#,
             if is_safe { "" } else { "unsafe " }

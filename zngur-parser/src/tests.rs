@@ -1,7 +1,10 @@
 use std::panic::catch_unwind;
 
 use expect_test::{Expect, expect};
-use zngur_def::{LayoutPolicy, RustPathAndGenerics, RustType, ZngurSpec};
+use zngur_def::{
+    CppIndirection, CppTemplateHome, LayoutPolicy, Mutability, PrimitiveRustType,
+    RustPathAndGenerics, RustType, ZngurSpec,
+};
 
 use crate::{
     DefaultImportResolver, EntityPath, ImportResolver, ParsedZngFile, ReportSink, Scope,
@@ -2347,12 +2350,12 @@ type c++::std::vector<i32, c++::MyAlloc> {
 }
 "#,
         expect![[r#"
-            Error: every instantiation of `c++::std::vector` must have the same number of template arguments as its first instantiation, which has 1
+            Error: every instantiation of `c++::std::vector` must have the same number of template arguments as its template and its other instantiations, which have 1
                ╭─[ test.zng:5:6 ]
                │
              5 │ type c++::std::vector<i32, c++::MyAlloc> {
                │      ─────────────────┬─────────────────  
-               │                       ╰─────────────────── every instantiation of `c++::std::vector` must have the same number of template arguments as its first instantiation, which has 1
+               │                       ╰─────────────────── every instantiation of `c++::std::vector` must have the same number of template arguments as its template and its other instantiations, which have 1
             ───╯
         "#]],
     );
@@ -2381,7 +2384,7 @@ type c++::std::pair<const i32*> {
 }
 
 #[test]
-fn instantiating_an_imported_cpp_template_is_rejected() {
+fn cpp_template_implicitly_homed_in_an_import_cant_be_instantiated() {
     let resolver = MockFilesystem::new(vec![(
         "./bar.zng",
         r#"
@@ -2403,12 +2406,196 @@ type c++::std::unique_ptr<i64> {
 }
 "#,
         expect![[r#"
-            Error: `c++::std::unique_ptr` is declared in an imported module, so its instantiations must be declared there too
+            Error: `c++::std::unique_ptr` is also instantiated in imported module `./bar.zng`; to share a C++ class template between modules, declare `type<T> c++::std::unique_ptr<...>` in one of them (its home)
                ╭─[ test.zng:4:6 ]
                │
              4 │ type c++::std::unique_ptr<i64> {
                │      ────────────┬────────────  
-               │                  ╰────────────── `c++::std::unique_ptr` is declared in an imported module, so its instantiations must be declared there too
+               │                  ╰────────────── `c++::std::unique_ptr` is also instantiated in imported module `./bar.zng`; to share a C++ class template between modules, declare `type<T> c++::std::unique_ptr<...>` in one of them (its home)
+            ───╯
+        "#]],
+        &resolver,
+    );
+}
+
+fn unique_ptr_home() -> CppTemplateHome {
+    CppTemplateHome {
+        path: vec!["std".to_owned(), "unique_ptr".to_owned()],
+        arity: 1,
+        explicit: true,
+    }
+}
+
+const BAR_UNIQUE_PTR_HOME: &str = r#"
+#crate bar_bindings
+
+type<T> c++::std::unique_ptr<T> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+    unsafe fn get() const -> T*;
+}
+"#;
+
+#[test]
+fn cpp_template_declares_a_local_home_with_defaults() {
+    let parsed = parse_str(
+        r#"
+type<T> c++::std::unique_ptr<T> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+    unsafe fn get() const -> T*;
+}
+
+type c++::std::unique_ptr<i32> {
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    assert_eq!(parsed.spec.cpp_template_homes, vec![unique_ptr_home()]);
+    assert_eq!(parsed.spec.cpp_templates.len(), 1);
+    let [instantiation] = parsed.spec.types.as_slice() else {
+        panic!("expected one type");
+    };
+    assert!(instantiation.trivially_relocatable);
+    assert_eq!(instantiation.cpp_methods.len(), 1);
+    assert_eq!(
+        instantiation.cpp_methods[0].output,
+        RustType::CppPtr(
+            Mutability::Mut,
+            CppIndirection::Pointer,
+            Box::new(RustType::Primitive(PrimitiveRustType::Int(32)))
+        )
+    );
+}
+
+#[test]
+fn cpp_template_without_a_visible_home_is_homed_implicitly() {
+    let parsed = parse_str(
+        r#"
+type c++::std::unique_ptr<i32> {
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    assert_eq!(
+        parsed.spec.cpp_template_homes,
+        vec![CppTemplateHome {
+            explicit: false,
+            ..unique_ptr_home()
+        }]
+    );
+}
+
+#[test]
+fn imported_cpp_template_home_applies_its_defaults() {
+    let resolver = MockFilesystem::new(vec![("./bar.zng", BAR_UNIQUE_PTR_HOME)]);
+    let parsed = parse_str_with_resolver(
+        r#"
+import "./bar.zng";
+
+type c++::a::B {
+}
+
+type c++::std::unique_ptr<c++::a::B> {
+}
+"#,
+        NullCfg,
+        &resolver,
+        |_| {},
+    );
+    let [module] = parsed.spec.imported_modules.as_slice() else {
+        panic!("expected one imported module");
+    };
+    assert_eq!(module.cpp_template_homes, vec![unique_ptr_home()]);
+    // Neither the template nor its home are this module's.
+    assert!(parsed.spec.cpp_template_homes.is_empty());
+    assert!(parsed.spec.cpp_templates.is_empty());
+    let instantiation = &parsed.spec.types[1];
+    assert!(instantiation.trivially_relocatable);
+    assert_eq!(instantiation.cpp_methods.len(), 1);
+    assert_eq!(
+        instantiation.cpp_methods[0].output,
+        RustType::CppPtr(
+            Mutability::Mut,
+            CppIndirection::Pointer,
+            Box::new(parsed.spec.types[0].ty.clone())
+        )
+    );
+}
+
+#[test]
+fn cpp_template_instantiation_without_a_local_argument_is_rejected() {
+    let resolver = MockFilesystem::new(vec![("./bar.zng", BAR_UNIQUE_PTR_HOME)]);
+    check_import_fail(
+        r#"
+import "./bar.zng";
+
+type i32 {
+    #layout(size = 4, align = 4);
+}
+
+type c++::std::unique_ptr<i32> {
+}
+"#,
+        expect![[r#"
+            Error: this instantiation of `c++::std::unique_ptr`, whose home is imported module `./bar.zng`, can only be declared there or in a module that declares one of its template arguments (like Rust's orphan rule)
+               ╭─[ test.zng:8:6 ]
+               │
+             8 │ type c++::std::unique_ptr<i32> {
+               │      ────────────┬────────────  
+               │                  ╰────────────── this instantiation of `c++::std::unique_ptr`, whose home is imported module `./bar.zng`, can only be declared there or in a module that declares one of its template arguments (like Rust's orphan rule)
+            ───╯
+        "#]],
+        &resolver,
+    );
+}
+
+#[test]
+fn cpp_template_with_an_imported_home_cant_be_declared_again() {
+    let resolver = MockFilesystem::new(vec![("./bar.zng", BAR_UNIQUE_PTR_HOME)]);
+    check_import_fail(
+        r#"
+import "./bar.zng";
+
+type<T> c++::std::unique_ptr<T> {
+}
+"#,
+        expect![[r#"
+            Error: `c++::std::unique_ptr` already has a home: imported module `./bar.zng`
+               ╭─[ test.zng:4:9 ]
+               │
+             4 │ type<T> c++::std::unique_ptr<T> {
+               │         ───────────┬───────────  
+               │                    ╰───────────── `c++::std::unique_ptr` already has a home: imported module `./bar.zng`
+            ───╯
+        "#]],
+        &resolver,
+    );
+}
+
+#[test]
+fn cpp_template_with_two_imported_homes_is_rejected() {
+    let resolver = MockFilesystem::new(vec![
+        ("./bar.zng", BAR_UNIQUE_PTR_HOME.to_owned()),
+        (
+            "./baz.zng",
+            BAR_UNIQUE_PTR_HOME.replace("bar_bindings", "baz_bindings"),
+        ),
+    ]);
+    check_import_fail(
+        r#"
+import "./bar.zng";
+import "./baz.zng";
+"#,
+        expect![[r#"
+            Error: imported modules `./bar.zng` and `./baz.zng` are both the home of `c++::std::unique_ptr`; a C++ class template can only have one home (declare `type<T> c++::std::unique_ptr<...>` in a module that both import)
+               ╭─[ test.zng:3:1 ]
+               │
+             3 │ import "./baz.zng";
+               │ ─────────┬─────────  
+               │          ╰─────────── imported modules `./bar.zng` and `./baz.zng` are both the home of `c++::std::unique_ptr`; a C++ class template can only have one home (declare `type<T> c++::std::unique_ptr<...>` in a module that both import)
             ───╯
         "#]],
         &resolver,

@@ -54,19 +54,19 @@ pub struct ZngurExternCppImpl {
     pub methods: Vec<ZngurMethod>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZngurConstructor {
     pub inputs: Vec<(String, RustType)>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZngurVariant {
     pub name: String,
     pub fields: Vec<ZngurField>,
     pub exhaustive: bool,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZngurField {
     pub name: String,
     pub ty: RustType,
@@ -140,7 +140,7 @@ impl LayoutPolicy {
     pub const ZERO_SIZED_TYPE: Self = LayoutPolicy::StackAllocated { size: 0, align: 1 };
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZngurMethodDetails {
     pub data: ZngurMethod,
     pub use_path: Option<String>,
@@ -148,7 +148,7 @@ pub struct ZngurMethodDetails {
     pub cpp_name: Option<String>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ZngurType {
     pub ty: RustType,
     /// Required for Rust types. For C++ (`c++::`) types, Rust holds them by value if they have a
@@ -332,15 +332,42 @@ pub struct ModuleImport {
     pub path: std::path::PathBuf,
     /// The `#crate` of the imported module, if it has one.
     pub crate_name: Option<String>,
-    /// The `c++::` types that the imported module declares (their paths, without `c++::`). Their
-    /// Rust wrappers live at `::<crate_name>::generated::<path>`.
+    /// The `c++::` types that the imported module declares (their paths, without `c++::`), other
+    /// than instantiations of C++ class templates. Their Rust wrappers live at
+    /// `::<crate_name>::generated::<path>`.
     pub cpp_types: Vec<Vec<String>>,
+    /// The C++ class templates whose home is the imported module (see
+    /// [`ZngurSpec::cpp_template_homes`]).
+    pub cpp_template_homes: Vec<CppTemplateHome>,
+}
+
+/// A C++ class template whose home is a module: the module that defines the Rust alias for its
+/// instantiations (`pub type unique_ptr<T> = <T as __ZngurCppTemplate_unique_ptr>::Type;`), and
+/// the trait through which each instantiation names its Rust struct.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CppTemplateHome {
+    /// The path of the template, without `c++::` (e.g. `["std", "unique_ptr"]`).
+    pub path: Vec<String>,
+    /// The number of template arguments.
+    pub arity: usize,
+    /// Whether the home declares a template (`type<T> c++::...`) for it, rather than just being
+    /// the only module that instantiates it. Only explicit homes can be shared: other modules that
+    /// import them can declare instantiations of the template too.
+    pub explicit: bool,
 }
 
 #[derive(Debug, Default)]
 pub struct ZngurSpec {
     pub imported_modules: Vec<ModuleImport>,
     pub types: Vec<ZngurType>,
+    /// Templates of C++ class templates (`type<T> c++::std::unique_ptr<T> { ... }`) declared in
+    /// this module. Their members are defaults for every instantiation, including those in modules
+    /// that import this one, and this module is the template's home.
+    pub cpp_templates: Vec<ZngurType>,
+    /// The C++ class templates whose home is this module: those it declares a template for, and
+    /// those it instantiates without a template being declared in it or a module it imports.
+    /// Computed by the parser.
+    pub cpp_template_homes: Vec<CppTemplateHome>,
     pub traits: IndexMap<RustTrait, ZngurTrait>,
     pub funcs: Vec<ZngurFn>,
     /// Free C++ functions that Rust can call, declared in `c++::` scopes.
@@ -458,6 +485,38 @@ pub enum CppIndirection {
 
 impl RustType {
     pub const UNIT: Self = RustType::Tuple(Vec::new());
+
+    /// The type variables in `self` (e.g. `T` in the template `c++::std::unique_ptr<T>`), in order
+    /// of appearance, without duplicates.
+    pub fn type_vars(&self) -> Vec<&TypeVar> {
+        fn collect<'a>(ty: &'a RustType, out: &mut Vec<&'a TypeVar>) {
+            let all = |tys: &'a [RustType], out: &mut Vec<&'a TypeVar>| {
+                tys.iter().for_each(|t| collect(t, out))
+            };
+            match ty {
+                RustType::TypeVar(v) => {
+                    if !out.contains(&v) {
+                        out.push(v);
+                    }
+                }
+                RustType::Ref(_, t)
+                | RustType::Raw(_, t)
+                | RustType::Boxed(t)
+                | RustType::Slice(t)
+                | RustType::CppPtr(_, _, t) => collect(t, out),
+                RustType::Tuple(tys) => all(tys, out),
+                RustType::Adt(pg) => {
+                    all(&pg.generics, out);
+                    pg.named_generics.iter().for_each(|(_, t)| collect(t, out));
+                }
+                RustType::Cpp(path) => all(&path.generics, out),
+                RustType::Primitive(_) | RustType::Dyn(..) | RustType::Impl(..) => {}
+            }
+        }
+        let mut out = vec![];
+        collect(self, &mut out);
+        out
+    }
 
     /// The C++ spelling of a `c++::` type or of one of its template arguments, e.g. `::a::B`,
     /// `::std::unique_ptr< ::a::B >` or `const int32_t*`. `Err` explains why `self` can't be a

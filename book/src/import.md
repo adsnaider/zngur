@@ -217,6 +217,10 @@ pub use generated::*;
 (`with_crate_name`) if that's given too. An imported module that declares `c++::` types without a
 `#crate` is an error.
 
+Instantiations of C++ class templates (`c++::std::unique_ptr<...>`) follow their own rules, so that
+each template has one Rust alias: see
+[C++ class templates across modules](./call_cpp_from_rust/cpp_templates.md#across-modules).
+
 ## Note: Build System Integration
 
 This feature requires significantly more involvement with the build system

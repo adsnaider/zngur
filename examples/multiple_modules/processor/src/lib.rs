@@ -1,6 +1,9 @@
 pub use aggregation::StatsAccumulator;
 pub use receiver::Receiver;
 
+use generated::cpp_processor::RunConfig;
+use generated::std::unique_ptr;
+
 pub struct Processor;
 
 impl Processor {
@@ -12,9 +15,14 @@ impl Processor {
         &self,
         receiver: &mut receiver::Receiver,
         stats: &mut aggregation::StatsAccumulator,
-        count: u32,
+        config: &unique_ptr<RunConfig>,
     ) {
-        for _ in 0..count {
+        // SAFETY: `config` owns a valid `RunConfig`, which outlives this call.
+        let packets = unsafe {
+            let config = unique_ptr::<RunConfig>::get(config.as_ref());
+            *RunConfig::packets(config.into()).as_ref().unwrap()
+        };
+        for _ in 0..packets {
             let packet = receiver.next_packet();
             stats.add_packet(packet);
         }
