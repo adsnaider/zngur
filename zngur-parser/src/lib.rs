@@ -11,11 +11,11 @@ use itertools::{Either, Itertools};
 
 use zngur_def::{
     AdditionalIncludes, ConflictSource, ConvertPanicToException, CppHeapAllocated, CppIndirection,
-    CppRef, CppStackOwned, Import, LayoutPolicy, Merge, MergeFailure, ModuleImport, Mutability,
-    PrimitiveRustType, RustPathAndGenerics, RustTrait, RustType, TypeVar, ZngurConstructor,
-    ZngurCppConstructor, ZngurCppField, ZngurCppFn, ZngurCppMethod, ZngurExternCppFn,
-    ZngurExternCppImpl, ZngurField, ZngurFn, ZngurMethod, ZngurMethodDetails, ZngurMethodReceiver,
-    ZngurSpec, ZngurTrait, ZngurType, ZngurVariant, ZngurWellknownTrait,
+    CppRef, CppStackOwned, CppTypePath, Import, LayoutPolicy, Merge, MergeFailure, ModuleImport,
+    Mutability, PrimitiveRustType, RustPathAndGenerics, RustTrait, RustType, TypeVar,
+    ZngurConstructor, ZngurCppConstructor, ZngurCppField, ZngurCppFn, ZngurCppMethod,
+    ZngurExternCppFn, ZngurExternCppImpl, ZngurField, ZngurFn, ZngurMethod, ZngurMethodDetails,
+    ZngurMethodReceiver, ZngurSpec, ZngurTrait, ZngurType, ZngurVariant, ZngurWellknownTrait,
 };
 
 pub type Span = SimpleSpan<usize>;
@@ -525,8 +525,57 @@ fn contains_cpp_ptr(ty: &RustType) -> bool {
             .iter()
             .chain(pg.named_generics.iter().map(|(_, t)| t))
             .any(contains_cpp_ptr),
+        RustType::Cpp(path) => path.generics.iter().any(contains_cpp_ptr),
         _ => false,
     }
+}
+
+/// The C++ spelling of a `c++::` type or of one of its template arguments, e.g. `::a::B`,
+/// `::std::unique_ptr< ::a::B >` or `const int32_t*`. `Err` explains why `ty` can't be a C++
+/// template argument.
+fn cpp_spelling(ty: &RustType) -> Result<String, String> {
+    Ok(match ty {
+        RustType::Cpp(path) => {
+            let name = format!("::{}", path.path.join("::"));
+            if path.generics.is_empty() {
+                name
+            } else {
+                let args = path
+                    .generics
+                    .iter()
+                    .map(cpp_spelling)
+                    .collect::<Result<Vec<_>, _>>()?;
+                // Spaces, so that `<::` and `>>` are never digraphs or shifts, even in C++03.
+                format!("{name}< {} >", args.join(", "))
+            }
+        }
+        RustType::Primitive(p) => match p {
+            PrimitiveRustType::Int(n) => format!("::int{n}_t"),
+            PrimitiveRustType::Uint(n) => format!("::uint{n}_t"),
+            PrimitiveRustType::Float(32) => "float".to_owned(),
+            PrimitiveRustType::Float(64) => "double".to_owned(),
+            PrimitiveRustType::Usize => "::size_t".to_owned(),
+            PrimitiveRustType::Bool => "bool".to_owned(),
+            p => return Err(format!("`{p}` has no C++ equivalent")),
+        },
+        RustType::CppPtr(m, indirection, t) => {
+            let constness = match m {
+                Mutability::Not => "const ",
+                Mutability::Mut => "",
+            };
+            let sigil = match indirection {
+                CppIndirection::Pointer => "*",
+                CppIndirection::Reference => "&",
+            };
+            format!("{constness}{}{sigil}", cpp_spelling(t)?)
+        }
+        ty => {
+            return Err(format!(
+                "`{ty}` can't be a C++ template argument (only `c++::` types, builtins and C++ \
+                 pointers and references can)"
+            ));
+        }
+    })
 }
 
 /// The C++ type name of a `#cpp_heap_allocated`, `#cpp_ref` or `#cpp_stack_owned` directive on
@@ -539,7 +588,13 @@ fn cpp_type_name(
 ) -> Option<String> {
     match (explicit, ty) {
         (Some(name), _) => Some(name.to_owned()),
-        (None, RustType::Cpp(segs)) => Some(format!("::{}", segs.join("::"))),
+        (None, ty @ RustType::Cpp(_)) => match cpp_spelling(ty) {
+            Ok(name) => Some(name),
+            Err(e) => {
+                ctx.add_error_str(&e, span);
+                None
+            }
+        },
         (None, _) => {
             ctx.add_error_str(
                 "the C++ type name can only be omitted for `c++::` types, whose path is the name",
@@ -1493,7 +1548,11 @@ impl ParsedRustType<'_> {
             ParsedRustType::Adt(s) => match scope.as_type_var(&s) {
                 Some(v) => RustType::TypeVar(v),
                 None => match scope.resolve_path(s.path.clone()) {
-                    EntityPath::Cpp(segs) => RustType::Cpp(segs),
+                    // Named generics on `c++::` paths are rejected by the grammar.
+                    EntityPath::Cpp(path) => RustType::Cpp(CppTypePath {
+                        path,
+                        generics: s.generics.into_iter().map(|x| x.to_zngur(scope)).collect(),
+                    }),
                     EntityPath::Rust(_) => RustType::Adt(s.to_zngur(scope)),
                 },
             },
@@ -2251,14 +2310,16 @@ impl<'a> ParsedZngFile<'a> {
                 Self::parse_into(&mut module, &mut module_ctx, resolver);
                 module.to_zngur(&mut module_ctx)
             };
-            let cpp_types: Vec<Vec<String>> = imported
-                .types
-                .iter()
-                .filter_map(|ty| match &ty.ty {
-                    RustType::Cpp(segs) => Some(segs.clone()),
-                    _ => None,
-                })
-                .collect();
+            // The paths of the Rust wrappers, which are generic for class templates (so all of
+            // a template's instantiations have the same path).
+            let mut cpp_types: Vec<Vec<String>> = vec![];
+            for ty in &imported.types {
+                if let RustType::Cpp(path) = &ty.ty
+                    && !cpp_types.contains(&path.path)
+                {
+                    cpp_types.push(path.path.clone());
+                }
+            }
             if !cpp_types.is_empty() && imported.crate_name.is_none() {
                 ctx.add_error_str(
                     &format!(
@@ -2733,7 +2794,92 @@ impl ZngurSpecBuilder {
                 );
             }
         }
+        check_cpp_templates(&spec, ctx);
         spec
+    }
+}
+
+/// Reports `message` as an error at the declaration of `ty`.
+fn type_error(ctx: &mut ParseContext, ty: &RustType, message: &str) {
+    let span = ctx
+        .fetch_spans_global(ty)
+        .first()
+        .copied()
+        .cloned()
+        .unwrap_or((0, 0usize..0));
+    ctx.add_fatal_report(
+        Report::build(ReportKind::Error, span.clone())
+            .with_message(message)
+            .with_label(Label::new(span).with_message(message))
+            .finish(),
+    );
+}
+
+/// Checks the instantiations of C++ class templates (`c++::` types with template arguments). All
+/// instantiations of a template are one generic Rust struct, which limits what they can be.
+fn check_cpp_templates(spec: &ZngurSpec, ctx: &mut ParseContext) {
+    let imported: Vec<&Vec<String>> = spec
+        .imported_modules
+        .iter()
+        .flat_map(|m| &m.cpp_types)
+        .collect();
+    // Template path -> (number of arguments, Rust types of the instantiations so far).
+    let mut templates: std::collections::HashMap<&[String], (usize, Vec<String>)> =
+        std::collections::HashMap::new();
+    for ty_def in &spec.types {
+        let RustType::Cpp(path) = &ty_def.ty else {
+            continue;
+        };
+        if path.generics.is_empty() {
+            continue;
+        }
+        if imported.contains(&&path.path) {
+            type_error(
+                ctx,
+                &ty_def.ty,
+                &format!(
+                    "`c++::{}` is declared in an imported module, so its instantiations must be \
+                     declared there too",
+                    path.path.join("::")
+                ),
+            );
+            continue;
+        }
+        if ty_def.cpp_heap_allocated.is_some() {
+            type_error(
+                ctx,
+                &ty_def.ty,
+                "instantiations of C++ class templates can't be `#cpp_heap_allocated`",
+            );
+            continue;
+        }
+        let (arity, instantiations) = templates
+            .entry(&path.path)
+            .or_insert((path.generics.len(), vec![]));
+        if *arity != path.generics.len() {
+            type_error(
+                ctx,
+                &ty_def.ty,
+                &format!(
+                    "every instantiation of `c++::{}` must have the same number of template \
+                     arguments as its first instantiation, which has {arity}",
+                    path.path.join("::")
+                ),
+            );
+            continue;
+        }
+        // `const T&` and `const T*` arguments are the same `CppPtr` in Rust.
+        let rust_type = ty_def.ty.to_string();
+        if instantiations.contains(&rust_type) {
+            type_error(
+                ctx,
+                &ty_def.ty,
+                "another instantiation of this C++ class template is the same Rust type (C++ \
+                 pointers and references to the same type are the same `CppPtr` in Rust)",
+            );
+            continue;
+        }
+        instantiations.push(rust_type);
     }
 }
 
@@ -2994,7 +3140,19 @@ fn rust_type<'a>() -> Boxed<'a, 'a, ParserInput<'a>, ParsedRustType<'a>, ZngPars
     recursive(|parser| {
         let parser = parser.boxed();
         let pg = rust_path_and_generics(parser.clone());
-        let adt = pg.clone().map(ParsedRustType::Adt);
+        let adt = pg
+            .clone()
+            .try_map_with(|pg, extra| {
+                if pg.path.start == ParsedPathStart::Cpp && !pg.named_generics.is_empty() {
+                    Err(Rich::custom(
+                        extra.span(),
+                        "C++ template arguments are positional; `Name = T` is only for Rust types",
+                    ))
+                } else {
+                    Ok(pg)
+                }
+            })
+            .map(ParsedRustType::Adt);
 
         let dyn_trait = just(Token::KwDyn)
             .or(just(Token::KwImpl))

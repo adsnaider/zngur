@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use zngur_def::{
-    Merge, RustPathAndGenerics, RustTrait, RustType, TypeVar, ZngurConstructor,
+    CppTypePath, Merge, RustPathAndGenerics, RustTrait, RustType, TypeVar, ZngurConstructor,
     ZngurCppConstructor, ZngurCppField, ZngurCppMethod, ZngurField, ZngurMethod,
     ZngurMethodDetails, ZngurType, ZngurVariant,
 };
@@ -87,7 +87,9 @@ fn matches_template<'a, 'b>(
         }
         (RustType::Tuple(tys1), RustType::Tuple(tys2)) => match_lists(tys1, tys2, mapping),
         (RustType::Adt(adt1), RustType::Adt(adt2)) => match_generics(adt1, adt2, mapping),
-        (RustType::Cpp(a), RustType::Cpp(b)) => a == b,
+        (RustType::Cpp(a), RustType::Cpp(b)) => {
+            a.path == b.path && match_lists(&a.generics, &b.generics, mapping)
+        }
         (RustType::CppPtr(m1, k1, t1), RustType::CppPtr(m2, k2, t2)) => {
             m1 == m2 && k1 == k2 && matches_template(t1, t2, mapping)
         }
@@ -177,7 +179,10 @@ fn substitute_vars<'a>(
             RustType::Adt(path_and_generics) => {
                 RustType::Adt(substitute_generics(path_and_generics, mapping)?)
             }
-            c @ RustType::Cpp(_) => c.clone(),
+            RustType::Cpp(path) => RustType::Cpp(CppTypePath {
+                path: path.path.clone(),
+                generics: substitute_vec(&path.generics, mapping)?,
+            }),
             RustType::CppPtr(m, kind, t) => {
                 RustType::CppPtr(*m, *kind, Box::new(substitute_type(t, mapping)?))
             }

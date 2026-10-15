@@ -25,6 +25,8 @@ twice = 42 2.5
 Constructed CppType 1 2
 fields = 101 2
 CppType 101 2
+pairs = 34 3.75
+boxed = 11
 Constructed CppConservativeType 10 20
 CppConservativeType 10 20
 Constructed CppConservativeType 1 2
@@ -32,3 +34,6 @@ Destructed CppConservativeType 1 2
 Destructed CppConservativeType 1 2
 total_with() = 33
 Destructed CppConservativeType 10 20
+Destroyed Pair 5 6
+Destroyed Pair 1.5 2.25
+Destroyed Pair 30 4

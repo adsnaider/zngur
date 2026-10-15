@@ -61,6 +61,25 @@ fn main() {
     }
     point.print();
 
+    // Instantiations of C++ class templates.
+    let mut ints = generated::Pair::<i32>::build((3, 4));
+    let doubles = generated::Pair::<f64>::build((1.5, 2.25));
+    unsafe {
+        *generated::Pair::<i32>::first_mut(ints.as_mut())
+            .as_mut()
+            .unwrap() = 30;
+        println!(
+            "pairs = {} {}",
+            generated::Pair::<i32>::sum(ints.as_ref()),
+            generated::Pair::<f64>::sum(doubles.as_ref())
+        );
+    }
+    let boxed: generated::std::unique_ptr<generated::Pair<i32>> = generated::pairs::boxed(5, 6);
+    let pair = unsafe { generated::std::unique_ptr::<generated::Pair<i32>>::get(boxed.as_ref()) };
+    println!("boxed = {}", unsafe {
+        generated::Pair::<i32>::sum(pair.as_const())
+    });
+
     assert_eq!(std::mem::size_of::<MyConservativeWrapper>(), 32);
     assert_eq!(std::mem::align_of::<MyConservativeWrapper>(), 16);
 

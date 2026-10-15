@@ -122,9 +122,9 @@ impl IntoCpp for RustType {
                 tail: None,
             },
             RustType::Adt(pg) => pg.into_cpp(namespace, crate_name),
-            RustType::Cpp(segs) => RustPathAndGenerics {
-                path: segs.clone(),
-                generics: vec![],
+            RustType::Cpp(path) => RustPathAndGenerics {
+                path: path.path.clone(),
+                generics: path.generics.clone(),
                 named_generics: vec![],
             }
             .into_cpp(namespace, crate_name),
@@ -576,7 +576,7 @@ impl CoroSupport {
 }
 
 impl RustFile {
-    fn mangle_name(&self, name: &str) -> String {
+    pub(crate) fn mangle_name(&self, name: &str) -> String {
         mangle_name(name, &self.mangling_base)
     }
 
@@ -732,7 +732,7 @@ pub extern "C" fn {mangled_name}(
             destructor,
         }};
         let r: Box<dyn {trait_name}> = Box::new(this);
-        std::ptr::write(o as *mut _, r)
+        ::core::ptr::write(o as *mut _, r)
     }}
 }}"#
         );
@@ -791,7 +791,7 @@ pub extern "C" fn {mangled_name}(
     unsafe {{ 
         let this = data as *mut Wrapper;
         let r: &dyn {trait_name} = &*this;
-        std::ptr::write(o as *mut _, r)
+        ::core::ptr::write(o as *mut _, r)
     }}
 }}"#
         );
@@ -847,7 +847,7 @@ pub extern "C" fn {mangled_name}(
             self,
             r#"
     }});
-    unsafe {{ std::ptr::write(o as *mut _, r) }}
+    unsafe {{ ::core::ptr::write(o as *mut _, r) }}
 }}"#
         );
         mangled_name
@@ -1006,7 +1006,7 @@ pub extern "C" fn {mn}(i: *const u8) -> usize {{ unsafe {{
         {owner}::{variant} {{ {name}: f, .. }} => {{
             (f as *const _ as usize) - (base as *const _ as usize)
         }}
-        _ => std::hint::unreachable_unchecked(),
+        _ => ::core::hint::unreachable_unchecked(),
     }}
 }} }}
             "#
@@ -1595,7 +1595,7 @@ mod tests {
 
     #[test]
     fn test_cpp_into_cpp() {
-        let cpp = RustType::Cpp(vec!["a".to_owned(), "Name".to_owned()]);
+        let cpp = RustType::Cpp(vec!["a".to_owned(), "Name".to_owned()].into());
         let cpp_type = cpp.into_cpp("rust", "my_crate");
         assert_eq!(cpp_type.to_string(), "::rust::a::Name");
     }

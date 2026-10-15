@@ -457,6 +457,37 @@ type c++::a::B {
 }
 
 #[test]
+fn reparse_cpp_templates() {
+    let _ = check_round_trip(
+        r#"
+#crate my_crate
+type c++::std::unique_ptr<c++::a::B> {
+    #layout(size = 8, align = 8);
+    #cpp_stack_owned;
+    unsafe fn get() const -> c++::a::B*;
+}
+type c++::std::map<i32, const c++::a::B*> {
+    #cpp_ref;
+}
+        "#,
+        expect![[r##"
+            #crate my_crate
+
+            type c++::std::unique_ptr<c++::a::B> {
+                #layout(size = 8, align = 8);
+                #cpp_stack_owned "::std::unique_ptr< ::a::B >";
+
+                unsafe fn get() const -> c++::a::B*;
+            }
+
+            type c++::std::map<i32, const c++::a::B*> {
+                #cpp_ref "::std::map< ::int32_t, const ::a::B* >";
+            }
+        "##]],
+    );
+}
+
+#[test]
 fn reparse_cpp_functions() {
     let _ = check_round_trip(
         r#"

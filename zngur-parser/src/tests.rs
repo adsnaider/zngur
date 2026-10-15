@@ -1607,7 +1607,8 @@ fn assert_cpp(expected: &[&str], ty: &RustType) {
     let RustType::Cpp(segs) = ty else {
         panic!("type `{:?}` is not a c++ type", ty);
     };
-    assert_eq!(segs.as_slice(), expected);
+    assert!(segs.generics.is_empty());
+    assert_eq!(segs.path.as_slice(), expected);
 }
 
 #[test]
@@ -1705,7 +1706,7 @@ type c++::a::Explicit {
             .spec
             .types
             .iter()
-            .find(|t| matches!(&t.ty, RustType::Cpp(segs) if segs == path))
+            .find(|t| matches!(&t.ty, RustType::Cpp(segs) if segs.path == path))
             .unwrap_or_else(|| panic!("no type {path:?}"))
     };
     assert_eq!(
@@ -1774,7 +1775,7 @@ extern "C++" {
         |_| {},
     );
     let f = &parsed.spec.extern_cpp_funcs[0];
-    let b = || Box::new(RustType::Cpp(vec!["a".to_owned(), "B".to_owned()]));
+    let b = || Box::new(RustType::Cpp(vec!["a".to_owned(), "B".to_owned()].into()));
     let i32 = || Box::new(RustType::Primitive(PrimitiveRustType::Int(32)));
     assert_eq!(
         f.inputs,
@@ -2237,7 +2238,7 @@ mod c++::a {
         |_| {},
     );
     let ty = parsed.spec.types.first().expect("no type parsed");
-    let b = RustType::Cpp(vec!["a".to_owned(), "B".to_owned()]);
+    let b = RustType::Cpp(vec!["a".to_owned(), "B".to_owned()].into());
     let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
     let methods = &ty.cpp_methods;
     assert_eq!(methods.len(), 4);
@@ -2460,7 +2461,7 @@ type c++::B {
         |_| {},
     );
     let ty = parsed.spec.types.first().expect("no type parsed");
-    let b = RustType::Cpp(vec!["B".to_owned()]);
+    let b = RustType::Cpp(vec!["B".to_owned()].into());
     let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
     let constructors = &ty.cpp_constructors;
     assert_eq!(constructors.len(), 3);
@@ -2568,7 +2569,7 @@ mod c++::a {
     );
     let funcs = &parsed.spec.cpp_funcs;
     assert_eq!(funcs.len(), 3);
-    let b = RustType::Cpp(vec!["a".to_owned(), "B".to_owned()]);
+    let b = RustType::Cpp(vec!["a".to_owned(), "B".to_owned()].into());
     let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
 
     assert_eq!(funcs[0].namespace, ["a", "b"]);
@@ -2683,5 +2684,210 @@ type crate::Foo {
                │           ╰────── C++ field accessors (`field name (type = T)`) can only be declared on `#cpp_stack_owned` or `#cpp_ref` types
             ───╯
         "#]],
+    );
+}
+
+#[test]
+fn cpp_template_instantiations_parse() {
+    use zngur_def::{CppIndirection, CppTypePath, Mutability, PrimitiveRustType};
+
+    let parsed = parse_str(
+        r#"
+type c++::a::B {
+    #cpp_ref;
+}
+
+type c++::std::unique_ptr<c++::a::B> {
+    #layout(size = 8, align = 8);
+    #cpp_stack_owned;
+}
+
+type c++::std::map<i32, const c++::a::B*> {
+    #cpp_ref;
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let b = RustType::Cpp(vec!["a".to_owned(), "B".to_owned()].into());
+    let types = &parsed.spec.types;
+    assert_eq!(
+        types[1].ty,
+        RustType::Cpp(CppTypePath {
+            path: vec!["std".to_owned(), "unique_ptr".to_owned()],
+            generics: vec![b.clone()],
+        })
+    );
+    // The C++ name includes the template arguments, spelled the C++ way.
+    assert_eq!(
+        types[1].cpp_stack_owned.as_ref().unwrap().0,
+        "::std::unique_ptr< ::a::B >"
+    );
+    assert_eq!(
+        types[2].ty,
+        RustType::Cpp(CppTypePath {
+            path: vec!["std".to_owned(), "map".to_owned()],
+            generics: vec![
+                RustType::Primitive(PrimitiveRustType::Int(32)),
+                RustType::CppPtr(Mutability::Not, CppIndirection::Pointer, Box::new(b)),
+            ],
+        })
+    );
+    assert_eq!(
+        types[2].cpp_ref.as_ref().unwrap().0,
+        "::std::map< ::int32_t, const ::a::B* >"
+    );
+}
+
+#[test]
+fn cpp_template_with_named_generics_is_rejected() {
+    check_fail(
+        r#"
+type c++::std::vector<T = i32> {
+    #cpp_ref;
+}
+"#,
+        expect![[r#"
+            Error: C++ template arguments are positional; `Name = T` is only for Rust types
+               ╭─[ test.zng:2:6 ]
+               │
+             2 │ type c++::std::vector<T = i32> {
+               │      ────────────┬────────────  
+               │                  ╰────────────── C++ template arguments are positional; `Name = T` is only for Rust types
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_template_with_rust_type_argument_is_rejected() {
+    check_fail(
+        r#"
+type c++::std::vector<::std::string::String> {
+    #cpp_ref;
+}
+"#,
+        expect![[r#"
+            Error: `::std::string::String` can't be a C++ template argument (only `c++::` types, builtins and C++ pointers and references can)
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     #cpp_ref;
+               │     ────┬────  
+               │         ╰────── `::std::string::String` can't be a C++ template argument (only `c++::` types, builtins and C++ pointers and references can)
+            ───╯
+            Error: No layout policy found for type std::vector::<::std::string::String>.
+               ╭─[ test.zng:1:1 ]
+               │
+             2 │ type c++::std::vector<::std::string::String> {
+               │      ───────────────────┬───────────────────  
+               │                         ╰───────────────────── Type first declared here.
+               │ 
+               │ Note: Use one of `#layout(size = X, align = Y)`, `#heap_allocated` or `#only_by_ref`.
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_template_with_different_arities_is_rejected() {
+    check_fail(
+        r#"
+type c++::std::vector<i32> {
+    #cpp_ref;
+}
+
+type c++::std::vector<i32, c++::MyAlloc> {
+    #cpp_ref;
+}
+"#,
+        expect![[r#"
+            Error: every instantiation of `c++::std::vector` must have the same number of template arguments as its first instantiation, which has 1
+               ╭─[ test.zng:6:6 ]
+               │
+             6 │ type c++::std::vector<i32, c++::MyAlloc> {
+               │      ─────────────────┬─────────────────  
+               │                       ╰─────────────────── every instantiation of `c++::std::vector` must have the same number of template arguments as its first instantiation, which has 1
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_template_instantiations_with_the_same_rust_type_are_rejected() {
+    check_fail(
+        r#"
+type c++::std::pair<const i32&> {
+    #cpp_ref;
+}
+
+type c++::std::pair<const i32*> {
+    #cpp_ref;
+}
+"#,
+        expect![[r#"
+            Error: another instantiation of this C++ class template is the same Rust type (C++ pointers and references to the same type are the same `CppPtr` in Rust)
+               ╭─[ test.zng:6:6 ]
+               │
+             6 │ type c++::std::pair<const i32*> {
+               │      ─────────────┬────────────  
+               │                   ╰────────────── another instantiation of this C++ class template is the same Rust type (C++ pointers and references to the same type are the same `CppPtr` in Rust)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_template_heap_allocated_is_rejected() {
+    check_fail(
+        r#"
+type c++::std::vector<i32> {
+    #layout(size = 24, align = 8);
+    #cpp_heap_allocated;
+}
+"#,
+        expect![[r#"
+            Error: instantiations of C++ class templates can't be `#cpp_heap_allocated`
+               ╭─[ test.zng:2:6 ]
+               │
+             2 │ type c++::std::vector<i32> {
+               │      ──────────┬──────────  
+               │                ╰──────────── instantiations of C++ class templates can't be `#cpp_heap_allocated`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn instantiating_an_imported_cpp_template_is_rejected() {
+    let resolver = MockFilesystem::new(vec![(
+        "./bar.zng",
+        r#"
+#crate bar_bindings
+
+type c++::std::unique_ptr<i32> {
+    #layout(size = 8, align = 8);
+    #cpp_stack_owned;
+}
+"#,
+    )]);
+    check_import_fail(
+        r#"
+import "./bar.zng";
+
+type c++::std::unique_ptr<i64> {
+    #layout(size = 8, align = 8);
+    #cpp_stack_owned;
+}
+"#,
+        expect![[r#"
+            Error: `c++::std::unique_ptr` is declared in an imported module, so its instantiations must be declared there too
+               ╭─[ test.zng:4:6 ]
+               │
+             4 │ type c++::std::unique_ptr<i64> {
+               │      ────────────┬────────────  
+               │                  ╰────────────── `c++::std::unique_ptr` is declared in an imported module, so its instantiations must be declared there too
+            ───╯
+        "#]],
+        &resolver,
     );
 }

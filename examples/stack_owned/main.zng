@@ -43,6 +43,36 @@ mod c++::geometry {
     safe fn twice(f64) -> f64 as twice_f64;
 }
 
+// Instantiations of C++ class templates. Each C++ template is one generic Rust struct:
+// `generated::Pair<i32>`, `generated::std::unique_ptr<generated::Pair<i32>>`.
+type c++::Pair<i32> {
+    #layout(size = 8, align = 4);
+    #cpp_stack_owned;
+
+    safe constructor(i32, i32);
+    unsafe fn sum() const -> i32;
+    field first (type = i32) as first_mut;
+}
+
+type c++::Pair<f64> {
+    #layout(size = 16, align = 8);
+    #cpp_stack_owned;
+
+    safe constructor(f64, f64);
+    unsafe fn sum() const -> f64;
+}
+
+type c++::std::unique_ptr<c++::Pair<i32>> {
+    #layout(size = 8, align = 8);
+    #cpp_stack_owned;
+
+    unsafe fn get() const -> c++::Pair<i32>*;
+}
+
+mod c++::pairs {
+    safe fn boxed(i32, i32) -> c++::std::unique_ptr<c++::Pair<i32>>;
+}
+
 extern "C++" {
     impl c++::MyCppWrapper {
         safe fn new(i32, i32) -> c++::MyCppWrapper;

@@ -411,11 +411,42 @@ pub enum RustType {
     Tuple(Vec<RustType>),
     Adt(RustPathAndGenerics),
     TypeVar(TypeVar),
-    Cpp(Vec<String>),
+    /// A C++ type, declared with a `c++::` path. Its C++ name is the path, e.g. `c++::a::B` is
+    /// `::a::B`, and `c++::std::unique_ptr<c++::a::B>` is `::std::unique_ptr<::a::B>`.
+    Cpp(CppTypePath),
     /// A C++ pointer or reference (`const T*`, `T*`, `const T&` or `T&` in the `.zng` file). In
     /// Rust, all of them are a `zngur_lib::CppPtr<T, Const or Mut>`. The indirection only matters
     /// when calling C++ functions, which take either a pointer or a reference.
     CppPtr(Mutability, CppIndirection, Box<RustType>),
+}
+
+/// The path of a [`RustType::Cpp`] type, without the `c++::` prefix, and its template arguments.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppTypePath {
+    pub path: Vec<String>,
+    /// The template arguments: other C++ types, builtins and C++ pointers.
+    pub generics: Vec<RustType>,
+}
+
+impl From<Vec<String>> for CppTypePath {
+    fn from(path: Vec<String>) -> Self {
+        CppTypePath {
+            path,
+            generics: vec![],
+        }
+    }
+}
+
+impl Display for CppTypePath {
+    /// The Rust path of the wrapper, relative to the generated code's root (e.g.
+    /// `std::unique_ptr::<a::B>`).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.path.join("::"))?;
+        if !self.generics.is_empty() {
+            write!(f, "::<{}>", self.generics.iter().join(", "))?;
+        }
+        Ok(())
+    }
 }
 
 /// Whether a C++ function takes (or returns) a [`RustType::CppPtr`] as a pointer or a reference.
@@ -517,7 +548,7 @@ impl Display for RustType {
             }
             RustType::Slice(s) => write!(f, "[{s}]"),
             RustType::TypeVar(TypeVar(v)) => write!(f, "{v}"),
-            RustType::Cpp(segs) => write!(f, "{}", segs.join("::")),
+            RustType::Cpp(path) => write!(f, "{path}"),
             RustType::CppPtr(m, _, ty) => {
                 let constness = match m {
                     Mutability::Not => "Const",
@@ -538,7 +569,9 @@ mod tests {
         let ty = RustType::CppPtr(
             Mutability::Not,
             CppIndirection::Reference,
-            Box::new(RustType::Cpp(vec!["a".to_owned(), "Name".to_owned()])),
+            Box::new(RustType::Cpp(
+                vec!["a".to_owned(), "Name".to_owned()].into(),
+            )),
         );
         assert_eq!(
             ty.to_string(),
@@ -548,7 +581,12 @@ mod tests {
 
     #[test]
     fn test_cpp_display() {
-        let cpp = RustType::Cpp(vec!["a".to_owned(), "b".to_owned(), "Name".to_owned()]);
+        let cpp = RustType::Cpp(vec!["a".to_owned(), "b".to_owned(), "Name".to_owned()].into());
         assert_eq!(cpp.to_string(), "a::b::Name");
+        let generic = RustType::Cpp(CppTypePath {
+            path: vec!["std".to_owned(), "unique_ptr".to_owned()],
+            generics: vec![cpp, RustType::Primitive(PrimitiveRustType::Int(32))],
+        });
+        assert_eq!(generic.to_string(), "std::unique_ptr::<a::b::Name, i32>");
     }
 }

@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <iostream>
+#include <memory>
 #include <type_traits>
 #include <zngur.h>
 
@@ -61,4 +62,24 @@ inline CppType origin() { return CppType(0, 0); }
 inline int64_t twice(int64_t v) { return 2 * v; }
 inline double twice(double v) { return 2 * v; }
 } // namespace geometry
+
+// A class template, whose instantiations Rust uses (declared in `main.zng`).
+template <typename T> struct Pair {
+  T first;
+  T second;
+
+  Pair(T first, T second) : first(first), second(second) {}
+  ~Pair() { std::cout << "Destroyed Pair " << first << " " << second << std::endl; }
+  T sum() const { return first + second; }
+};
+
+// The destructor makes `Pair` not trivially copyable, but it's still trivially relocatable.
+template <typename T>
+struct rust::is_trivially_relocatable<Pair<T>> : std::true_type {};
+
+namespace pairs {
+inline std::unique_ptr<Pair<int32_t>> boxed(int32_t first, int32_t second) {
+  return std::unique_ptr<Pair<int32_t>>(new Pair<int32_t>(first, second));
+}
+} // namespace pairs
 

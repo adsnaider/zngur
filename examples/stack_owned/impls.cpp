@@ -14,7 +14,7 @@ rust::MyCppWrapper Impl<rust::MyCppWrapper>::new_(int32_t x, int32_t y) {
 rust::Unit
 Impl<rust::MyCppWrapper>::print(rust::Ref<rust::MyCppWrapper> c) {
   const CppType &cpp = c.cpp();
-  std::cout << "CppType " << cpp.x << " " << cpp.y << std::endl;
+  ::std::cout << "CppType " << cpp.x << " " << cpp.y << ::std::endl;
   return {};
 }
 
@@ -27,7 +27,7 @@ rust::Unit
 Impl<rust::crate::MyConservativeWrapper>::print(
     rust::Ref<rust::crate::MyConservativeWrapper> c) {
   const CppConservativeType &cpp = c.cpp();
-  std::cout << "CppConservativeType " << cpp.a << " " << cpp.b << std::endl;
+  ::std::cout << "CppConservativeType " << cpp.a << " " << cpp.b << ::std::endl;
   return {};
 }
 
@@ -39,7 +39,7 @@ rust::Unit exported_functions::sum_into(CppConstPtr<rust::MyCppWrapper> c,
 }
 
 rust::Unit exported_functions::swap_xy(CppMutPtr<rust::MyCppWrapper> c) {
-  std::swap(c->x, c->y);
+  ::std::swap(c->x, c->y);
   return {};
 }
 
