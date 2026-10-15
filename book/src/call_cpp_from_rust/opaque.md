@@ -13,9 +13,8 @@ says about it:
 To own a C++ object that isn't trivially relocatable, hold it through a C++ smart pointer, like
 `std::unique_ptr` (see [C++ class templates](./cpp_templates.md)).
 
-> **NOTE**: The Rust wrapper of a `c++::a::B` type is `rust::a::B` in C++, so inside
-> `namespace rust` (e.g. in `rust::Impl<...>` method definitions), an unqualified `a::B` names the
-> wrapper, not the C++ type. Refer to the C++ type as `::a::B` there.
+> **NOTE**: In C++, the Rust wrapper of a `c++::a::B` type is `rust::cpp::a::B`, apart from the
+> wrappers of Rust types (`rust::crate::...`, `rust::std::...`, ...).
 
 If a C++ type's name can't be written as a `c++::` path, e.g. because it differs from what you want
 to call it in Rust or it's a nested type, give it one with a C++ alias:
@@ -37,10 +36,10 @@ type c++::osmium::Way {
 }
 ```
 
-This enables creating `rust::Ref<rust::osmium::Way>` from a `const osmium::Way&` in C++ and you can
+This enables creating `rust::Ref<rust::cpp::osmium::Way>` from a `const osmium::Way&` in C++ and you can
 pass it to the Rust side. Rust side can't do anything meaningful with it, except passing it again to
 the C++ side or calling its [member functions](./cpp_methods.md). In the C++ side
-`rust::Ref<rust::osmium::Way>` has a `.cpp()` method which will return the `osmium::Way&` back to
+`rust::Ref<rust::cpp::osmium::Way>` has a `.cpp()` method which will return the `osmium::Way&` back to
 you. You can also write `impl` and `impl trait` blocks for the Rust type `Way` inside C++. See the
 [`examples/osmium`](https://github.com/HKalbasi/zngur/blob/main/examples/osmium) for a full working
 example.

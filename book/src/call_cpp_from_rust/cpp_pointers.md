@@ -49,7 +49,7 @@ unsafe {
 
 In C++, they're plain pointers to the C++ type. The generated code spells them as
 `rust::CppConstPtr<W>` and `rust::CppMutPtr<W>`, which are aliases for `const T*` and `T*`, where
-`W` is the Rust wrapper (e.g. `rust::geo::Point`) and `T` the C++ type it stands for
+`W` is the Rust wrapper (e.g. `rust::cpp::geo::Point`) and `T` the C++ type it stands for
 (`::geo::Point`). So you can implement and call these functions with ordinary pointers:
 
 ```cpp

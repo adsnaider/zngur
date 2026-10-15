@@ -7,14 +7,14 @@ using std::ffi::CStr;
 using std::fmt::Debug;
 using std::fmt::Formatter;
 using std::fmt::Result;
-using cpp_inventory::Inventory;
-using cpp_inventory::Item;
+using cpp::cpp_inventory::Inventory;
+using cpp::cpp_inventory::Item;
 
-// The Rust wrappers of `std::unique_ptr<Inventory>` and `std::unique_ptr<Item>`. (Inside
-// `namespace rust`, `std::` is the namespace of Rust's standard library types, and of the wrappers
-// of `c++::std::...` types; the C++ standard library is `::std::`.)
-using InventoryPtr = std::unique_ptr<Inventory>;
-using ItemPtr = std::unique_ptr<Item>;
+// The Rust wrappers of `std::unique_ptr<Inventory>` and `std::unique_ptr<Item>`. (C++ types
+// declared in the `.zng` file have their wrappers in `rust::cpp`. Inside `namespace rust`, `std::`
+// is the namespace of Rust's standard library types; the C++ standard library is `::std::`.)
+using InventoryPtr = cpp::std::unique_ptr<Inventory>;
+using ItemPtr = cpp::std::unique_ptr<Item>;
 
 static Ref<Str> rust_str_from_c_str(const char* input) {
   return CStr::from_ptr(reinterpret_cast<const int8_t*>(input)).to_str().expect("invalid_utf8"_rs);

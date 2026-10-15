@@ -61,6 +61,5 @@ struct rust::is_trivially_relocatable<Pair<T>> : std::true_type {};
 - All instantiations of a template must be declared in the same zngur module (crate). A module
   that imports another one can use the instantiations declared there, but not add its own.
 
-> **Note:** The C++ wrappers of `c++::std::...` types are in the namespace `rust::std`. So, like for
-> any other `c++::` namespace, C++ code inside `namespace rust { ... }` must refer to the standard
-> library as `::std::...`, not `std::...`.
+> **Note:** In C++, the wrappers of `c++::std::...` types are in the namespace `rust::cpp::std`, like
+> those of other `c++::` types (e.g. `rust::cpp::std::unique_ptr< rust::cpp::geo::Point >`).

@@ -988,7 +988,7 @@ mod tests {
         assert!(
             cpp_code.contains(
                 "::rust::CppMutPtr< ::int32_t > __zngur_o = \
-                 &(::rust::__zngur_internal_move_from_rust< ::rust::CppMutPtr< ::rust::a::B > \
+                 &(::rust::__zngur_internal_move_from_rust< ::rust::CppMutPtr< ::rust::cpp::a::B > \
                  >(i0))->x;"
             ),
             "{cpp_code}"

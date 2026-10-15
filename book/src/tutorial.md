@@ -512,14 +512,14 @@ Create a file named `impls.cpp` with this content:
 
 namespace rust {
 
-using cpp_inventory::Inventory;
-using cpp_inventory::Item;
+using cpp::cpp_inventory::Inventory;
+using cpp::cpp_inventory::Item;
 
-// The Rust wrappers of `std::unique_ptr<Inventory>` and `std::unique_ptr<Item>`. (Inside
-// `namespace rust`, `std::` is the namespace of Rust's standard library types, and of the wrappers
-// of `c++::std::...` types; the C++ standard library is `::std::`.)
-using InventoryPtr = std::unique_ptr<Inventory>;
-using ItemPtr = std::unique_ptr<Item>;
+// The Rust wrappers of `std::unique_ptr<Inventory>` and `std::unique_ptr<Item>`. (C++ types
+// declared in the `.zng` file have their wrappers in `rust::cpp`. Inside `namespace rust`, `std::`
+// is the namespace of Rust's standard library types; the C++ standard library is `::std::`.)
+using InventoryPtr = cpp::std::unique_ptr<Inventory>;
+using ItemPtr = cpp::std::unique_ptr<Item>;
 
 InventoryPtr Impl<Inventory>::new_empty(uint32_t space) {
   return InventoryPtr::build(new ::cpp_inventory::Inventory(space));

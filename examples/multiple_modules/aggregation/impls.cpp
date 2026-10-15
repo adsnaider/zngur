@@ -2,14 +2,12 @@
 #include <packet.zng.h>
 #include <stats.h>
 
-using rust::cpp_stats::StatsAccumulator;
+using rust::cpp::cpp_stats::StatsAccumulator;
 using rust::packet::Packet;
 
 // We need to implement the methods declared in aggregation.zng
-rust::std::unique_ptr<StatsAccumulator> rust::Impl<StatsAccumulator>::create() {
-  // `::cpp_stats`, not `cpp_stats`: inside `rust::Impl`, the latter would find the namespace
-  // of the Rust wrapper (`rust::cpp_stats`), since `c++::` paths mirror the C++ namespaces.
-  return rust::std::unique_ptr<StatsAccumulator>::build(
+rust::cpp::std::unique_ptr<StatsAccumulator> rust::Impl<StatsAccumulator>::create() {
+  return rust::cpp::std::unique_ptr<StatsAccumulator>::build(
       new ::cpp_stats::StatsAccumulator());
 }
 
