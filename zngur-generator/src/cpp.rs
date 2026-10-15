@@ -533,21 +533,12 @@ pub struct CppTypeDefinition {
     pub cpp_heap_allocated: Option<CppHeapAllocatedData>,
     pub cpp_ref: Option<CppRef>,
     pub cpp_stack_owned: Option<CppStackOwned>,
+    /// The (mangled) name of the C++ function that destroys a `#cpp_stack_owned` object. Rust
+    /// calls it by this name, so the C++ side must define it with exactly this name.
+    pub stack_owned_destructor: Option<String>,
 }
 
 impl CppTypeDefinition {
-    pub fn rust_short_name(&self) -> String {
-        self.ty.to_string().split("::").last().unwrap().to_string()
-    }
-
-    pub fn cpp_short_name(&self) -> String {
-        if let Some(c) = &self.cpp_stack_owned {
-            c.0.split("::").last().unwrap().to_string()
-        } else {
-            "".to_string()
-        }
-    }
-
     pub fn has_unsized(&self) -> bool {
         self.wellknown_traits
             .iter()
@@ -670,6 +661,7 @@ impl Default for CppTypeDefinition {
             cpp_heap_allocated: None,
             cpp_ref: None,
             cpp_stack_owned: None,
+            stack_owned_destructor: None,
         }
     }
 }
@@ -734,7 +726,12 @@ impl CppFile {
         *is_really_needed = !self.trait_defs.is_empty()
             || !self.exported_fn_defs.is_empty()
             || !self.exported_impls.is_empty()
-            || self.coro_support.is_some();
+            || self.coro_support.is_some()
+            // Rust calls the destructors of `#cpp_stack_owned` types, which are defined here.
+            || self
+                .type_defs
+                .iter()
+                .any(|td| td.stack_owned_destructor.is_some());
 
         Ok(())
     }

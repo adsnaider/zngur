@@ -158,14 +158,24 @@ impl ZngurGenerator {
                     vec![],
                 ),
             };
+            let mut stack_owned_destructor = None;
             if let Some(_cpp_stack_owned) = &ty_def.cpp_stack_owned {
-                let destructor_name = format!("_zngur_crate_{type_name}_destructor");
+                // The C++ side defines this function under the returned (mangled) name, so it
+                // includes the mangling base like every other bridge function. It's derived from
+                // the full path, so that same-named types in different modules don't collide.
+                let sanitized_path = ty
+                    .to_string()
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                    .collect::<String>();
+                let destructor_name = format!("_zngur_{sanitized_path}_destructor");
                 let mangled_name = rust_file.add_extern_cpp_function(
                     &destructor_name,
                     &[RustType::Ref(Mutability::Mut, Box::new(ty.clone()))],
                     &RustType::Tuple(vec![]),
                     true,
                 );
+                stack_owned_destructor = Some(mangled_name.clone());
                 let (size, align) = match layout {
                     LayoutPolicy::StackAllocated { size, align }
                     | LayoutPolicy::Conservative { size, align } => (size, align),
@@ -411,6 +421,7 @@ impl ZngurGenerator {
                 }),
                 cpp_ref: ty_def.cpp_ref,
                 cpp_stack_owned: ty_def.cpp_stack_owned,
+                stack_owned_destructor,
                 from_trait: if let RustType::Boxed(b) = &ty {
                     if let RustType::Dyn(tr, _) = b.as_ref() {
                         if let RustTrait::Fn {
@@ -757,6 +768,39 @@ pub type Box2d = super::Box2d;
         assert!(rust_code.contains("pub mod geo {"));
         assert!(rust_code.contains("pub struct Point"));
         assert!(!rust_code.contains("pub type Point = super::Point;"));
+    }
+
+    #[test]
+    fn cpp_stack_owned_destructor_names_match_and_are_unique() {
+        let spec = ZngurSpec {
+            types: vec![
+                minimal_stack_owned_type(cpp(&["a", "Point"]), "::a::Point", 16, 8),
+                minimal_stack_owned_type(cpp(&["b", "Point"]), "::b::Point<int>", 16, 8),
+            ],
+            mangling_base: "my_base".to_owned(),
+            ..Default::default()
+        };
+        let (rust_code, _h, cpp) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let cpp = cpp.expect("stack owned types need a C++ file for their destructors");
+        for (name, cpp_type) in [
+            ("_zngur_my_base_zngur_a__Point_destructor_", "::a::Point"),
+            (
+                "_zngur_my_base_zngur_b__Point_destructor_",
+                "::b::Point<int>",
+            ),
+        ] {
+            // Rust calls the destructor by the same (mangled) name that C++ defines it with.
+            assert!(
+                rust_code.contains(&format!("fn {name}(")),
+                "{name} not in:\n{rust_code}"
+            );
+            assert!(
+                cpp.contains(&format!("void {name}(")),
+                "{name} not in:\n{cpp}"
+            );
+            assert!(cpp.contains(&format!("using __zngur_T = {cpp_type};")));
+        }
     }
 
     #[test]
