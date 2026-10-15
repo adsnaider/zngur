@@ -38,10 +38,12 @@ impl CppPath {
     }
 
     pub(crate) fn name(&self) -> &str {
-        match self.0.split_last().unwrap().0.as_str() {
-            // Unit is a valid type alias for Tuple<> except when defining the constructors
-            "Unit" => "Tuple",
-            s => s,
+        match self.0.as_slice() {
+            // `rust::Unit` is a valid type alias for `rust::Tuple<>` except when defining the
+            // constructors. (Types named `Unit` in other namespaces are just types.)
+            [_, unit] if unit == "Unit" => "Tuple",
+            [.., name] => name,
+            [] => unreachable!("C++ paths aren't empty"),
         }
     }
 

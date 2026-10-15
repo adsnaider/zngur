@@ -735,6 +735,26 @@ mod tests {
     }
 
     #[test]
+    fn rust_type_named_unit_is_not_the_unit_type() {
+        let ty = RustType::Adt(RustPathAndGenerics {
+            path: vec!["a".to_owned(), "Unit".to_owned()],
+            generics: vec![],
+            named_generics: vec![],
+        });
+        let spec = ZngurSpec {
+            types: vec![ZngurType {
+                trivially_relocatable: TriviallyRelocatable::No,
+                ..minimal_stack_owned_type(ty, 1, 1)
+            }],
+            ..Default::default()
+        };
+        let (_rust_code, h, _cpp) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        // Only `rust::Unit` is an alias of `rust::Tuple<>`.
+        assert!(h.contains("struct Unit {"), "{h}");
+    }
+
+    #[test]
     fn cpp_type_gets_nested_module() {
         let spec = ZngurSpec {
             types: vec![minimal_ref_type(cpp(&["a", "b", "Name"]))],

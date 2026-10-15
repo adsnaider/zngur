@@ -3042,10 +3042,13 @@ fn lexer<'src>()
 
     token
         .map_with(|tok, extra| (tok, extra.span()))
-        .padded_by(comment.repeated())
+        .padded_by(comment.clone().repeated())
         .padded()
         .repeated()
         .collect()
+        // Comments after the last token, or in a file without tokens.
+        .then_ignore(comment.repeated())
+        .padded()
         .boxed()
 }
 

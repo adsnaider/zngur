@@ -2841,3 +2841,30 @@ type crate::D {
         "#]],
     );
 }
+
+#[test]
+fn files_with_only_comments_parse() {
+    for text in [
+        "",
+        "// Only a comment.",
+        "// Only a comment, with a final newline.\n",
+        "\n// Two comments,\n// and no items, with an apostrophe: isn't it?\n\n",
+    ] {
+        let parsed = parse_str(text, NullCfg, |_| {});
+        assert!(parsed.spec.types.is_empty(), "{text:?}");
+    }
+}
+
+#[test]
+fn comments_after_the_last_item_parse() {
+    let parsed = parse_str(
+        r#"
+type c++::a::B {
+}
+// A trailing comment.
+"#,
+        NullCfg,
+        |_| {},
+    );
+    assert_eq!(parsed.spec.types.len(), 1);
+}
