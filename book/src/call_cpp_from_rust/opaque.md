@@ -30,6 +30,10 @@ type c++::osmium::Way {
 }
 ```
 
+> **NOTE**: The Rust wrapper of a `c++::a::B` type is `rust::a::B` in C++, so inside
+> `namespace rust` (e.g. in `rust::Impl<...>` method definitions), an unqualified `a::B` names the
+> wrapper, not the C++ type. Refer to the C++ type as `::a::B` there.
+
 This enables creating `rust::Ref<rust::Way>` from a `const osmium::Way&` in C++
 and you can pass it to the Rust side.
 Rust side can't do anything meaningful with it, except passing it again to the C++ side.

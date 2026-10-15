@@ -1412,6 +1412,123 @@ import "module.zng";
 }
 
 #[test]
+fn crate_directive_sets_the_crate_name() {
+    let parsed = parse_str(
+        r#"
+#crate my_bindings
+"#,
+        NullCfg,
+        |_| {},
+    );
+    assert_eq!(parsed.spec.crate_name.as_deref(), Some("my_bindings"));
+}
+
+#[test]
+fn crate_directive_not_allowed_in_merged_files() {
+    let resolver = MockFilesystem::new(vec![("./merged.zng", "#crate other")]);
+    check_import_fail(
+        r#"
+merge "./merged.zng";
+"#,
+        expect![[r#"
+            Error: `#crate` can only be used in the top-level file of a zngur module, not in merged files
+               ╭─[ ./merged.zng:1:2 ]
+               │
+             1 │ #crate other
+               │  ─────┬─────  
+               │       ╰─────── `#crate` can only be used in the top-level file of a zngur module, not in merged files
+            ───╯
+        "#]],
+        &resolver,
+    );
+}
+
+#[test]
+fn imported_module_cpp_types_and_crate_are_resolved() {
+    let resolver = MockFilesystem::new(vec![(
+        "./bar.zng",
+        r#"
+#crate bar_bindings
+
+type c++::ns::Bar {
+    #layout(size = 8, align = 4);
+    #cpp_stack_owned;
+}
+
+type crate::RustOnly {
+    #layout(size = 1, align = 1);
+}
+"#,
+    )]);
+    let parsed = parse_str_with_resolver(
+        r#"
+import "./bar.zng";
+
+mod crate {
+    fn use_bar(&c++::ns::Bar);
+}
+"#,
+        NullCfg,
+        &resolver,
+        |_| {},
+    );
+    let [module] = parsed.spec.imported_modules.as_slice() else {
+        panic!("expected one imported module");
+    };
+    assert_eq!(module.crate_name.as_deref(), Some("bar_bindings"));
+    // Only the `c++::` types, whose Rust wrappers live in `bar_bindings`.
+    assert_eq!(
+        module.cpp_types,
+        vec![vec!["ns".to_owned(), "Bar".to_owned()]]
+    );
+    // The imported module's types aren't part of this module's spec.
+    assert!(parsed.spec.types.is_empty());
+}
+
+#[test]
+fn imported_module_with_cpp_types_needs_a_crate() {
+    let resolver = MockFilesystem::new(vec![(
+        "./bar.zng",
+        r#"
+type c++::ns::Bar {
+    #cpp_ref;
+}
+"#,
+    )]);
+    check_import_fail(
+        r#"
+import "./bar.zng";
+"#,
+        expect![[r#"
+            Error: imported module `./bar.zng` declares `c++::` types, so it needs a `#crate <name>` directive for this module to find their Rust wrappers (at `::<name>::generated::...`)
+               ╭─[ test.zng:2:1 ]
+               │
+             2 │ import "./bar.zng";
+               │ ─────────┬─────────  
+               │          ╰─────────── imported module `./bar.zng` declares `c++::` types, so it needs a `#crate <name>` directive for this module to find their Rust wrappers (at `::<name>::generated::...`)
+            ───╯
+        "#]],
+        &resolver,
+    );
+}
+
+#[test]
+fn unreadable_imported_module_is_not_an_error() {
+    // `import` only has to name the generated header, which may be found via the C++ include
+    // path even if the `.zng` file isn't at the relative path.
+    let resolver = MockFilesystem::new(vec![] as Vec<(&str, &str)>);
+    let parsed = parse_str_with_resolver(
+        r#"
+import "elsewhere.zng";
+"#,
+        NullCfg,
+        &resolver,
+        |_| {},
+    );
+    assert_eq!(parsed.spec.imported_modules[0].crate_name, None);
+}
+
+#[test]
 fn extern_cpp_requires_safety() {
     let source = r#"
 extern "C++" {

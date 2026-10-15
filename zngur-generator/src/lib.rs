@@ -468,6 +468,27 @@ pub mod cpp {{
 "#
             ));
         }
+        // `c++::` types of imported modules are defined in their own crate (at
+        // `::<crate>::generated::<path>`). Re-exporting them at the same relative path as local
+        // `c++::` types lets this module's generated code refer to both the same way.
+        for module in &zng.imported_modules {
+            let Some(crate_name) = &module.crate_name else {
+                continue;
+            };
+            for segs in &module.cpp_types {
+                let Some((_, module_path)) = segs.split_last() else {
+                    continue;
+                };
+                cpp_tree.insert(
+                    module_path,
+                    &format!(
+                        "\npub use ::{}::generated::{};\n",
+                        crate_name.replace('-', "_"),
+                        segs.join("::")
+                    ),
+                );
+            }
+        }
         rust_file.text.push_str(&cpp_tree.render());
         for func in zng.funcs {
             let sig = rust_file.add_function(
@@ -768,6 +789,34 @@ pub type Box2d = super::Box2d;
         assert!(rust_code.contains("pub mod geo {"));
         assert!(rust_code.contains("pub struct Point"));
         assert!(!rust_code.contains("pub type Point = super::Point;"));
+    }
+
+    #[test]
+    fn imported_cpp_types_are_reexported_from_their_crate() {
+        let spec = ZngurSpec {
+            imported_modules: vec![ModuleImport {
+                path: "./bar.zng".into(),
+                crate_name: Some("bar-bindings".to_owned()),
+                cpp_types: vec![
+                    vec!["ns".to_owned(), "Bar".to_owned()],
+                    vec!["Top".to_owned()],
+                ],
+            }],
+            // A local `c++::` type in the same namespace shares the module.
+            types: vec![minimal_ref_type(cpp(&["ns", "Local"]), "::ns::Local")],
+            ..Default::default()
+        };
+        let (rust_code, h, _cpp) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        assert!(rust_code.contains("pub use ::bar_bindings::generated::Top;"));
+        let ns_module = rust_code
+            .split("pub mod ns {")
+            .nth(1)
+            .expect("no `ns` module");
+        assert!(ns_module.contains("pub use ::bar_bindings::generated::ns::Bar;"));
+        assert!(ns_module.contains("pub struct Local"));
+        assert_eq!(rust_code.matches("pub mod ns {").count(), 1);
+        assert!(h.contains("#include \"./bar.zng.h\""));
     }
 
     #[test]

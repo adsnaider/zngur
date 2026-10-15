@@ -251,10 +251,19 @@ impl Zngur {
             ));
         }
 
-        let crate_name = self
-            .crate_name
-            .or_else(|| std::env::var("CARGO_PKG_NAME").ok())
-            .unwrap_or_else(|| "crate".to_owned());
+        let crate_name = match (self.crate_name, &parse_result.spec.crate_name) {
+            (Some(given), Some(declared)) if &given != declared => {
+                return Err(format!(
+                    "the crate name `{given}` doesn't match `#crate {declared}` in `{}`",
+                    self.zng_file.display()
+                ));
+            }
+            (Some(given), _) => given,
+            (None, Some(declared)) => declared.clone(),
+            (None, None) => std::env::var("CARGO_PKG_NAME")
+                .ok()
+                .unwrap_or_else(|| "crate".to_owned()),
+        };
         // We will pass crate_name to ZngurGenerator instead of mutating spec.
         let panic_to_exception = parse_result.spec.convert_panic_to_exception.0;
         let mut file = ZngurGenerator::build_from_zng(parse_result.spec, crate_name);

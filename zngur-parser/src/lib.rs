@@ -308,6 +308,7 @@ struct ParsedImportPath {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ParsedItem<'a> {
     ConvertPanicToException(Span),
+    CrateName(&'a str, Span),
     CppAdditionalInclude(&'a str),
     UnstableFeature(&'a str),
     Mod {
@@ -337,6 +338,7 @@ enum ParsedItem<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProcessedItem<'a> {
     ConvertPanicToException(Span),
+    CrateName(&'a str, Span),
     CppAdditionalInclude(&'a str),
     Mod {
         path: ParsedPath<'a>,
@@ -714,10 +716,13 @@ impl ProcessedItem<'_> {
                     ),
                 }
             }
-            ProcessedItem::ModuleImport { path, span: _ } => {
-                r.spec
-                    .imported_modules
-                    .push(ModuleImport { path: path.clone() });
+            ProcessedItem::ModuleImport { path, span } => {
+                r.spec.imported_modules.push(ModuleImport {
+                    path: path.clone(),
+                    crate_name: None,
+                    cpp_types: vec![],
+                });
+                r.module_import_spans.push(span);
             }
             ProcessedItem::Type {
                 ty,
@@ -1204,6 +1209,22 @@ impl ProcessedItem<'_> {
                     }
                 }
             }
+            ProcessedItem::CrateName(name, span) => {
+                if ctx.depth > 0 {
+                    ctx.add_error_str(
+                        "`#crate` can only be used in the top-level file of a zngur module, not in merged files",
+                        span,
+                    );
+                    return;
+                }
+                match &r.spec.crate_name {
+                    Some(existing) if existing != name => ctx.add_error_str(
+                        &format!("conflicting `#crate`: already set to `{existing}`"),
+                        span,
+                    ),
+                    _ => r.spec.crate_name = Some(name.to_owned()),
+                }
+            }
         }
     }
 }
@@ -1617,6 +1638,9 @@ struct ParseContext<'this, 'source, 'cfg> {
     source: &'source str,
     source_id: SourceId,
     depth: usize,
+    /// Whether `import`ed modules are parsed (to find their `#crate` and `c++::` types). Only
+    /// for the module being generated, not for the imported modules themselves.
+    resolve_module_imports: bool,
     cfg_provider: &'cfg dyn RustCfgProvider,
     report_sink: &'cfg mut dyn ReportSink,
     /// All .zng files processed during parsing (main file + imports)
@@ -1644,6 +1668,7 @@ impl<'this, 'source, 'cfg> ParseContext<'this, 'source, 'cfg> {
             source_id,
             source,
             depth: 0,
+            resolve_module_imports: true,
             cfg_provider: cfg,
             report_sink,
             processed_files,
@@ -1670,6 +1695,7 @@ impl<'this, 'source, 'cfg> ParseContext<'this, 'source, 'cfg> {
             source_id,
             source,
             depth: self.depth + 1,
+            resolve_module_imports: self.resolve_module_imports,
             cfg_provider: self.cfg_provider,
             report_sink: self.report_sink,
             processed_files: self.processed_files.into_borrowed(),
@@ -1677,6 +1703,19 @@ impl<'this, 'source, 'cfg> ParseContext<'this, 'source, 'cfg> {
             sources: self.sources.into_borrowed(),
             recorded_spans: self.recorded_spans.into_borrowed(),
         }
+    }
+
+    /// build a parse context for the top-level file of an `import`ed module, which is parsed
+    /// into its own spec (it's the top level of that module, but its own imports aren't parsed)
+    fn nested_module<'borrowed, 'src>(
+        &'borrowed mut self,
+        path: &'src std::path::Path,
+        source: &'src str,
+    ) -> ParseContext<'borrowed, 'src, 'borrowed> {
+        let mut ctx = self.nested(path, source);
+        ctx.depth = 0;
+        ctx.resolve_module_imports = false;
+        ctx
     }
 
     /// the [`SourceId`] of the current source which can be fetched from the cache
@@ -1950,6 +1989,57 @@ impl<const ERRORS: bool, const WARNINGS: bool> ReportSink for StdErrReportSink<E
 }
 
 impl<'a> ParsedZngFile<'a> {
+    /// Parses the modules that the current file `import`s (from `first` on), to find their
+    /// `#crate` and the `c++::` types they declare, which this module can then refer to.
+    fn resolve_module_imports(
+        zngur: &mut ZngurSpecBuilder,
+        first: usize,
+        ctx: &mut ParseContext,
+        resolver: &impl ImportResolver,
+    ) {
+        let Some(dirname) = ctx.path.to_owned().parent().map(|d| d.to_owned()) else {
+            return;
+        };
+        for index in first..zngur.spec.imported_modules.len() {
+            let import_path = zngur.spec.imported_modules[index].path.clone();
+            let span = zngur.module_import_spans[index];
+            let Ok(text) = resolver.resolve_import(&dirname, &import_path) else {
+                // Not an error: an `import` only has to name the generated header (found via
+                // the C++ include path), so the `.zng` file may not be at this relative path.
+                // Its `c++::` types just can't be referred to from this module then.
+                continue;
+            };
+            let path = dirname.join(&import_path);
+            let imported = {
+                let mut module_ctx = ctx.nested_module(&path, &text);
+                let mut module = ZngurSpecBuilder::default();
+                Self::parse_into(&mut module, &mut module_ctx, resolver);
+                module.to_zngur(&mut module_ctx)
+            };
+            let cpp_types: Vec<Vec<String>> = imported
+                .types
+                .iter()
+                .filter_map(|ty| match &ty.ty {
+                    RustType::Cpp(segs) => Some(segs.clone()),
+                    _ => None,
+                })
+                .collect();
+            if !cpp_types.is_empty() && imported.crate_name.is_none() {
+                ctx.add_error_str(
+                    &format!(
+                        "imported module `{}` declares `c++::` types, so it needs a `#crate <name>` \
+                         directive for this module to find their Rust wrappers \
+                         (at `::<name>::generated::...`)",
+                        import_path.display()
+                    ),
+                    span,
+                );
+            }
+            let module_import = &mut zngur.spec.imported_modules[index];
+            module_import.crate_name = imported.crate_name;
+            module_import.cpp_types = cpp_types;
+        }
+    }
     fn parse_into(
         zngur: &mut ZngurSpecBuilder,
         ctx: &mut ParseContext,
@@ -1979,9 +2069,13 @@ impl<'a> ParsedZngFile<'a> {
                 .into_iter()
                 .map(|item| process_parsed_item(item, ctx)),
         );
+        let first_new_module_import = zngur.spec.imported_modules.len();
         ProcessedZngFile::new(aliases, items).into_zngur_spec(zngur, ctx);
         if ctx.reports().errors > 0 {
             return;
+        }
+        if ctx.resolve_module_imports {
+            Self::resolve_module_imports(zngur, first_new_module_import, ctx, resolver);
         }
 
         if let Some(dirname) = ctx.path.to_owned().parent() {
@@ -2114,6 +2208,7 @@ fn process_parsed_item<'a>(
         ParsedItem::ConvertPanicToException(span) => {
             Ret::Processed(ProcessedItem::ConvertPanicToException(span))
         }
+        ParsedItem::CrateName(name, span) => Ret::Processed(ProcessedItem::CrateName(name, span)),
         ParsedItem::UnstableFeature(_) => {
             // ignore
             Ret::Ignore
@@ -2203,6 +2298,8 @@ struct ZngurSpecBuilder {
     spec: ZngurSpec,
     templates: Vec<TemplateDef>,
     imports: Vec<Import>,
+    /// The span of each entry of `spec.imported_modules`, in the file that imports it.
+    module_import_spans: Vec<Span>,
 }
 
 impl ZngurSpecBuilder {
@@ -2211,6 +2308,7 @@ impl ZngurSpecBuilder {
             mut spec,
             templates,
             imports: _,
+            module_import_spans: _,
         } = self;
         for ty in &mut spec.types {
             let mut template_locations = Vec::new();
@@ -3124,6 +3222,10 @@ fn additional_include_item<'a>()
                 .boxed(),
             just(Token::Ident("convert_panic_to_exception"))
                 .map_with(|_, extra| ParsedItem::ConvertPanicToException(extra.span()))
+                .boxed(),
+            just(Token::KwCrate)
+                .ignore_then(select! { Token::Ident(name) => name })
+                .map_with(|name, extra| ParsedItem::CrateName(name, extra.span()))
                 .boxed(),
         )))
         .boxed()
