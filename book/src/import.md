@@ -183,7 +183,6 @@ with `#crate`, in its top-level file:
 #crate bar_bindings
 
 type c++::ns::Bar {
-    #cpp_ref;
 }
 ```
 

@@ -17,6 +17,9 @@ public:
   virtual ~CppTaskForRust() override {}
   using Inheritance = ::rust::RustInherit<CppTaskForRust, ::rust::crate::RustTask>;
 };
+
+// The name `main.zng` uses for it (C++ types are named by their path there).
+using CppTask = CppTaskForRust;
 }
 
 namespace rust {

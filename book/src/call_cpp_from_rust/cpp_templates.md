@@ -6,13 +6,12 @@ zngur types:
 ```zng
 type c++::std::unique_ptr<c++::geo::Point> {
     #layout(size = 8, align = 8);
-    #cpp_stack_owned;
+    #trivially_relocatable;
 
     unsafe fn get() const -> c++::geo::Point*;
 }
 
 type c++::std::map<i32, const c++::geo::Point*> {
-    #cpp_ref;
 }
 ```
 
@@ -36,7 +35,7 @@ Member functions, constructors and fields belong to each instantiation, like in 
 `unique_ptr<Point>` only has the functions declared for it.
 
 zngur marks `std::unique_ptr` (with the default deleter) as trivially relocatable, so it can be
-`#cpp_stack_owned`. For your own templates, specialize `rust::is_trivially_relocatable` as usual:
+held by value. For your own templates, specialize `rust::is_trivially_relocatable` as usual:
 
 ```cpp
 template <typename T>

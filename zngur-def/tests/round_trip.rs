@@ -159,68 +159,48 @@ type [u8] {
 }
 
 #[test]
-fn reparse_cpp_heap_allocated() {
+fn reparse_cpp_reference_only() {
     let _ = check_round_trip(
         r#"
-type crate::Way {
+type c++::osmium::Way {
+}
+type c++::osmium::Node {
     #layout(size = 16, align = 8);
-    #cpp_heap_allocated "::osmium::Way";
 }
     "#,
         expect![[r#"
-            type crate::Way {
-                #layout(size = 16, align = 8);
-                #cpp_heap_allocated "::osmium::Way";
+            type c++::osmium::Way {
             }
-        "#]],
-    );
-}
-#[test]
-fn reparse_cpp_ref() {
-    let _ = check_round_trip(
-        r#"
-type crate::Way {
-    #cpp_ref "::osmium::Way";
-}
-    "#,
-        expect![[r#"
-            type crate::Way {
-                #cpp_ref "::osmium::Way";
-            }
-        "#]],
-    );
-}
-#[test]
-fn reparse_cpp_stack_owned() {
-    let _ = check_round_trip(
-        r#"
-type crate::Way {
-    #layout(size = 16, align = 8);
-    #cpp_stack_owned "::osmium::Way";
-}
-    "#,
-        expect![[r#"
-            type crate::Way {
+
+            type c++::osmium::Node {
                 #layout(size = 16, align = 8);
-                #cpp_stack_owned "::osmium::Way";
             }
         "#]],
     );
 }
 
 #[test]
-fn reparse_cpp_stack_owned_conservative() {
+fn reparse_cpp_trivially_relocatable() {
     let _ = check_round_trip(
         r#"
-type crate::Way {
+type c++::osmium::Way {
+    #layout(size = 16, align = 8);
+    #trivially_relocatable;
+}
+type c++::osmium::Node {
     #layout_conservative(size = 16, align = 8);
-    #cpp_stack_owned "::osmium::Way";
+    #trivially_relocatable;
 }
     "#,
         expect![[r#"
-            type crate::Way {
+            type c++::osmium::Way {
+                #layout(size = 16, align = 8);
+                #trivially_relocatable;
+            }
+
+            type c++::osmium::Node {
                 #layout_conservative(size = 16, align = 8);
-                #cpp_stack_owned "::osmium::Way";
+                #trivially_relocatable;
             }
         "#]],
     );
@@ -421,7 +401,7 @@ fn reparse_cpp_methods() {
 #crate my_crate
 type c++::a::B {
     #layout(size = 8, align = 4);
-    #cpp_stack_owned;
+    #trivially_relocatable;
     unsafe fn value() const -> i32;
     unsafe fn set(i32, const c++::a::B&);
     safe static fn make(i32) -> c++::a::B;
@@ -438,7 +418,7 @@ type c++::a::B {
 
             type c++::a::B {
                 #layout(size = 8, align = 4);
-                #cpp_stack_owned "::a::B";
+                #trivially_relocatable;
 
                 field const x (type = i32);
                 field x (type = i32) as x_mut;
@@ -463,11 +443,10 @@ fn reparse_cpp_templates() {
 #crate my_crate
 type c++::std::unique_ptr<c++::a::B> {
     #layout(size = 8, align = 8);
-    #cpp_stack_owned;
+    #trivially_relocatable;
     unsafe fn get() const -> c++::a::B*;
 }
 type c++::std::map<i32, const c++::a::B*> {
-    #cpp_ref;
 }
         "#,
         expect![[r##"
@@ -475,13 +454,12 @@ type c++::std::map<i32, const c++::a::B*> {
 
             type c++::std::unique_ptr<c++::a::B> {
                 #layout(size = 8, align = 8);
-                #cpp_stack_owned "::std::unique_ptr< ::a::B >";
+                #trivially_relocatable;
 
                 unsafe fn get() const -> c++::a::B*;
             }
 
             type c++::std::map<i32, const c++::a::B*> {
-                #cpp_ref "::std::map< ::int32_t, const ::a::B* >";
             }
         "##]],
     );
@@ -495,7 +473,7 @@ fn reparse_cpp_functions() {
 mod c++::a {
     type B {
         #layout(size = 8, align = 4);
-        #cpp_stack_owned;
+        #trivially_relocatable;
     }
     unsafe fn f(const B&) -> i32;
     safe fn g(i32) -> B as make_b;
@@ -509,7 +487,7 @@ mod c++::a {
 
             type c++::a::B {
                 #layout(size = 8, align = 4);
-                #cpp_stack_owned "::a::B";
+                #trivially_relocatable;
             }
 
             mod c++::a {

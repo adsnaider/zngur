@@ -12,7 +12,7 @@ use zngur_def::{
 
 use crate::rust::IntoCpp;
 
-/// The C++ type of each type that Rust holds by value (`#cpp_stack_owned` types).
+/// The C++ type of each type that Rust holds by value (`c++::` types with a layout and `#trivially_relocatable`).
 pub type StackOwnedTypes = HashMap<RustType, String>;
 
 /// Renders bridge functions. They take their arguments and output the way Rust's generated code

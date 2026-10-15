@@ -1,11 +1,11 @@
 # C++ member functions
 
-zngur can call the member functions of `#cpp_stack_owned` and `#cpp_ref` types directly, with no
+zngur can call the member functions of `c++::` types directly, with no
 C++ code to write. Declare them in the type's block, the C++ way:
 
 ```zng
 type c++::geo::Point {
-    #cpp_stack_owned;
+    #trivially_relocatable;
     #layout(size = 8, align = 4);
 
     unsafe fn norm() const -> f64;
@@ -19,7 +19,7 @@ type c++::geo::Point {
 
 - `static` declares a static member function, and `const` after the parameters a `const` one.
 - The parameter and return types are the C++ ones, written as zngur types: builtins like `i32`,
-  `#cpp_stack_owned` types by value, and [C++ pointers and references](./cpp_pointers.md).
+  C++ types that Rust holds by value, and [C++ pointers and references](./cpp_pointers.md).
 - `as` gives the Rust function a different name, e.g. for C++ overloads, which Rust doesn't have.
 - Each member function is `safe` or `unsafe`, like the functions in `extern "C++"` blocks. Since
   `this` is a C++ pointer, only static member functions without C++ pointer or reference
@@ -45,7 +45,7 @@ They're not Rust methods (`p.norm()`), because Rust methods can't take a `CppPtr
 ## In C++
 
 zngur generates a function that calls the member function, so you don't implement anything in
-C++. Arguments and results of `#cpp_stack_owned` types are moved, and references are passed as
+C++. Arguments and results that Rust holds by value are moved, and references are passed as
 references.
 
 Since that's an ordinary C++ call, overloads and default arguments work as in C++, and calling a

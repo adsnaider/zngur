@@ -78,10 +78,6 @@ extern "C" {
       uint32_t {{ discriminant }} (uint8_t* i) noexcept;
     {% endif %}
 
-    {% if let Some(cpp_heap_allocated) = td.cpp_heap_allocated %}
-      ::{{ self.namespace }}::ZngurCppOpaqueOwnedObject* {{ cpp_heap_allocated.bridge_fn }}(uint8_t*);
-    {% endif %}
-
     {% if !td.layout.is_stack_allocated() && !td.layout.is_only_by_ref() %}
       size_t {{ td.layout.size_fn() }}();
       uint8_t* {{ td.layout.alloc_fn() }}();
@@ -149,6 +145,10 @@ namespace {{ self.namespace }} {
     struct CppTypeOf< {{ td.ty }} > {
       using type = {{ cpp_type }};
     };
+    {% if let Some(cpp_ref) = td.cpp_ref %}
+    {# Rust only refers to these, but their declared layout (if any) is still checked. #}
+    {{ cpp_ref.layout_checks() }}
+    {% endif %}
   {% else if td.ty.path.to_string() == format!("::{}::Bool", self.namespace) %}
     template<>
     struct CppTypeOf< {{ td.ty }} > {
@@ -383,23 +383,6 @@ namespace {{ self.namespace }} {
 
       {{ td.render_make_box(name, self.namespace, self.crate_name) }}
 
-      {% if let Some(cpp_heap_allocated) = td.cpp_heap_allocated %}
-          inline {{ cpp_heap_allocated.cpp_type }}& cpp() {
-              return (*{{ cpp_heap_allocated.bridge_fn }}(::{{ self.namespace }}::__zngur_internal_data_ptr(*this))).as_cpp< {{ cpp_heap_allocated.cpp_type }} >();
-          }
-
-          inline {{ name }}(::{{ self.namespace }}::ZngurCppOpaqueOwnedObject&& o) noexcept {
-              {% if !is_copy %}
-              this->drop_flag = true;
-              {% endif %}
-              *reinterpret_cast<::{{ self.namespace }}::ZngurCppOpaqueOwnedObject*>(::{{ self.namespace }}::__zngur_internal_data_ptr(*this)) = ::std::move(o);
-          }
-
-          template<typename... Args>
-          static inline {{ name }} build(Args&&... args) {
-              return {{ name }}(::{{ self.namespace }}::ZngurCppOpaqueOwnedObject::build< {{ cpp_heap_allocated.cpp_type }} >(::std::forward<Args>(args)...));
-          }
-      {% endif %}
 
       {% if let Some(cpp_stack_owned) = td.cpp_stack_owned %}
           {% if td.is_layout_conservative %}
@@ -724,17 +707,11 @@ namespace {{ self.namespace }} {
 
     {{ td.render_make_box_ref(td.ty.path.name(), self.namespace, self.crate_name) }}
 
-    {% if let Some(cpp_heap_allocated) = td.cpp_heap_allocated %}
-      inline {{ cpp_heap_allocated.cpp_type }}& cpp() {
-          return (*{{ cpp_heap_allocated.bridge_fn }}(reinterpret_cast<uint8_t*>(__zngur_data))).as_cpp< {{ cpp_heap_allocated.cpp_type }} >();
-      }
-    {% endif %}
-
     {% if let Some(cpp_ref) = td.cpp_ref %}
-      inline {{ cpp_ref.0 }}& cpp() {
-          return *reinterpret_cast< {{ cpp_ref.0 }}* >(__zngur_data);
+      inline {{ cpp_ref.name }}& cpp() {
+          return *reinterpret_cast< {{ cpp_ref.name }}* >(__zngur_data);
       }
-      inline RefMut(const {{ cpp_ref.0 }}& t) : __zngur_data(reinterpret_cast<size_t>(&t)) {}
+      inline RefMut(const {{ cpp_ref.name }}& t) : __zngur_data(reinterpret_cast<size_t>(&t)) {}
     {% endif %}
 
     {% if let Some(cpp_stack_owned) = td.cpp_stack_owned %}
@@ -948,17 +925,11 @@ namespace {{ self.namespace }} {
 
     {{ td.render_make_box_ref_only(td.ty.path.name(), self.namespace, self.crate_name) }}
 
-    {% if let Some(cpp_heap_allocated) = td.cpp_heap_allocated %}
-      inline {{ cpp_heap_allocated.cpp_type }}& cpp() {
-        return (*{{ cpp_heap_allocated.bridge_fn }}(reinterpret_cast<uint8_t*>(__zngur_data))).as_cpp< {{ cpp_heap_allocated.cpp_type }} >();
-      }
-    {% endif %}
-
     {% if let Some(cpp_ref) = td.cpp_ref %}
-      inline {{ cpp_ref.0 }}& cpp() {
-        return *reinterpret_cast< {{ cpp_ref.0 }}* >(__zngur_data);
+      inline {{ cpp_ref.name }}& cpp() {
+        return *reinterpret_cast< {{ cpp_ref.name }}* >(__zngur_data);
       }
-      inline Ref(const {{ cpp_ref.0 }}& t) : __zngur_data(reinterpret_cast<size_t>(&t)) {}
+      inline Ref(const {{ cpp_ref.name }}& t) : __zngur_data(reinterpret_cast<size_t>(&t)) {}
     {% endif %}
 
     {% if let Some(cpp_stack_owned) = td.cpp_stack_owned %}

@@ -5,9 +5,7 @@ use std::{
 
 use indexmap::IndexMap;
 use itertools::Itertools;
-use zngur_def::{
-    CppHeapAllocatedData, CppRef, CppStackOwned, RustTrait, ZngurFieldData, ZngurMethodReceiver,
-};
+use zngur_def::{LayoutPolicy, RustTrait, ZngurFieldData, ZngurMethodReceiver};
 
 use crate::{
     ZngurWellknownTraitData,
@@ -515,6 +513,44 @@ impl CppLayoutPolicy {
     }
 }
 
+/// A C++ type that Rust holds by value, by its C++ name.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct CppStackOwned(pub String);
+
+impl std::fmt::Display for CppStackOwned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// A C++ type that Rust only refers to: its Rust wrapper is zero-sized, and Rust references to it
+/// are C++ pointers.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct CppRef {
+    /// The C++ name.
+    pub name: String,
+    /// The layout from the `.zng` file, if any. It's only checked in C++.
+    pub layout: Option<LayoutPolicy>,
+}
+
+impl CppRef {
+    /// `static_assert`s that check the declared layout, if any.
+    pub fn layout_checks(&self) -> String {
+        let name = &self.name;
+        match self.layout {
+            Some(LayoutPolicy::StackAllocated { size, align }) => format!(
+                "static_assert(sizeof({name}) == {size}, \"Size mismatch\");\n    \
+                 static_assert(alignof({name}) == {align}, \"Alignment mismatch\");"
+            ),
+            Some(LayoutPolicy::Conservative { size, align }) => format!(
+                "static_assert(sizeof({name}) <= {size}, \"Size mismatch\");\n    \
+                 static_assert(alignof({name}) <= {align}, \"Alignment mismatch\");"
+            ),
+            _ => String::new(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct CppTypeDefinition {
     pub ty: CppType,
@@ -530,10 +566,9 @@ pub struct CppTypeDefinition {
     pub from_trait: Option<RustTrait>,
     pub from_trait_ref: Option<RustTrait>,
     pub wellknown_traits: Vec<ZngurWellknownTraitData>,
-    pub cpp_heap_allocated: Option<CppHeapAllocatedData>,
     pub cpp_ref: Option<CppRef>,
     pub cpp_stack_owned: Option<CppStackOwned>,
-    /// The (mangled) name of the C++ function that destroys a `#cpp_stack_owned` object. Rust
+    /// The (mangled) name of the C++ function that destroys a C++ object that Rust holds by value. Rust
     /// calls it by this name, so the C++ side must define it with exactly this name.
     pub stack_owned_destructor: Option<String>,
 }
@@ -545,7 +580,7 @@ impl CppTypeDefinition {
     pub fn cpp_object_type(&self) -> Option<&str> {
         match (&self.cpp_stack_owned, &self.cpp_ref) {
             (Some(stack_owned), _) => Some(&stack_owned.0),
-            (None, Some(cpp_ref)) => Some(&cpp_ref.0),
+            (None, Some(cpp_ref)) => Some(&cpp_ref.name),
             (None, None) => None,
         }
     }
@@ -669,7 +704,6 @@ impl Default for CppTypeDefinition {
             wellknown_traits: vec![],
             from_trait: None,
             from_trait_ref: None,
-            cpp_heap_allocated: None,
             cpp_ref: None,
             cpp_stack_owned: None,
             stack_owned_destructor: None,
@@ -742,7 +776,7 @@ impl CppFile {
             || !self.exported_impls.is_empty()
             || self.coro_support.is_some()
             || !self.cpp_method_bridges.is_empty()
-            // Rust calls the destructors of `#cpp_stack_owned` types, which are defined here.
+            // Rust calls the destructors of C++ types that it holds by value, which are defined here.
             || self
                 .type_defs
                 .iter()

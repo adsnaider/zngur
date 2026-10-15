@@ -3,13 +3,13 @@
 "
 
 type c++::task::CppTask {
-    #cpp_stack_owned "::task::CppTaskForRust";
+    // `::task::CppTask` is an alias of `::task::CppTaskForRust`.
+    #trivially_relocatable;
     #layout(size = 8, align = 8);
 }
 
 type c++::task::Dispatcher {
-    // The C++ type name defaults to the path: `::task::Dispatcher`.
-    #cpp_stack_owned;
+    #trivially_relocatable;
     #layout(size = 1, align = 1);
 }
 

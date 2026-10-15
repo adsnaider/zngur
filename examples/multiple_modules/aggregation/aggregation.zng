@@ -8,14 +8,17 @@ import "packet.zng";
 #include <stats.h>
 "
 
-type c++::cpp_stats::StatsAccumulator {
-    #layout(size = 16, align = 8);
-    #cpp_heap_allocated;
+// Rust only refers to the C++ object, which is owned through a `std::unique_ptr`.
+type c++::cpp_stats::StatsAccumulator {}
+
+type c++::std::unique_ptr<c++::cpp_stats::StatsAccumulator> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
 }
 
 extern "C++" {
     impl c++::cpp_stats::StatsAccumulator {
-        safe fn create() -> c++::cpp_stats::StatsAccumulator;
+        safe fn create() -> c++::std::unique_ptr<c++::cpp_stats::StatsAccumulator>;
         safe fn add_packet(&mut self, packet::Packet);
         safe fn print_report(&self);
     }

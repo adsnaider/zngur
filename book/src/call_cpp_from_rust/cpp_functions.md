@@ -13,7 +13,7 @@ mod c++::geo {
 ```
 
 - The parameter and return types are the C++ ones, written as zngur types: builtins like `i32`,
-  `#cpp_stack_owned` types by value, and [C++ pointers and references](./cpp_pointers.md).
+  C++ types that Rust holds by value, and [C++ pointers and references](./cpp_pointers.md).
 - `as` gives the Rust function a different name, e.g. for C++ overloads, which Rust doesn't have.
 - Each function is `safe` or `unsafe`, like the functions in `extern "C++"` blocks. Functions with
   C++ pointer or reference parameters must be `unsafe`.

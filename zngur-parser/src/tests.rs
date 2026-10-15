@@ -1,9 +1,7 @@
 use std::panic::catch_unwind;
 
 use expect_test::{Expect, expect};
-use zngur_def::{
-    CppHeapAllocated, CppRef, CppStackOwned, LayoutPolicy, RustPathAndGenerics, RustType, ZngurSpec,
-};
+use zngur_def::{LayoutPolicy, RustPathAndGenerics, RustType, ZngurSpec};
 
 use crate::{
     DefaultImportResolver, EntityPath, ImportResolver, ParsedZngFile, ReportSink, Scope,
@@ -236,284 +234,6 @@ type ::std::string::String {
                │            ╰───────── Duplicate layout policy found
             ───╯
         "#]],
-    );
-}
-
-#[test]
-fn cpp_ref_should_not_need_layout_info() {
-    check_fail(
-        r#"
-type crate::Way {
-    #layout(size = 1, align = 2);
-
-    #cpp_ref "::osmium::Way";
-}
-    "#,
-        expect![[r#"
-            Error: Duplicate layout policy found
-               ╭─[ test.zng:3:5 ]
-               │
-             3 │     #layout(size = 1, align = 2);
-               │     ──────────────┬─────────────  
-               │                   ╰─────────────── Duplicate layout policy found
-            ───╯
-        "#]],
-    );
-    check_success(
-        r#"
-type crate::Way {
-    #cpp_ref "::osmium::Way";
-}
-    "#,
-    );
-}
-
-#[test]
-fn cpp_heap_allocated_directive_parses() {
-    let result = parse_str(
-        r#"
-type crate::Way {
-    #layout(size = 16, align = 8);
-    #cpp_heap_allocated "::osmium::Way";
-}
-    "#,
-        NullCfg,
-        |_| {},
-    );
-    let ty = result.spec.types.first().expect("no type parsed");
-    assert_eq!(
-        ty.cpp_heap_allocated,
-        Some(CppHeapAllocated("::osmium::Way".to_owned())),
-    );
-}
-
-#[test]
-fn cpp_stack_owned_valid_exact_layout() {
-    let result = parse_str(
-        r#"
-type crate::Way {
-    #layout(size = 16, align = 8);
-    #cpp_stack_owned "::osmium::Way";
-}
-    "#,
-        NullCfg,
-        |_| {},
-    );
-    let ty = result.spec.types.first().expect("no type parsed");
-    assert_eq!(
-        ty.cpp_stack_owned,
-        Some(CppStackOwned("::osmium::Way".to_owned()))
-    );
-    assert_eq!(
-        ty.layout,
-        Some(LayoutPolicy::StackAllocated { size: 16, align: 8 })
-    );
-}
-
-#[test]
-fn cpp_stack_owned_valid_conservative_layout() {
-    let result = parse_str(
-        r#"
-type crate::Way {
-    #layout_conservative(size = 32, align = 16);
-    #cpp_stack_owned "::osmium::Way";
-}
-    "#,
-        NullCfg,
-        |_| {},
-    );
-    let ty = result.spec.types.first().expect("no type parsed");
-    assert_eq!(
-        ty.cpp_stack_owned,
-        Some(CppStackOwned("::osmium::Way".to_owned()))
-    );
-    assert_eq!(
-        ty.layout,
-        Some(LayoutPolicy::Conservative {
-            size: 32,
-            align: 16
-        })
-    );
-}
-
-#[test]
-fn cpp_stack_owned_error_with_heap_allocated() {
-    check_fail(
-        r#"
-type crate::Way {
-    #heap_allocated;
-    #cpp_stack_owned "::osmium::Way";
-}
-    "#,
-        expect![[r#"
-            Error: `#cpp_stack_owned` cannot be used with `#heap_allocated` for type crate::Way.
-               ╭─[ test.zng:4:5 ]
-               │
-             4 │     #cpp_stack_owned "::osmium::Way";
-               │     ────────────────┬────────────────  
-               │                     ╰────────────────── `#cpp_stack_owned` declared here
-               │
-               ├─[ test.zng:4:5 ]
-               │
-             3 │     #heap_allocated;
-               │     ───────┬───────  
-               │            ╰───────── `#heap_allocated` declared here
-               │ 
-               │ Note: `#cpp_stack_owned` types must use `#layout` or `#layout_conservative`.
-            ───╯
-        "#]],
-    );
-}
-
-#[test]
-fn cpp_stack_owned_error_with_only_by_ref() {
-    check_fail(
-        r#"
-type crate::Way {
-    #only_by_ref;
-    #cpp_stack_owned "::osmium::Way";
-}
-    "#,
-        expect![[r#"
-            Error: `#cpp_stack_owned` cannot be used with `#only_by_ref` for type crate::Way.
-               ╭─[ test.zng:4:5 ]
-               │
-             4 │     #cpp_stack_owned "::osmium::Way";
-               │     ────────────────┬────────────────  
-               │                     ╰────────────────── `#cpp_stack_owned` declared here
-               │
-               ├─[ test.zng:4:5 ]
-               │
-             3 │     #only_by_ref;
-               │     ──────┬─────  
-               │           ╰─────── `#only_by_ref` declared here
-               │ 
-               │ Note: `#cpp_stack_owned` types must use `#layout` or `#layout_conservative`.
-            ───╯
-        "#]],
-    );
-}
-
-#[test]
-fn cpp_stack_owned_error_with_no_layout() {
-    check_fail(
-        r#"
-type crate::Way {
-    #cpp_stack_owned "::osmium::Way";
-}
-    "#,
-        expect![[r#"
-            Error: No layout policy found for type crate::Way.
-               ╭─[ test.zng:1:1 ]
-               │
-             2 │ type crate::Way {
-               │      ─────┬────  
-               │           ╰────── Type first declared here.
-               │ 
-               │ Note 1: Use one of `#layout(size = X, align = Y)`, `#heap_allocated` or `#only_by_ref`.
-               │ 
-               │ Note 2: Type is declared with `#cpp_stack_owned` which requires a layout directive like `#layout(size = X, align = Y)` or `#layout_conservative(size = X, align = Y)`.
-            ───╯
-        "#]],
-    );
-}
-
-#[test]
-fn cpp_stack_owned_old_syntax_error_with_help() {
-    check_fail(
-        r#"
-type crate::Way {
-    #cpp_stack_owned "::osmium::Way" (size = 16, align = 8);
-}
-    "#,
-        expect![[r#"
-            Error: Old syntax `#cpp_stack_owned` with layout properties is no longer supported.
-               ╭─[ test.zng:3:5 ]
-               │
-             3 │     #cpp_stack_owned "::osmium::Way" (size = 16, align = 8);
-               │     ────────────────────────────┬───────────────────────────  
-               │                                 ╰───────────────────────────── layout parameters no longer accepted here
-               │ 
-               │ Help: layout moved to its own directive: `#cpp_stack_owned "::osmium::Way"; #layout(size = 16, align = 8);`
-            ───╯
-            Error: No layout policy found for type crate::Way.
-               ╭─[ test.zng:1:1 ]
-               │
-             2 │ type crate::Way {
-               │      ─────┬────  
-               │           ╰────── Type first declared here.
-               │ 
-               │ Note: Use one of `#layout(size = X, align = Y)`, `#heap_allocated` or `#only_by_ref`.
-            ───╯
-        "#]],
-    );
-}
-
-#[test]
-fn cpp_value_emits_deprecation_warning_and_forwards_to_cpp_heap_allocated() {
-    let mut warnings = Vec::new();
-    let result = parse_str(
-        r#"
-type crate::Way {
-    #layout(size = 16, align = 8);
-    #cpp_value "0" "::osmium::Way";
-}
-    "#,
-        NullCfg,
-        &mut |w: &str| warnings.push(w.to_owned()),
-    );
-    assert_eq!(warnings.len(), 1);
-    expect![[r#"
-        Warning: #cpp_value is deprecated; use #cpp_heap_allocated instead
-           ╭─[ test.zng:4:5 ]
-           │
-         4 │     #cpp_value "0" "::osmium::Way";
-           │     ───────────────┬───────────────  
-           │                    ╰───────────────── #cpp_value is deprecated; use #cpp_heap_allocated instead
-        ───╯
-    "#]].assert_eq(&warnings[0]);
-    let ty = result.spec.types.first().expect("no type parsed");
-    assert_eq!(
-        ty.cpp_heap_allocated,
-        Some(CppHeapAllocated("::osmium::Way".to_owned())),
-    );
-}
-
-#[test]
-fn cpp_value_and_cpp_heap_allocated_merge_as_equivalent_across_files() {
-    let resolver = MockFilesystem::new(vec![(
-        "./a.zng",
-        r#"
-type crate::Way {
-    #layout(size = 16, align = 8);
-    #cpp_value "0" "::osmium::Way";
-}
-    "#,
-    )]);
-
-    let mut warnings = Vec::new();
-    let parsed = parse_str_with_resolver(
-        r#"
-merge "./a.zng";
-type crate::Way {
-    #cpp_heap_allocated "::osmium::Way";
-}
-    "#,
-        NullCfg,
-        &resolver,
-        &mut |w: &str| warnings.push(w.to_owned()),
-    );
-    // The #cpp_value directive that triggered this warning lives in the imported
-    // a.zng, not the root file, so the rendered warning must show a.zng's own
-    // source snippet -- this exercises the cross-file source lookup used when
-    // rendering a warning that was merged in from an imported file's context.
-    assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].contains("a.zng"));
-    assert!(warnings[0].contains(r#"#cpp_value "0" "::osmium::Way";"#));
-    let ty = parsed.spec.types.first().expect("no type parsed");
-    assert_eq!(
-        ty.cpp_heap_allocated,
-        Some(CppHeapAllocated("::osmium::Way".to_owned())),
     );
 }
 
@@ -1452,7 +1172,7 @@ fn imported_module_cpp_types_and_crate_are_resolved() {
 
 type c++::ns::Bar {
     #layout(size = 8, align = 4);
-    #cpp_stack_owned;
+    #trivially_relocatable;
 }
 
 type crate::RustOnly {
@@ -1491,7 +1211,6 @@ fn imported_module_with_cpp_types_needs_a_crate() {
         "./bar.zng",
         r#"
 type c++::ns::Bar {
-    #cpp_ref;
 }
 "#,
     )]);
@@ -1612,159 +1331,12 @@ fn assert_cpp(expected: &[&str], ty: &RustType) {
 }
 
 #[test]
-fn cpp_path_with_cpp_heap_allocated_parses() {
-    let parsed = parse_str(
-        r#"
-type c++::a::b::Name {
-    #layout(size = 16, align = 8);
-    #cpp_heap_allocated "::foo::Bar";
-}
-    "#,
-        NullCfg,
-        |_| {},
-    );
-    let ty = parsed.spec.types.first().expect("no type parsed");
-    assert_cpp(&["a", "b", "Name"], &ty.ty);
-    // The c++:: segments are a Rust-side placement hint only; the C++-side path
-    // in #cpp_heap_allocated's string argument is independent of them.
-    assert_eq!(
-        ty.cpp_heap_allocated,
-        Some(CppHeapAllocated("::foo::Bar".to_owned())),
-    );
-}
-
-#[test]
-fn cpp_path_with_cpp_ref_parses_and_forces_zero_sized_layout() {
-    let parsed = parse_str(
-        r#"
-type c++::a::b::Name {
-    #cpp_ref "::foo::Bar";
-}
-    "#,
-        NullCfg,
-        |_| {},
-    );
-    let ty = parsed.spec.types.first().expect("no type parsed");
-    assert_cpp(&["a", "b", "Name"], &ty.ty);
-    assert_eq!(ty.cpp_ref, Some(CppRef("::foo::Bar".to_owned())));
-    assert_eq!(ty.layout, Some(LayoutPolicy::ZERO_SIZED_TYPE));
-}
-
-#[test]
-fn cpp_path_with_cpp_stack_owned_parses() {
-    let parsed = parse_str(
-        r#"
-type c++::a::b::Name {
-    #cpp_stack_owned "::foo::Bar";
-    #layout(size = 8, align = 4);
-}
-    "#,
-        NullCfg,
-        |_| {},
-    );
-    let ty = parsed.spec.types.first().expect("no type parsed");
-    assert_cpp(&["a", "b", "Name"], &ty.ty);
-    assert_eq!(
-        ty.cpp_stack_owned,
-        Some(CppStackOwned("::foo::Bar".to_owned())),
-    );
-    assert_eq!(
-        ty.layout,
-        Some(LayoutPolicy::StackAllocated { size: 8, align: 4 }),
-    );
-}
-
-#[test]
-fn cpp_type_name_defaults_to_the_cpp_path() {
-    let parsed = parse_str(
-        r#"
-type c++::a::b::Stack {
-    #cpp_stack_owned;
-    #layout(size = 8, align = 4);
-}
-
-mod c++::a {
-    type Ref {
-        #cpp_ref;
-    }
-
-    type Heap {
-        #layout(size = 16, align = 8);
-        #cpp_heap_allocated;
-    }
-}
-
-type c++::a::Explicit {
-    #cpp_ref "::other::Name";
-}
-    "#,
-        NullCfg,
-        |_| {},
-    );
-    let ty = |path: &[&str]| {
-        parsed
-            .spec
-            .types
-            .iter()
-            .find(|t| matches!(&t.ty, RustType::Cpp(segs) if segs.path == path))
-            .unwrap_or_else(|| panic!("no type {path:?}"))
-    };
-    assert_eq!(
-        ty(&["a", "b", "Stack"]).cpp_stack_owned,
-        Some(CppStackOwned("::a::b::Stack".to_owned())),
-    );
-    assert_eq!(
-        ty(&["a", "Ref"]).cpp_ref,
-        Some(CppRef("::a::Ref".to_owned()))
-    );
-    assert_eq!(
-        ty(&["a", "Heap"]).cpp_heap_allocated,
-        Some(CppHeapAllocated("::a::Heap".to_owned())),
-    );
-    // An explicit name still wins.
-    assert_eq!(
-        ty(&["a", "Explicit"]).cpp_ref,
-        Some(CppRef("::other::Name".to_owned())),
-    );
-}
-
-#[test]
-fn cpp_type_name_required_for_rust_paths() {
-    check_fail(
-        r#"
-type crate::Foo {
-    #cpp_ref;
-}
-    "#,
-        expect![[r#"
-            Error: the C++ type name can only be omitted for `c++::` types, whose path is the name
-               ╭─[ test.zng:3:5 ]
-               │
-             3 │     #cpp_ref;
-               │     ────┬────  
-               │         ╰────── the C++ type name can only be omitted for `c++::` types, whose path is the name
-            ───╯
-            Error: No layout policy found for type crate::Foo.
-               ╭─[ test.zng:1:1 ]
-               │
-             2 │ type crate::Foo {
-               │      ─────┬────  
-               │           ╰────── Type first declared here.
-               │ 
-               │ Note: Use one of `#layout(size = X, align = Y)`, `#heap_allocated` or `#only_by_ref`.
-            ───╯
-        "#]],
-    );
-}
-
-#[test]
 fn cpp_pointers_and_references_parse() {
     use zngur_def::{CppIndirection, Mutability, PrimitiveRustType};
 
     let parsed = parse_str(
         r#"
 type c++::a::B {
-    #cpp_ref;
 }
 
 extern "C++" {
@@ -1798,7 +1370,6 @@ fn mod_cpp_shorthand_matches_explicit_cpp_path() {
         r#"
 type c++::a::b::Name {
     #layout(size = 16, align = 8);
-    #cpp_heap_allocated "::x";
 }
     "#,
         NullCfg,
@@ -1809,7 +1380,6 @@ type c++::a::b::Name {
 mod c++::a::b {
     type Name {
         #layout(size = 16, align = 8);
-        #cpp_heap_allocated "::x";
     }
 }
     "#,
@@ -1833,7 +1403,6 @@ use c++::a::Foo as MyFoo;
 
 type MyFoo {
     #layout(size = 16, align = 8);
-    #cpp_heap_allocated "::x";
 }
     "#,
         NullCfg,
@@ -1943,7 +1512,6 @@ fn cpp_path_lexer_tolerates_whitespace_between_tokens() {
         r#"
 type c++::Name {
     #layout(size = 16, align = 8);
-    #cpp_heap_allocated "::x";
 }
     "#,
         NullCfg,
@@ -1953,7 +1521,6 @@ type c++::Name {
         r#"
 type c++ :: Name {
     #layout(size = 16, align = 8);
-    #cpp_heap_allocated "::x";
 }
     "#,
         NullCfg,
@@ -2110,7 +1677,6 @@ mod c++::a {
     mod b {
         type Name {
             #layout(size = 16, align = 8);
-            #cpp_heap_allocated "::x";
         }
     }
 }
@@ -2134,7 +1700,6 @@ use ::std::string::String as MyString;
 mod c++::a {
     type Name {
         #layout(size = 16, align = 8);
-        #cpp_heap_allocated "::x";
         field s (offset = auto, type = MyString);
     }
 }
@@ -2225,7 +1790,7 @@ fn cpp_methods_parse() {
 mod c++::a {
     type B {
         #layout(size = 8, align = 4);
-        #cpp_stack_owned;
+        #trivially_relocatable;
 
         unsafe fn value() const -> i32;
         unsafe fn set(i32, const B&);
@@ -2288,7 +1853,7 @@ fn safe_cpp_method_with_this_is_rejected() {
         r#"
 type c++::B {
     #layout(size = 8, align = 4);
-    #cpp_stack_owned;
+    #trivially_relocatable;
     safe fn value() const -> i32;
 }
 "#,
@@ -2310,7 +1875,7 @@ fn safe_static_cpp_method_with_cpp_ptr_is_rejected() {
         r#"
 type c++::B {
     #layout(size = 8, align = 4);
-    #cpp_stack_owned;
+    #trivially_relocatable;
     safe static fn sum(const c++::B&) -> i32;
 }
 "#,
@@ -2332,7 +1897,7 @@ fn static_const_cpp_method_is_rejected() {
         r#"
 type c++::B {
     #layout(size = 8, align = 4);
-    #cpp_stack_owned;
+    #trivially_relocatable;
     safe static fn make() const -> c++::B;
 }
 "#,
@@ -2358,12 +1923,12 @@ type crate::Foo {
 }
 "#,
         expect![[r#"
-            Error: C++ member functions (`safe fn` / `unsafe fn`) can only be declared on `#cpp_stack_owned` or `#cpp_ref` types
+            Error: C++ member functions (`safe fn` / `unsafe fn`) can only be declared on `c++::` types
                ╭─[ test.zng:2:6 ]
                │
              2 │ type crate::Foo {
                │      ─────┬────  
-               │           ╰────── C++ member functions (`safe fn` / `unsafe fn`) can only be declared on `#cpp_stack_owned` or `#cpp_ref` types
+               │           ╰────── C++ member functions (`safe fn` / `unsafe fn`) can only be declared on `c++::` types
             ───╯
         "#]],
     );
@@ -2376,7 +1941,7 @@ fn conflicting_cpp_methods_across_files() {
         r#"
 type c++::B {
     #layout(size = 8, align = 4);
-    #cpp_stack_owned;
+    #trivially_relocatable;
     unsafe fn value() const -> i32;
 }
 "#,
@@ -2420,7 +1985,7 @@ fn cpp_methods_can_be_declared_in_another_file() {
         r#"
 type c++::B {
     #layout(size = 8, align = 4);
-    #cpp_stack_owned;
+    #trivially_relocatable;
     unsafe fn value() const -> i32;
 }
 "#,
@@ -2450,7 +2015,7 @@ fn cpp_constructors_parse() {
         r#"
 type c++::B {
     #layout(size = 8, align = 4);
-    #cpp_stack_owned;
+    #trivially_relocatable;
 
     safe constructor();
     safe constructor(i32, i32);
@@ -2485,7 +2050,7 @@ fn safe_cpp_constructor_with_cpp_ptr_is_rejected() {
         r#"
 type c++::B {
     #layout(size = 8, align = 4);
-    #cpp_stack_owned;
+    #trivially_relocatable;
     safe constructor(const c++::B&);
 }
 "#,
@@ -2507,7 +2072,7 @@ fn cpp_constructors_with_the_same_rust_signature_are_rejected() {
         r#"
 type c++::B {
     #layout(size = 8, align = 4);
-    #cpp_stack_owned;
+    #trivially_relocatable;
     unsafe constructor(const c++::B&);
     unsafe constructor(const c++::B*);
 }
@@ -2529,17 +2094,16 @@ fn cpp_constructor_on_cpp_ref_type_is_rejected() {
     check_fail(
         r#"
 type c++::B {
-    #cpp_ref;
     safe constructor(i32);
 }
 "#,
         expect![[r#"
-            Error: C++ constructors can only be declared on `#cpp_stack_owned` types
+            Error: C++ constructors can only be declared on `c++::` types that Rust holds by value (with a layout and `#trivially_relocatable`)
                ╭─[ test.zng:2:6 ]
                │
              2 │ type c++::B {
                │      ───┬──  
-               │         ╰──── C++ constructors can only be declared on `#cpp_stack_owned` types
+               │         ╰──── C++ constructors can only be declared on `c++::` types that Rust holds by value (with a layout and `#trivially_relocatable`)
             ───╯
         "#]],
     );
@@ -2554,7 +2118,7 @@ fn cpp_functions_parse() {
 mod c++::a {
     type B {
         #layout(size = 8, align = 4);
-        #cpp_stack_owned;
+        #trivially_relocatable;
     }
 
     mod b {
@@ -2642,7 +2206,7 @@ fn cpp_fields_parse() {
         r#"
 type c++::B {
     #layout(size = 8, align = 4);
-    #cpp_stack_owned;
+    #trivially_relocatable;
 
     field const x (type = i32);
     field x (type = i32) as x_mut;
@@ -2676,12 +2240,12 @@ type crate::Foo {
 }
 "#,
         expect![[r#"
-            Error: C++ field accessors (`field name (type = T)`) can only be declared on `#cpp_stack_owned` or `#cpp_ref` types
+            Error: C++ field accessors (`field name (type = T)`) can only be declared on `c++::` types
                ╭─[ test.zng:2:6 ]
                │
              2 │ type crate::Foo {
                │      ─────┬────  
-               │           ╰────── C++ field accessors (`field name (type = T)`) can only be declared on `#cpp_stack_owned` or `#cpp_ref` types
+               │           ╰────── C++ field accessors (`field name (type = T)`) can only be declared on `c++::` types
             ───╯
         "#]],
     );
@@ -2694,16 +2258,14 @@ fn cpp_template_instantiations_parse() {
     let parsed = parse_str(
         r#"
 type c++::a::B {
-    #cpp_ref;
 }
 
 type c++::std::unique_ptr<c++::a::B> {
     #layout(size = 8, align = 8);
-    #cpp_stack_owned;
+    #trivially_relocatable;
 }
 
 type c++::std::map<i32, const c++::a::B*> {
-    #cpp_ref;
 }
 "#,
         NullCfg,
@@ -2719,10 +2281,7 @@ type c++::std::map<i32, const c++::a::B*> {
         })
     );
     // The C++ name includes the template arguments, spelled the C++ way.
-    assert_eq!(
-        types[1].cpp_stack_owned.as_ref().unwrap().0,
-        "::std::unique_ptr< ::a::B >"
-    );
+    assert_eq!(types[1].cpp_name().unwrap(), "::std::unique_ptr< ::a::B >");
     assert_eq!(
         types[2].ty,
         RustType::Cpp(CppTypePath {
@@ -2734,7 +2293,7 @@ type c++::std::map<i32, const c++::a::B*> {
         })
     );
     assert_eq!(
-        types[2].cpp_ref.as_ref().unwrap().0,
+        types[2].cpp_name().unwrap(),
         "::std::map< ::int32_t, const ::a::B* >"
     );
 }
@@ -2744,7 +2303,6 @@ fn cpp_template_with_named_generics_is_rejected() {
     check_fail(
         r#"
 type c++::std::vector<T = i32> {
-    #cpp_ref;
 }
 "#,
         expect![[r#"
@@ -2764,25 +2322,15 @@ fn cpp_template_with_rust_type_argument_is_rejected() {
     check_fail(
         r#"
 type c++::std::vector<::std::string::String> {
-    #cpp_ref;
 }
 "#,
         expect![[r#"
             Error: `::std::string::String` can't be a C++ template argument (only `c++::` types, builtins and C++ pointers and references can)
-               ╭─[ test.zng:3:5 ]
-               │
-             3 │     #cpp_ref;
-               │     ────┬────  
-               │         ╰────── `::std::string::String` can't be a C++ template argument (only `c++::` types, builtins and C++ pointers and references can)
-            ───╯
-            Error: No layout policy found for type std::vector::<::std::string::String>.
-               ╭─[ test.zng:1:1 ]
+               ╭─[ test.zng:2:6 ]
                │
              2 │ type c++::std::vector<::std::string::String> {
                │      ───────────────────┬───────────────────  
-               │                         ╰───────────────────── Type first declared here.
-               │ 
-               │ Note: Use one of `#layout(size = X, align = Y)`, `#heap_allocated` or `#only_by_ref`.
+               │                         ╰───────────────────── `::std::string::String` can't be a C++ template argument (only `c++::` types, builtins and C++ pointers and references can)
             ───╯
         "#]],
     );
@@ -2793,18 +2341,16 @@ fn cpp_template_with_different_arities_is_rejected() {
     check_fail(
         r#"
 type c++::std::vector<i32> {
-    #cpp_ref;
 }
 
 type c++::std::vector<i32, c++::MyAlloc> {
-    #cpp_ref;
 }
 "#,
         expect![[r#"
             Error: every instantiation of `c++::std::vector` must have the same number of template arguments as its first instantiation, which has 1
-               ╭─[ test.zng:6:6 ]
+               ╭─[ test.zng:5:6 ]
                │
-             6 │ type c++::std::vector<i32, c++::MyAlloc> {
+             5 │ type c++::std::vector<i32, c++::MyAlloc> {
                │      ─────────────────┬─────────────────  
                │                       ╰─────────────────── every instantiation of `c++::std::vector` must have the same number of template arguments as its first instantiation, which has 1
             ───╯
@@ -2817,41 +2363,18 @@ fn cpp_template_instantiations_with_the_same_rust_type_are_rejected() {
     check_fail(
         r#"
 type c++::std::pair<const i32&> {
-    #cpp_ref;
 }
 
 type c++::std::pair<const i32*> {
-    #cpp_ref;
 }
 "#,
         expect![[r#"
             Error: another instantiation of this C++ class template is the same Rust type (C++ pointers and references to the same type are the same `CppPtr` in Rust)
-               ╭─[ test.zng:6:6 ]
+               ╭─[ test.zng:5:6 ]
                │
-             6 │ type c++::std::pair<const i32*> {
+             5 │ type c++::std::pair<const i32*> {
                │      ─────────────┬────────────  
                │                   ╰────────────── another instantiation of this C++ class template is the same Rust type (C++ pointers and references to the same type are the same `CppPtr` in Rust)
-            ───╯
-        "#]],
-    );
-}
-
-#[test]
-fn cpp_template_heap_allocated_is_rejected() {
-    check_fail(
-        r#"
-type c++::std::vector<i32> {
-    #layout(size = 24, align = 8);
-    #cpp_heap_allocated;
-}
-"#,
-        expect![[r#"
-            Error: instantiations of C++ class templates can't be `#cpp_heap_allocated`
-               ╭─[ test.zng:2:6 ]
-               │
-             2 │ type c++::std::vector<i32> {
-               │      ──────────┬──────────  
-               │                ╰──────────── instantiations of C++ class templates can't be `#cpp_heap_allocated`
             ───╯
         "#]],
     );
@@ -2866,7 +2389,7 @@ fn instantiating_an_imported_cpp_template_is_rejected() {
 
 type c++::std::unique_ptr<i32> {
     #layout(size = 8, align = 8);
-    #cpp_stack_owned;
+    #trivially_relocatable;
 }
 "#,
     )]);
@@ -2876,7 +2399,7 @@ import "./bar.zng";
 
 type c++::std::unique_ptr<i64> {
     #layout(size = 8, align = 8);
-    #cpp_stack_owned;
+    #trivially_relocatable;
 }
 "#,
         expect![[r#"
@@ -2889,5 +2412,221 @@ type c++::std::unique_ptr<i64> {
             ───╯
         "#]],
         &resolver,
+    );
+}
+
+#[test]
+fn cpp_type_capabilities_follow_from_layout_and_trivially_relocatable() {
+    let parsed = parse_str(
+        r#"
+type c++::a::ByValue {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+}
+
+type c++::a::Conservative {
+    #layout_conservative(size = 32, align = 16);
+    #trivially_relocatable;
+}
+
+// A layout without `#trivially_relocatable` is only checked in C++.
+type c++::a::NotRelocatable {
+    #layout(size = 8, align = 4);
+}
+
+// No layout: Rust only refers to it.
+type c++::a::Opaque {
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let ty = |name: &str| {
+        parsed
+            .spec
+            .types
+            .iter()
+            .find(|t| matches!(&t.ty, RustType::Cpp(p) if p.path.last().unwrap() == name))
+            .unwrap_or_else(|| panic!("no type {name}"))
+    };
+    assert_eq!(ty("ByValue").cpp_name().as_deref(), Some("::a::ByValue"));
+    assert_eq!(
+        ty("ByValue").cpp_by_value_layout(),
+        Some(LayoutPolicy::StackAllocated { size: 8, align: 4 })
+    );
+    assert_eq!(
+        ty("Conservative").cpp_by_value_layout(),
+        Some(LayoutPolicy::Conservative {
+            size: 32,
+            align: 16
+        })
+    );
+    assert_eq!(ty("NotRelocatable").cpp_by_value_layout(), None);
+    assert_eq!(
+        ty("NotRelocatable").layout,
+        Some(LayoutPolicy::StackAllocated { size: 8, align: 4 })
+    );
+    assert_eq!(ty("Opaque").cpp_by_value_layout(), None);
+    assert_eq!(ty("Opaque").layout, None);
+}
+
+#[test]
+fn trivially_relocatable_can_be_declared_in_another_file() {
+    let resolver = MockFilesystem::new(vec![(
+        "./a.zng",
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+}
+"#,
+    )]);
+    let parsed = parse_str_with_resolver(
+        r#"
+merge "./a.zng";
+type c++::B {
+    #trivially_relocatable;
+}
+"#,
+        NullCfg,
+        &resolver,
+        |_| {},
+    );
+    let ty = parsed.spec.types.first().expect("no type parsed");
+    assert!(ty.cpp_by_value_layout().is_some());
+}
+
+#[test]
+fn trivially_relocatable_without_layout_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    #trivially_relocatable;
+}
+"#,
+        expect![[r#"
+            Error: `#trivially_relocatable` needs a `#layout(...)` or `#layout_conservative(...)`, which Rust needs to hold the C++ type by value
+               ╭─[ test.zng:2:6 ]
+               │
+             2 │ type c++::B {
+               │      ───┬──  
+               │         ╰──── `#trivially_relocatable` needs a `#layout(...)` or `#layout_conservative(...)`, which Rust needs to hold the C++ type by value
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn trivially_relocatable_on_rust_type_is_rejected() {
+    check_fail(
+        r#"
+type crate::Foo {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+}
+"#,
+        expect![[r#"
+            Error: `#trivially_relocatable` is only for `c++::` types (Rust types are always trivially relocatable)
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     #trivially_relocatable;
+               │     ───────────┬───────────  
+               │                ╰───────────── `#trivially_relocatable` is only for `c++::` types (Rust types are always trivially relocatable)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn heap_allocated_and_only_by_ref_on_cpp_type_are_rejected() {
+    check_fail(
+        r#"
+type c++::A {
+    #heap_allocated;
+}
+
+type c++::B {
+    #only_by_ref;
+}
+"#,
+        expect![[r#"
+            Error: `#heap_allocated` and `#only_by_ref` are for Rust types; a `c++::` type without a layout is already reference-only
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     #heap_allocated;
+               │     ───────┬───────  
+               │            ╰───────── `#heap_allocated` and `#only_by_ref` are for Rust types; a `c++::` type without a layout is already reference-only
+            ───╯
+            Error: `#heap_allocated` and `#only_by_ref` are for Rust types; a `c++::` type without a layout is already reference-only
+               ╭─[ test.zng:7:5 ]
+               │
+             7 │     #only_by_ref;
+               │     ──────┬─────  
+               │           ╰─────── `#heap_allocated` and `#only_by_ref` are for Rust types; a `c++::` type without a layout is already reference-only
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn removed_cpp_directives_explain_the_new_syntax() {
+    check_fail(
+        r#"
+type crate::A {
+    #layout(size = 8, align = 4);
+    #cpp_stack_owned "::A";
+}
+
+type c++::B {
+    #cpp_ref;
+}
+
+type crate::C {
+    #layout(size = 8, align = 8);
+    #cpp_heap_allocated "::C";
+}
+
+type crate::D {
+    #layout(size = 8, align = 8);
+    #cpp_value "0" "::D";
+}
+"#,
+        expect![[r#"
+            Error: `#cpp_stack_owned` is no longer supported: C++ types are `c++::` types, whose C++ name is their path
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     #cpp_stack_owned "::A";
+               │     ───────────┬───────────  
+               │                ╰───────────── no longer supported
+               │ 
+               │ Help: declare the type as `type c++::ns::T { #layout(size = X, align = Y); #trivially_relocatable; }`; Rust holds C++ types by value when they have a layout and are trivially relocatable
+            ───╯
+            Error: `#cpp_ref` is no longer supported: C++ types are `c++::` types, whose C++ name is their path
+               ╭─[ test.zng:8:5 ]
+               │
+             8 │     #cpp_ref;
+               │     ────┬────  
+               │         ╰────── no longer supported
+               │ 
+               │ Help: declare the type as `type c++::ns::T { ... }` with no layout; Rust can then only refer to it
+            ───╯
+            Error: `#cpp_heap_allocated` is no longer supported: C++ types are `c++::` types, whose C++ name is their path
+                ╭─[ test.zng:13:5 ]
+                │
+             13 │     #cpp_heap_allocated "::C";
+                │     ─────────────┬────────────  
+                │                  ╰────────────── no longer supported
+                │ 
+                │ Help: declare the type as `type c++::ns::T { ... }` with no layout, and own it through a C++ smart pointer, e.g. `type c++::std::unique_ptr<c++::ns::T> { #layout(size = 8, align = 8); #trivially_relocatable; }`
+            ────╯
+            Error: `#cpp_value` is no longer supported: C++ types are `c++::` types, whose C++ name is their path
+                ╭─[ test.zng:18:5 ]
+                │
+             18 │     #cpp_value "0" "::D";
+                │     ──────────┬──────────  
+                │               ╰──────────── no longer supported
+                │ 
+                │ Help: declare the type as `type c++::ns::T { ... }` with no layout, and own it through a C++ smart pointer, e.g. `type c++::std::unique_ptr<c++::ns::T> { #layout(size = 8, align = 8); #trivially_relocatable; }`
+            ────╯
+        "#]],
     );
 }

@@ -1,11 +1,11 @@
 # C++ fields
 
-zngur can give Rust access to the fields (data members) of `#cpp_stack_owned` and `#cpp_ref` types,
+zngur can give Rust access to the fields (data members) of `c++::` types,
 with no C++ code to write. Declare an accessor in the type's block, with the field's type:
 
 ```zng
 type c++::geo::Point {
-    #cpp_stack_owned;
+    #trivially_relocatable;
     #layout(size = 8, align = 4);
 
     field const x (type = i32);

@@ -1,11 +1,12 @@
 # C++ constructors
 
-zngur can call the constructors of `#cpp_stack_owned` types directly, with no C++ code to write.
+zngur can call the constructors of `c++::` types that Rust holds by value (with a layout and
+`#trivially_relocatable`) directly, with no C++ code to write.
 Declare them in the type's block, with their parameter types:
 
 ```zng
 type c++::geo::Point {
-    #cpp_stack_owned;
+    #trivially_relocatable;
     #layout(size = 8, align = 4);
 
     safe constructor();
@@ -47,7 +48,7 @@ let q = unsafe { slot.assume_init() };
 ```
 
 `build` moves the object out of the slot it was constructed in, which is fine because objects on
-the Rust stack (`#cpp_stack_owned`) are trivially relocatable.
+the Rust stack are trivially relocatable.
 
 Whether a constructor is safe is the trait's `Safety` associated type: `zngur_lib::IsSafe` or
 `zngur_lib::IsUnsafe`. `construct` and `build` require `Self::Safety: zngur_lib::Safe`, which only

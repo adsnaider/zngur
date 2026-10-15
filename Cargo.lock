@@ -7,6 +7,7 @@ name = "aggregation"
 version = "0.11.0"
 dependencies = [
  "packet",
+ "zngur-lib",
 ]
 
 [[package]]
@@ -631,6 +632,7 @@ dependencies = [
  "build-rs 0.3.4",
  "cc",
  "zngur",
+ "zngur-lib",
 ]
 
 [[package]]

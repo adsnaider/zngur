@@ -15,10 +15,11 @@ int main() {
 
   std::cout << "Starting LatencyAnalysis simulation..." << std::endl;
 
-  processor.unwrap().run(receiver.unwrap(), stats, 5);
+  // `stats` is a `std::unique_ptr`; Rust takes a reference to the object it owns.
+  processor.unwrap().run(receiver.unwrap(), *stats.cpp(), 5);
 
   rust::Impl<rust::cpp_stats::StatsAccumulator, rust::Inherent>::print_report(
-      stats);
+      *stats.cpp());
 
   return 0;
 }

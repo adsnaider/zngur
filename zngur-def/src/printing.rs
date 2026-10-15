@@ -535,26 +535,17 @@ impl WriteIDL for crate::ZngurType {
             writeln!(p, " {{")?;
             p.indent();
 
-            // Don't duplicate layout info: `#cpp_ref` and `?Sized` both imply a
-            // layout, and restating it is a parse error.
+            // `?Sized` implies a layout, and restating it is a parse error.
             let is_unsized = self
                 .wellknown_traits
                 .contains(&crate::ZngurWellknownTrait::Unsized);
-            if self.cpp_ref.is_none() && !is_unsized {
+            if self.layout.is_some() && !is_unsized {
                 p.write_indent()?;
                 p.write_idl(&self.layout)?;
             }
-            if self.cpp_heap_allocated.is_some() {
+            if self.trivially_relocatable && p.enabled(&IDLItem::TypeLayout) {
                 p.write_indent()?;
-                p.write_idl(&self.cpp_heap_allocated)?;
-            }
-            if self.cpp_ref.is_some() {
-                p.write_indent()?;
-                p.write_idl(&self.cpp_ref)?;
-            }
-            if self.cpp_stack_owned.is_some() {
-                p.write_indent()?;
-                p.write_idl(&self.cpp_stack_owned)?;
+                writeln!(p, "#trivially_relocatable;")?;
             }
 
             if p.enabled(&IDLItem::TypeWellknownTrait) {
@@ -722,34 +713,6 @@ impl WriteIDL for crate::LayoutPolicy {
                     writeln!(p, "only_by_ref;")?;
                 }
             }
-        }
-        Ok(())
-    }
-}
-
-impl WriteIDL for crate::CppStackOwned {
-    fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
-        if p.enabled(&IDLItem::TypeLayout) {
-            let ty = &self.0;
-            writeln!(p, r#"#cpp_stack_owned "{ty}";"#)?;
-        }
-        Ok(())
-    }
-}
-impl WriteIDL for crate::CppHeapAllocated {
-    fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
-        if p.enabled(&IDLItem::TypeLayout) {
-            let ty = &self.0;
-            writeln!(p, r#"#cpp_heap_allocated "{ty}";"#)?;
-        }
-        Ok(())
-    }
-}
-impl WriteIDL for crate::CppRef {
-    fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
-        if p.enabled(&IDLItem::TypeLayout) {
-            let ty = &self.0;
-            writeln!(p, r#"#cpp_ref "{ty}";"#)?;
         }
         Ok(())
     }
@@ -1014,9 +977,7 @@ fn print_spec() {
                 deref: None,
                 cpp_name: Some("fooBar".into()),
             }],
-            cpp_heap_allocated: None,
-            cpp_ref: None,
-            cpp_stack_owned: None,
+            trivially_relocatable: false,
             cpp_methods: vec![],
             cpp_constructors: vec![],
             cpp_fields: vec![],

@@ -148,52 +148,52 @@ pub struct ZngurMethodDetails {
     pub cpp_name: Option<String>,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct CppHeapAllocated(pub String);
-
-#[derive(Debug)]
-pub struct CppHeapAllocatedData {
-    pub bridge_fn: String,
-    pub cpp_type: String,
-}
-
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct CppRef(pub String);
-
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct CppStackOwned(pub String);
-
-impl Display for CppStackOwned {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl Display for CppRef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
 #[derive(Debug, PartialEq)]
 pub struct ZngurType {
     pub ty: RustType,
+    /// Required for Rust types. For C++ (`c++::`) types, Rust holds them by value if they have a
+    /// `StackAllocated` or `Conservative` layout and are `trivially_relocatable`, and only refers
+    /// to them otherwise.
     pub layout: Option<LayoutPolicy>,
+    /// `#trivially_relocatable`: the C++ type can be moved with `memcpy`, so Rust can hold it by
+    /// value. The generated C++ code checks this with `rust::is_trivially_relocatable`.
+    pub trivially_relocatable: bool,
     pub wellknown_traits: Vec<ZngurWellknownTrait>,
     pub exhaustive: bool,
     pub methods: Vec<ZngurMethodDetails>,
-    /// The C++ methods of a C++ type (`#cpp_stack_owned` or `#cpp_ref`), which Rust can call.
+    /// The C++ member functions of a C++ type, which Rust can call.
     pub cpp_methods: Vec<ZngurCppMethod>,
-    /// The C++ constructors of a `#cpp_stack_owned` type, which Rust can call.
+    /// The C++ constructors of a C++ type that Rust holds by value, which Rust can call.
     pub cpp_constructors: Vec<ZngurCppConstructor>,
-    /// Accessors for the fields (data members) of a C++ type (`#cpp_stack_owned` or `#cpp_ref`).
+    /// Accessors for the fields (data members) of a C++ type.
     pub cpp_fields: Vec<ZngurCppField>,
     pub constructor: Option<ZngurConstructor>,
     pub variants: Vec<ZngurVariant>,
     pub fields: Vec<ZngurField>,
-    pub cpp_heap_allocated: Option<CppHeapAllocated>,
-    pub cpp_ref: Option<CppRef>,
-    pub cpp_stack_owned: Option<CppStackOwned>,
+}
+
+impl ZngurType {
+    /// The C++ name of a C++ (`c++::`) type, e.g. `::std::unique_ptr< ::a::B >`.
+    pub fn cpp_name(&self) -> Option<String> {
+        match &self.ty {
+            RustType::Cpp(_) => self.ty.cpp_spelling().ok(),
+            _ => None,
+        }
+    }
+
+    /// The size and alignment of a C++ type that Rust holds by value (see [`ZngurType::layout`]).
+    pub fn cpp_by_value_layout(&self) -> Option<LayoutPolicy> {
+        match (&self.ty, self.layout) {
+            (
+                RustType::Cpp(_),
+                Some(
+                    layout @ (LayoutPolicy::StackAllocated { .. }
+                    | LayoutPolicy::Conservative { .. }),
+                ),
+            ) if self.trivially_relocatable => Some(layout),
+            _ => None,
+        }
+    }
 }
 
 /// A C++ member function of a C++ type, declared C++-style in the type's block, e.g.
@@ -233,7 +233,7 @@ impl ZngurCppMethod {
     }
 }
 
-/// A C++ constructor of a `#cpp_stack_owned` type, declared like `safe constructor(i32);`. zngur
+/// A C++ constructor of a C++ type that Rust holds by value, declared like `safe constructor(i32);`. zngur
 /// implements `zngur_lib::ZngCppConstruct<(inputs...,)>` for it, which runs it in place.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct ZngurCppConstructor {
@@ -458,6 +458,54 @@ pub enum CppIndirection {
 
 impl RustType {
     pub const UNIT: Self = RustType::Tuple(Vec::new());
+
+    /// The C++ spelling of a `c++::` type or of one of its template arguments, e.g. `::a::B`,
+    /// `::std::unique_ptr< ::a::B >` or `const int32_t*`. `Err` explains why `self` can't be a
+    /// C++ template argument.
+    pub fn cpp_spelling(&self) -> Result<String, String> {
+        Ok(match self {
+            RustType::Cpp(path) => {
+                let name = format!("::{}", path.path.join("::"));
+                if path.generics.is_empty() {
+                    name
+                } else {
+                    let args = path
+                        .generics
+                        .iter()
+                        .map(RustType::cpp_spelling)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    // Spaces, so that `<::` and `>>` are never digraphs or shifts, even in C++03.
+                    format!("{name}< {} >", args.join(", "))
+                }
+            }
+            RustType::Primitive(p) => match p {
+                PrimitiveRustType::Int(n) => format!("::int{n}_t"),
+                PrimitiveRustType::Uint(n) => format!("::uint{n}_t"),
+                PrimitiveRustType::Float(32) => "float".to_owned(),
+                PrimitiveRustType::Float(64) => "double".to_owned(),
+                PrimitiveRustType::Usize => "::size_t".to_owned(),
+                PrimitiveRustType::Bool => "bool".to_owned(),
+                p => return Err(format!("`{p}` has no C++ equivalent")),
+            },
+            RustType::CppPtr(m, indirection, t) => {
+                let constness = match m {
+                    Mutability::Not => "const ",
+                    Mutability::Mut => "",
+                };
+                let sigil = match indirection {
+                    CppIndirection::Pointer => "*",
+                    CppIndirection::Reference => "&",
+                };
+                format!("{constness}{}{sigil}", t.cpp_spelling()?)
+            }
+            ty => {
+                return Err(format!(
+                    "`{ty}` can't be a C++ template argument (only `c++::` types, builtins and \
+                     C++ pointers and references can)"
+                ));
+            }
+        })
+    }
 }
 
 impl Display for RustPathAndGenerics {

@@ -95,7 +95,7 @@ namespace {{ self.cpp_namespace }} {
   };
 
   // The C++ type that a zngur type stands for: builtins stand for themselves, and the Rust
-  // wrapper of a `#cpp_stack_owned` or `#cpp_ref` type for the C++ type it wraps.
+  // wrapper of a `c++::` type for the C++ type it holds or refers to.
   template<typename T>
   struct CppTypeOf;
 

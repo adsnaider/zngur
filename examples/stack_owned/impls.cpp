@@ -18,14 +18,14 @@ Impl<rust::MyCppWrapper>::print(rust::Ref<rust::MyCppWrapper> c) {
   return {};
 }
 
-rust::crate::MyConservativeWrapper
-Impl<rust::crate::MyConservativeWrapper>::new_(int64_t a, int32_t b) {
-  return rust::crate::MyConservativeWrapper::build(a, b);
+rust::MyConservativeWrapper
+Impl<rust::MyConservativeWrapper>::new_(int64_t a, int32_t b) {
+  return rust::MyConservativeWrapper::build(a, b);
 }
 
 rust::Unit
-Impl<rust::crate::MyConservativeWrapper>::print(
-    rust::Ref<rust::crate::MyConservativeWrapper> c) {
+Impl<rust::MyConservativeWrapper>::print(
+    rust::Ref<rust::MyConservativeWrapper> c) {
   const CppConservativeType &cpp = c.cpp();
   ::std::cout << "CppConservativeType " << cpp.a << " " << cpp.b << ::std::endl;
   return {};

@@ -55,6 +55,10 @@ struct CppConservativeType {
 template <>
 struct rust::is_trivially_relocatable<CppConservativeType> : std::true_type {};
 
+// The `.zng` file names C++ types by their C++ path, so these aliases give them the names it uses.
+using MyCppWrapper = CppType;
+using MyConservativeWrapper = CppConservativeType;
+
 // Free functions that Rust calls directly (declared in `main.zng`).
 namespace geometry {
 inline int dot(const CppType &a, const CppType &b) { return a.x * b.x + a.y * b.y; }

@@ -1,12 +1,12 @@
 # C++ pointers and references
 
 C++ functions often take or return pointers and references to C++ objects. In a `.zng` file, you
-write them the C++ way: `const T&`, `T&`, `const T*` or `T*`, where `T` is a `#cpp_stack_owned` or
-`#cpp_ref` type, or a builtin like `i32`:
+write them the C++ way: `const T&`, `T&`, `const T*` or `T*`, where `T` is a `c++::` type or a builtin
+like `i32`:
 
 ```zng
 type c++::geo::Point {
-    #cpp_stack_owned;
+    #trivially_relocatable;
     #layout(size = 8, align = 4);
 }
 
@@ -26,7 +26,7 @@ can alias them, and `const` only means that the object can't be modified through
 pointer. So unlike a Rust reference, a `CppPtr` makes no promises and has no lifetime:
 
 - Creating and copying one is safe: `CppPtr::from(&x)`, `CppPtr::from(&mut x)`, `CppPtr::null()`,
-  `CppPtr::from_raw(ptr)`. A `#cpp_stack_owned` object also has `.as_ref()` and `.as_mut()`.
+  `CppPtr::from_raw(ptr)`. A C++ object that Rust holds by value also has `.as_ref()` and `.as_mut()`.
 - A `CppPtr<T, Mut>` converts to a `CppPtr<T, Const>` (`.as_const()` or `into()`), but not the
   other way around.
 - Anything that dereferences it is `unsafe`: `.as_ref()` and `.as_mut()` on the pointer, which
