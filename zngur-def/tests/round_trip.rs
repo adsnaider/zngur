@@ -426,6 +426,9 @@ type c++::a::B {
     unsafe fn set(i32, const c++::a::B&);
     safe static fn make(i32) -> c++::a::B;
     unsafe fn get(i32) const -> const i32& as get_const;
+    safe constructor();
+    safe constructor(i32, i32);
+    unsafe constructor(const c++::a::B&);
 }
         "#,
         expect![[r##"
@@ -434,6 +437,10 @@ type c++::a::B {
             type c++::a::B {
                 #layout(size = 8, align = 4);
                 #cpp_stack_owned "::a::B";
+
+                safe constructor();
+                safe constructor(i32, i32);
+                unsafe constructor(const c++::a::B&);
 
                 unsafe fn value() const -> i32;
                 unsafe fn set(i32, const c++::a::B&);

@@ -1159,6 +1159,55 @@ pub {}fn {rust_name}("#,
         mangled_name
     }
 
+    /// Adds the `zngur_lib::ZngCppConstruct` impl for the C++ constructor `constructor` of
+    /// `owner` (its `index`th one), which calls the C++ bridge function whose (mangled) name is
+    /// returned.
+    pub fn add_cpp_constructor(
+        &mut self,
+        owner: &RustType,
+        index: usize,
+        constructor: &ZngurCppConstructor,
+    ) -> String {
+        let mangled_name = self.mangle_name(&format!("{owner}_cpp_constructor_{index}"));
+        let inputs = &constructor.inputs;
+        let args_ty: String = inputs.iter().map(|ty| format!("{ty}, ")).collect();
+        let args_pattern: String = (0..inputs.len()).map(|n| format!("i{n}, ")).collect();
+        let safety = if constructor.is_safe {
+            "IsSafe"
+        } else {
+            "IsUnsafe"
+        };
+        w!(
+            self,
+            r#"
+unsafe extern "C" {{ fn {mangled_name}("#
+        );
+        for n in 0..inputs.len() {
+            w!(self, "i{n}: *mut u8, ");
+        }
+        wln!(self, r#"o: *mut u8); }}"#);
+        wln!(
+            self,
+            r#"
+unsafe impl ::zngur_lib::ZngCppConstruct<({args_ty})> for {owner} {{
+    type Safety = ::zngur_lib::{safety};
+
+    #[allow(unused_mut)]
+    unsafe fn construct_unchecked(slot: &mut ::core::mem::MaybeUninit<Self>, args: ({args_ty})) {{
+        let ({args_pattern}) = args;"#
+        );
+        for n in 0..inputs.len() {
+            wln!(self, "let mut i{n} = ::core::mem::MaybeUninit::new(i{n});");
+        }
+        w!(self, "unsafe {{ {mangled_name}(");
+        for n in 0..inputs.len() {
+            w!(self, "i{n}.as_mut_ptr() as *mut u8, ");
+        }
+        wln!(self, "slot.as_mut_ptr() as *mut u8) }}");
+        wln!(self, "}} }}");
+        mangled_name
+    }
+
     pub fn add_cpp_heap_allocated_bridge(&mut self, ty: &RustType) -> String {
         let wrapper_ref = match ty {
             RustType::Cpp(_) => ty.to_string(),

@@ -14,6 +14,11 @@ type c++::MyCppWrapper {
     unsafe fn x_ref() const -> const i32&;
     unsafe fn swapped() const -> c++::MyCppWrapper;
     safe static fn diagonal(i32) -> c++::MyCppWrapper;
+
+    // C++ constructors, which `zngur_lib::ZngCppConstruct` runs in place. Constructors with C++
+    // pointer or reference parameters, like the copy constructor, must be `unsafe`.
+    safe constructor(i32, i32);
+    unsafe constructor(const c++::MyCppWrapper&);
 }
 
 type crate::MyConservativeWrapper {
@@ -21,6 +26,7 @@ type crate::MyConservativeWrapper {
     #layout_conservative(size = 32, align = 16);
 
     unsafe fn total_with(crate::MyConservativeWrapper) const -> i64;
+    safe constructor(i64, i32);
 }
 
 extern "C++" {

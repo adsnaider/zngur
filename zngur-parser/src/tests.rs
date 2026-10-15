@@ -2440,3 +2440,106 @@ type c++::B {
     names.sort();
     assert_eq!(names, ["set", "value"]);
 }
+
+#[test]
+fn cpp_constructors_parse() {
+    use zngur_def::{CppIndirection, Mutability, PrimitiveRustType};
+
+    let parsed = parse_str(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #cpp_stack_owned;
+
+    safe constructor();
+    safe constructor(i32, i32);
+    unsafe constructor(const c++::B&);
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let ty = parsed.spec.types.first().expect("no type parsed");
+    let b = RustType::Cpp(vec!["B".to_owned()]);
+    let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+    let constructors = &ty.cpp_constructors;
+    assert_eq!(constructors.len(), 3);
+    assert!(constructors[0].inputs.is_empty());
+    assert!(constructors[0].is_safe);
+    assert_eq!(constructors[1].inputs, vec![i32.clone(), i32]);
+    assert_eq!(
+        constructors[2].inputs,
+        vec![RustType::CppPtr(
+            Mutability::Not,
+            CppIndirection::Reference,
+            Box::new(b)
+        )]
+    );
+    assert!(!constructors[2].is_safe);
+}
+
+#[test]
+fn safe_cpp_constructor_with_cpp_ptr_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #cpp_stack_owned;
+    safe constructor(const c++::B&);
+}
+"#,
+        expect![[r#"
+            Error: this C++ constructor must be `unsafe`, because it takes a C++ pointer or reference, which may be invalid
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     safe constructor(const c++::B&);
+               │     ────────────────┬───────────────  
+               │                     ╰───────────────── this C++ constructor must be `unsafe`, because it takes a C++ pointer or reference, which may be invalid
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_constructors_with_the_same_rust_signature_are_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #cpp_stack_owned;
+    unsafe constructor(const c++::B&);
+    unsafe constructor(const c++::B*);
+}
+"#,
+        expect![[r#"
+            Error: another C++ constructor has the same Rust argument types (C++ pointers and references to the same type are the same `CppPtr` in Rust)
+               ╭─[ test.zng:6:5 ]
+               │
+             6 │     unsafe constructor(const c++::B*);
+               │     ─────────────────┬────────────────  
+               │                      ╰────────────────── another C++ constructor has the same Rust argument types (C++ pointers and references to the same type are the same `CppPtr` in Rust)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_constructor_on_cpp_ref_type_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    #cpp_ref;
+    safe constructor(i32);
+}
+"#,
+        expect![[r#"
+            Error: C++ constructors can only be declared on `#cpp_stack_owned` types
+               ╭─[ test.zng:2:6 ]
+               │
+             2 │ type c++::B {
+               │      ───┬──  
+               │         ╰──── C++ constructors can only be declared on `#cpp_stack_owned` types
+            ───╯
+        "#]],
+    );
+}

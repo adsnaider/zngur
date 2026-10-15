@@ -184,6 +184,8 @@ pub struct ZngurType {
     pub methods: Vec<ZngurMethodDetails>,
     /// The C++ methods of a C++ type (`#cpp_stack_owned` or `#cpp_ref`), which Rust can call.
     pub cpp_methods: Vec<ZngurCppMethod>,
+    /// The C++ constructors of a `#cpp_stack_owned` type, which Rust can call.
+    pub cpp_constructors: Vec<ZngurCppConstructor>,
     pub constructor: Option<ZngurConstructor>,
     pub variants: Vec<ZngurVariant>,
     pub fields: Vec<ZngurField>,
@@ -227,6 +229,14 @@ impl ZngurCppMethod {
             is_safe: self.is_safe,
         }
     }
+}
+
+/// A C++ constructor of a `#cpp_stack_owned` type, declared like `safe constructor(i32);`. zngur
+/// implements `zngur_lib::ZngCppConstruct<(inputs...,)>` for it, which runs it in place.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct ZngurCppConstructor {
+    pub inputs: Vec<RustType>,
+    pub is_safe: bool,
 }
 
 #[derive(Debug, PartialEq)]

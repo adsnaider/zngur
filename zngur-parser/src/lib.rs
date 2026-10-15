@@ -13,9 +13,9 @@ use zngur_def::{
     AdditionalIncludes, ConflictSource, ConvertPanicToException, CppHeapAllocated, CppIndirection,
     CppRef, CppStackOwned, Import, LayoutPolicy, Merge, MergeFailure, ModuleImport, Mutability,
     PrimitiveRustType, RustPathAndGenerics, RustTrait, RustType, TypeVar, ZngurConstructor,
-    ZngurCppMethod, ZngurExternCppFn, ZngurExternCppImpl, ZngurField, ZngurFn, ZngurMethod,
-    ZngurMethodDetails, ZngurMethodReceiver, ZngurSpec, ZngurTrait, ZngurType, ZngurVariant,
-    ZngurWellknownTrait,
+    ZngurCppConstructor, ZngurCppMethod, ZngurExternCppFn, ZngurExternCppImpl, ZngurField, ZngurFn,
+    ZngurMethod, ZngurMethodDetails, ZngurMethodReceiver, ZngurSpec, ZngurTrait, ZngurType,
+    ZngurVariant, ZngurWellknownTrait,
 };
 
 pub type Span = SimpleSpan<usize>;
@@ -426,6 +426,11 @@ enum ParsedTypeItem<'a> {
         output: ParsedRustType<'a>,
         rust_name: Option<&'a str>,
     },
+    /// A C++ constructor: `(safe | unsafe) constructor(types...);`
+    CppConstructor {
+        is_safe: bool,
+        inputs: Vec<ParsedRustType<'a>>,
+    },
     CppValue {
         field: &'a str,
         cpp_type: &'a str,
@@ -477,6 +482,14 @@ impl ParsedMethod<'_> {
 struct MergeContext {
     outer_ty: RustType,
     variant: Option<String>,
+}
+
+/// `ty` as Rust sees it: C++ pointers and references are both `CppPtr`s.
+fn erase_cpp_indirection(ty: &RustType) -> RustType {
+    match ty {
+        RustType::CppPtr(m, _, t) => RustType::CppPtr(*m, CppIndirection::Pointer, t.clone()),
+        _ => ty.clone(),
+    }
 }
 
 /// Whether `ty` is or contains a C++ pointer or reference.
@@ -773,6 +786,7 @@ impl ProcessedItem<'_> {
 
                 let mut methods = vec![];
                 let mut cpp_methods: Vec<ZngurCppMethod> = vec![];
+                let mut cpp_constructors: Vec<ZngurCppConstructor> = vec![];
                 let mut constructor = None;
                 let mut variants = vec![];
                 let mut fields = vec![];
@@ -993,6 +1007,43 @@ impl ProcessedItem<'_> {
                             );
                             cpp_methods.push(method);
                         }
+                        ParsedTypeItem::CppConstructor { is_safe, inputs } => {
+                            let inputs: Vec<RustType> =
+                                inputs.into_iter().map(|x| x.to_zngur(scope)).collect();
+                            if is_safe && inputs.iter().any(contains_cpp_ptr) {
+                                ctx.add_error_str(
+                                    "this C++ constructor must be `unsafe`, because it takes a C++ \
+                                     pointer or reference, which may be invalid",
+                                    item_span,
+                                );
+                                continue;
+                            }
+                            // `const T&` and `const T*` are both `CppPtr<T, Const>` in Rust, so
+                            // they'd implement the same `ZngCppConstruct<Args>`.
+                            let rust_inputs = |inputs: &[RustType]| {
+                                inputs.iter().map(erase_cpp_indirection).collect::<Vec<_>>()
+                            };
+                            if cpp_constructors.iter().any(|c: &ZngurCppConstructor| {
+                                rust_inputs(&c.inputs) == rust_inputs(&inputs)
+                            }) {
+                                ctx.add_error_str(
+                                    "another C++ constructor has the same Rust argument types \
+                                     (C++ pointers and references to the same type are the same \
+                                     `CppPtr` in Rust)",
+                                    item_span,
+                                );
+                                continue;
+                            }
+                            let constructor = ZngurCppConstructor { inputs, is_safe };
+                            ctx.record_span(
+                                &PartialSpanKey::CppConstructor(
+                                    rust_ty.clone(),
+                                    constructor.inputs.clone(),
+                                ),
+                                item_span.into_range(),
+                            );
+                            cpp_constructors.push(constructor);
+                        }
                         ParsedTypeItem::Method {
                             data,
                             use_path,
@@ -1163,6 +1214,7 @@ impl ProcessedItem<'_> {
                     layout,
                     methods,
                     cpp_methods,
+                    cpp_constructors,
                     wellknown_traits: wt,
                     exhaustive,
                     constructor,
@@ -1462,6 +1514,9 @@ enum PartialSpanKey {
     /// [`Type`](zngur_def::ZngurType) or [`Trait`](zngur_def::ZngurTrait)
     /// outer_ty, method
     Method(RustType, ZngurMethod),
+    /// a [`CppConstructor`](zngur_def::ZngurCppConstructor)
+    /// outer_ty, inputs
+    CppConstructor(RustType, Vec<RustType>),
     /// a [`Field`](`zngur_def::ZngurField`) on a [`Type`](zngur_def::ZngurType)
     /// or it's internal [`Variant`](zngur_def::ZngurVariant)
     /// outer_ty, variant?, field_name
@@ -1562,6 +1617,9 @@ impl VariantQualifiedSpanKeyExt for zngur_def::ConflictSource {
             zngur_def::ConflictSource::CppStackOwned => PartialSpanKey::CppStackOwned(outer_ty),
             zngur_def::ConflictSource::Method(method) => {
                 PartialSpanKey::Method(outer_ty, method.clone())
+            }
+            zngur_def::ConflictSource::CppConstructor(inputs) => {
+                PartialSpanKey::CppConstructor(outer_ty, inputs.clone())
             }
             zngur_def::ConflictSource::Field(name) => {
                 PartialSpanKey::Field(outer_ty, variant, name.clone())
@@ -2550,6 +2608,21 @@ impl ZngurSpecBuilder {
                         .finish(),
                 );
             }
+            if !ty.cpp_constructors.is_empty() && ty.cpp_stack_owned.is_none() {
+                let span = ctx
+                    .fetch_spans_global(&*ty)
+                    .first()
+                    .copied()
+                    .cloned()
+                    .unwrap_or((0, 0usize..0));
+                let message = "C++ constructors can only be declared on `#cpp_stack_owned` types";
+                ctx.add_fatal_report(
+                    Report::build(ReportKind::Error, span.clone())
+                        .with_message(message)
+                        .with_label(Label::new(span).with_message(message))
+                        .finish(),
+                );
+            }
         }
         spec
     }
@@ -3218,42 +3291,59 @@ fn inner_type_item<'a>()
         .map(|(name, items)| ParsedTypeItem::Variant { name, items });
 
     recursive(|item| {
-        // C++ member functions. Unlike methods of Rust types, they always start with `safe` or
-        // `unsafe`, and take `this` implicitly (`const` after the parameters).
+        // C++ member functions and constructors. Unlike methods of Rust types, they always start
+        // with `safe` or `unsafe`, and member functions take `this` implicitly (`const` after the
+        // parameters).
+        let cpp_params = rust_type()
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::ParenOpen), just(Token::ParenClose));
+        let cpp_method = just(Token::Ident("static"))
+            .or_not()
+            .map(|s| s.is_some())
+            .then_ignore(just(Token::KwFn))
+            .then(select! { Token::Ident(c) => c })
+            .then(cpp_params.clone())
+            .then(just(Token::KwConst).or_not().map(|c| c.is_some()))
+            .then(just(Token::Arrow).ignore_then(rust_type()).or_not())
+            .then(
+                just(Token::KwAs)
+                    .ignore_then(select! { Token::Ident(c) => c })
+                    .or_not(),
+            )
+            .map(
+                |(((((is_static, name), inputs), is_const), output), rust_name)| {
+                    ParsedTypeItem::CppMethod {
+                        is_safe: false, // Set below.
+                        is_static,
+                        name,
+                        inputs,
+                        is_const,
+                        output: output.unwrap_or(ParsedRustType::Tuple(vec![])),
+                        rust_name,
+                    }
+                },
+            );
+        let cpp_constructor = just(Token::Ident("constructor"))
+            .ignore_then(cpp_params)
+            .map(|inputs| ParsedTypeItem::CppConstructor {
+                is_safe: false, // Set below.
+                inputs,
+            });
         let cpp_method = choice((
             just(Token::KwSafe).to(true),
             just(Token::KwUnsafe).to(false),
         ))
-        .then(just(Token::Ident("static")).or_not().map(|s| s.is_some()))
-        .then_ignore(just(Token::KwFn))
-        .then(select! { Token::Ident(c) => c })
-        .then(
-            rust_type()
-                .separated_by(just(Token::Comma))
-                .allow_trailing()
-                .collect::<Vec<_>>()
-                .delimited_by(just(Token::ParenOpen), just(Token::ParenClose)),
-        )
-        .then(just(Token::KwConst).or_not().map(|c| c.is_some()))
-        .then(just(Token::Arrow).ignore_then(rust_type()).or_not())
-        .then(
-            just(Token::KwAs)
-                .ignore_then(select! { Token::Ident(c) => c })
-                .or_not(),
-        )
-        .map(
-            |((((((is_safe, is_static), name), inputs), is_const), output), rust_name)| {
-                ParsedTypeItem::CppMethod {
-                    is_safe,
-                    is_static,
-                    name,
-                    inputs,
-                    is_const,
-                    output: output.unwrap_or(ParsedRustType::Tuple(vec![])),
-                    rust_name,
-                }
-            },
-        );
+        .then(choice((cpp_constructor, cpp_method)))
+        .map(|(safe, mut item)| {
+            match &mut item {
+                ParsedTypeItem::CppMethod { is_safe, .. }
+                | ParsedTypeItem::CppConstructor { is_safe, .. } => *is_safe = safe,
+                _ => unreachable!(),
+            }
+            item
+        });
         let inner_item = choice((
             layout.boxed(),
             traits.boxed(),

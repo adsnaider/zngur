@@ -1,8 +1,10 @@
 #[rustfmt::skip]
 mod generated;
 
+use std::mem::MaybeUninit;
+
 use generated::{MyConservativeWrapper, MyCppWrapper};
-use zngur_lib::CppPtr;
+use zngur_lib::{CppPtr, ZngCppConstruct};
 
 fn main() {
     let mut c = MyCppWrapper::new(5, 6);
@@ -27,6 +29,17 @@ fn main() {
     println!("x_ref() = {x}");
     unsafe { MyCppWrapper::swapped(c.as_ref()) }.print();
     MyCppWrapper::diagonal(7).print();
+
+    // C++ constructors. `build` returns the object, and `construct` constructs it in a slot.
+    let built = MyCppWrapper::build((3, 4));
+    built.print();
+    let copy = unsafe { MyCppWrapper::build_unchecked((built.as_ref(),)) };
+    copy.print();
+    let mut slot = MaybeUninit::uninit();
+    MyCppWrapper::construct(&mut slot, (8, 9));
+    let constructed = unsafe { slot.assume_init() };
+    constructed.print();
+    MyConservativeWrapper::build((30, 40)).print();
 
     assert_eq!(std::mem::size_of::<MyConservativeWrapper>(), 32);
     assert_eq!(std::mem::align_of::<MyConservativeWrapper>(), 16);

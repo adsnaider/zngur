@@ -10,6 +10,14 @@ Constructed CppType 52 61
 CppType 52 61
 Constructed CppType 7 7
 CppType 7 7
+Constructed CppType 3 4
+CppType 3 4
+CppType 3 4
+Constructed CppType 8 9
+CppType 8 9
+Constructed CppConservativeType 30 40
+CppConservativeType 30 40
+Destructed CppConservativeType 30 40
 Constructed CppConservativeType 10 20
 CppConservativeType 10 20
 Constructed CppConservativeType 1 2

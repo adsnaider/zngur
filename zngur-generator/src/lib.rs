@@ -170,6 +170,16 @@ impl ZngurGenerator {
                         method,
                     ));
                 }
+                // C++ constructors (`#cpp_stack_owned` types only, checked by the parser): a
+                // `ZngCppConstruct` impl, and a C++ function that runs the constructor in place.
+                for (index, constructor) in ty_def.cpp_constructors.iter().enumerate() {
+                    let mangled_name = rust_file.add_cpp_constructor(ty, index, constructor);
+                    cpp_file.cpp_method_bridges.push(bridges.constructor(
+                        &mangled_name,
+                        owner_cpp_type,
+                        constructor,
+                    ));
+                }
             }
             let is_copy = ty_def.wellknown_traits.contains(&ZngurWellknownTrait::Copy);
             let Some(layout) = ty_def.layout else {
@@ -672,6 +682,7 @@ mod tests {
             cpp_ref: None,
             cpp_stack_owned: None,
             cpp_methods: vec![],
+            cpp_constructors: vec![],
         }
     }
 
@@ -694,6 +705,7 @@ mod tests {
             cpp_ref: None,
             cpp_stack_owned: Some(CppStackOwned(cpp_type.to_owned())),
             cpp_methods: vec![],
+            cpp_constructors: vec![],
         }
     }
 
@@ -711,6 +723,7 @@ mod tests {
             cpp_ref: Some(CppRef(cpp_type.to_owned())),
             cpp_stack_owned: None,
             cpp_methods: vec![],
+            cpp_constructors: vec![],
         }
     }
 
@@ -1026,5 +1039,48 @@ pub type Handle = super::Handle;
             "{cpp_code}"
         );
         assert!(cpp_code.contains(".cpp())"), "{cpp_code}");
+    }
+
+    #[test]
+    fn cpp_constructors_get_construct_impls_and_cpp_bridges() {
+        let b = cpp(&["a", "B"]);
+        let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+        let mut ty = minimal_stack_owned_type(b.clone(), "::a::B", 8, 4);
+        ty.cpp_constructors = vec![
+            ZngurCppConstructor {
+                inputs: vec![],
+                is_safe: true,
+            },
+            ZngurCppConstructor {
+                inputs: vec![
+                    i32,
+                    RustType::CppPtr(Mutability::Not, CppIndirection::Reference, Box::new(b)),
+                ],
+                is_safe: false,
+            },
+        ];
+        let spec = ZngurSpec {
+            types: vec![ty],
+            ..Default::default()
+        };
+        let (rust_code, _h, cpp_code) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let cpp_code = cpp_code.expect("C++ constructors need a C++ file");
+
+        assert!(rust_code.contains("unsafe impl ::zngur_lib::ZngCppConstruct<()> for a::B {"));
+        assert!(rust_code.contains("type Safety = ::zngur_lib::IsSafe;"));
+        assert!(rust_code.contains(
+            "unsafe impl ::zngur_lib::ZngCppConstruct<(i32, \
+             ::zngur_lib::CppPtr<a::B, ::zngur_lib::Const>, )> for a::B {"
+        ));
+        assert!(rust_code.contains("type Safety = ::zngur_lib::IsUnsafe;"));
+
+        assert!(cpp_code.contains("new (o) ::a::B();"), "{cpp_code}");
+        assert!(
+            cpp_code.contains(
+                "new (o) ::a::B(::rust::__zngur_internal_move_from_rust< ::int32_t >(i0), *"
+            ),
+            "{cpp_code}"
+        );
     }
 }

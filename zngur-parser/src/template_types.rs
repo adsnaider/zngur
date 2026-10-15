@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
 use zngur_def::{
-    Merge, RustPathAndGenerics, RustTrait, RustType, TypeVar, ZngurConstructor, ZngurCppMethod,
-    ZngurField, ZngurMethod, ZngurMethodDetails, ZngurType, ZngurVariant,
+    Merge, RustPathAndGenerics, RustTrait, RustType, TypeVar, ZngurConstructor,
+    ZngurCppConstructor, ZngurCppMethod, ZngurField, ZngurMethod, ZngurMethodDetails, ZngurType,
+    ZngurVariant,
 };
 
 fn matches_template<'a, 'b>(
@@ -241,6 +242,7 @@ pub fn try_match_template(ty: &RustType, template: &ZngurType) -> Option<Templat
         exhaustive,
         methods,
         cpp_methods,
+        cpp_constructors,
         constructor,
         variants,
         fields,
@@ -267,6 +269,13 @@ pub fn try_match_template(ty: &RustType, template: &ZngurType) -> Option<Templat
                 inputs: m.inputs.iter().map(substitute).collect(),
                 output: substitute(&m.output),
                 ..m.clone()
+            })
+            .collect(),
+        cpp_constructors: cpp_constructors
+            .iter()
+            .map(|c| ZngurCppConstructor {
+                inputs: c.inputs.iter().map(substitute).collect(),
+                is_safe: c.is_safe,
             })
             .collect(),
         methods: methods

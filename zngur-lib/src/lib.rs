@@ -33,6 +33,122 @@ pub unsafe trait ZngCppDestruct: ZngCppObject {
     unsafe fn destruct(&mut self);
 }
 
+/// Whether a C++ constructor ([`ZngCppConstruct`]) is safe ([`IsSafe`]) or not ([`IsUnsafe`]).
+pub trait Safety: sealed::Sealed + 'static {}
+
+/// Implemented only by [`IsSafe`], to make the safe methods of [`ZngCppConstruct`] available.
+///
+/// So they don't compile for `unsafe` constructors:
+///
+/// ```compile_fail
+/// # use core::mem::MaybeUninit;
+/// # use zngur_lib::*;
+/// # struct Bar(i32);
+/// # unsafe impl ZngCppObject for Bar {}
+/// # unsafe impl ZngCppStackObject for Bar {}
+/// unsafe impl ZngCppConstruct<(i32,)> for Bar {
+///     type Safety = IsUnsafe;
+///     unsafe fn construct_unchecked(slot: &mut MaybeUninit<Self>, args: (i32,)) {
+///         slot.write(Bar(args.0));
+///     }
+/// }
+/// let bar = Bar::build((1,)); // Error: `IsUnsafe: Safe` isn't satisfied.
+/// ```
+pub trait Safe: Safety {}
+
+/// Marks a C++ constructor declared `safe`.
+pub enum IsSafe {}
+
+/// Marks a C++ constructor declared `unsafe`.
+pub enum IsUnsafe {}
+
+impl sealed::Sealed for IsSafe {}
+impl sealed::Sealed for IsUnsafe {}
+impl Safety for IsSafe {}
+impl Safety for IsUnsafe {}
+impl Safe for IsSafe {}
+
+/// A C++ constructor of `Self` that takes `Args`, a tuple of the arguments: `ZngCppConstruct<()>`
+/// is the default constructor, `ZngCppConstruct<(i32,)>` one taking an `i32`, and so on. Like C++
+/// constructors, it initializes an object in place.
+///
+/// The `*_unchecked` methods are always available. The safe ones, [`construct`] and [`build`],
+/// only exist for constructors declared `safe` (`Self::Safety` is [`IsSafe`]).
+///
+/// ```
+/// # use core::mem::MaybeUninit;
+/// # use zngur_lib::*;
+/// # struct Bar(i32);
+/// # unsafe impl ZngCppObject for Bar {}
+/// # unsafe impl ZngCppStackObject for Bar {}
+/// // zngur generates this for `safe constructor(i32);`, with a body that calls C++.
+/// unsafe impl ZngCppConstruct<(i32,)> for Bar {
+///     type Safety = IsSafe;
+///     unsafe fn construct_unchecked(slot: &mut MaybeUninit<Self>, args: (i32,)) {
+///         slot.write(Bar(args.0));
+///     }
+/// }
+/// let bar = Bar::build((1,));
+/// let mut slot = MaybeUninit::uninit();
+/// Bar::construct(&mut slot, (2,));
+/// assert_eq!(bar.0 + unsafe { slot.assume_init() }.0, 3);
+/// ```
+///
+/// [`construct`]: ZngCppConstruct::construct
+/// [`build`]: ZngCppConstruct::build
+///
+/// # Safety
+///
+/// [`construct_unchecked`](ZngCppConstruct::construct_unchecked) must initialize `slot`, and
+/// `Safety` may only be [`IsSafe`] if the constructor is safe to call with any `args`.
+pub unsafe trait ZngCppConstruct<Args>: ZngCppObject {
+    /// [`IsSafe`] for a `safe constructor(...)`, and [`IsUnsafe`] for an `unsafe` one.
+    type Safety: Safety;
+
+    /// Runs the C++ constructor on `slot`, which is initialized afterwards.
+    ///
+    /// # Safety
+    ///
+    /// The preconditions of the C++ constructor must hold.
+    unsafe fn construct_unchecked(slot: &mut core::mem::MaybeUninit<Self>, args: Args);
+
+    /// Constructs an object and returns it. Moving it out of the slot it was constructed in is
+    /// fine, because C++ objects that live on the Rust stack are trivially relocatable.
+    ///
+    /// # Safety
+    ///
+    /// The preconditions of the C++ constructor must hold.
+    unsafe fn build_unchecked(args: Args) -> Self
+    where
+        Self: ZngCppStackObject,
+    {
+        let mut slot = core::mem::MaybeUninit::uninit();
+        unsafe {
+            Self::construct_unchecked(&mut slot, args);
+            slot.assume_init()
+        }
+    }
+
+    /// Runs the C++ constructor on `slot`, which is initialized afterwards.
+    fn construct(slot: &mut core::mem::MaybeUninit<Self>, args: Args)
+    where
+        Self::Safety: Safe,
+    {
+        // SAFETY: The constructor is safe (`Self::Safety` is `IsSafe`).
+        unsafe { Self::construct_unchecked(slot, args) }
+    }
+
+    /// Constructs an object and returns it.
+    fn build(args: Args) -> Self
+    where
+        Self: ZngCppStackObject,
+        Self::Safety: Safe,
+    {
+        // SAFETY: The constructor is safe (`Self::Safety` is `IsSafe`).
+        unsafe { Self::build_unchecked(args) }
+    }
+}
+
 mod sealed {
     pub trait Sealed {}
 }

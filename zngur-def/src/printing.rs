@@ -540,6 +540,14 @@ impl WriteIDL for crate::ZngurType {
                 }
             }
 
+            if !self.cpp_constructors.is_empty() {
+                writeln!(p)?;
+                for constructor in &self.cpp_constructors {
+                    p.write_indent()?;
+                    p.write_idl(constructor)?;
+                }
+            }
+
             if !self.cpp_methods.is_empty() {
                 writeln!(p)?;
                 for method in &self.cpp_methods {
@@ -831,6 +839,23 @@ impl WriteIDL for crate::ZngurMethod {
     }
 }
 
+impl WriteIDL for crate::ZngurCppConstructor {
+    fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
+        if p.enabled(&IDLItem::TypeConstructor) {
+            let safety = if self.is_safe { "safe" } else { "unsafe" };
+            write!(p, "{safety} constructor(")?;
+            for (i, input) in self.inputs.iter().enumerate() {
+                if i > 0 {
+                    write!(p, ", ")?;
+                }
+                p.write_idl(input)?;
+            }
+            writeln!(p, ");")?;
+        }
+        Ok(())
+    }
+}
+
 impl WriteIDL for crate::ZngurCppMethod {
     fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
         if p.enabled(&IDLItem::TypeMethod) {
@@ -908,6 +933,7 @@ fn print_spec() {
             cpp_ref: None,
             cpp_stack_owned: None,
             cpp_methods: vec![],
+            cpp_constructors: vec![],
         }],
         traits: indexmap::IndexMap::default(),
         funcs: vec![crate::ZngurFn {
