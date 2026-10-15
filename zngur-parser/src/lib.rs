@@ -12,10 +12,10 @@ use itertools::{Either, Itertools};
 use zngur_def::{
     AdditionalIncludes, ConflictSource, ConvertPanicToException, CppIndirection, CppTemplateHome,
     CppTypePath, Import, LayoutPolicy, Merge, MergeFailure, ModuleImport, Mutability,
-    PrimitiveRustType, RustPathAndGenerics, RustTrait, RustType, TypeVar, ZngurConstructor,
-    ZngurCppConstructor, ZngurCppField, ZngurCppFn, ZngurCppMethod, ZngurExternCppFn,
-    ZngurExternCppImpl, ZngurField, ZngurFn, ZngurMethod, ZngurMethodDetails, ZngurMethodReceiver,
-    ZngurSpec, ZngurTrait, ZngurType, ZngurVariant, ZngurWellknownTrait,
+    PrimitiveRustType, RustPathAndGenerics, RustTrait, RustType, TriviallyRelocatable, TypeVar,
+    ZngurConstructor, ZngurCppConstructor, ZngurCppField, ZngurCppFn, ZngurCppMethod,
+    ZngurExternCppFn, ZngurExternCppImpl, ZngurField, ZngurFn, ZngurMethod, ZngurMethodDetails,
+    ZngurMethodReceiver, ZngurSpec, ZngurTrait, ZngurType, ZngurVariant, ZngurWellknownTrait,
 };
 
 pub type Span = SimpleSpan<usize>;
@@ -451,8 +451,10 @@ enum ParsedTypeItem<'a> {
         ty: ParsedRustType<'a>,
         rust_name: Option<&'a str>,
     },
-    /// `#trivially_relocatable`.
-    TriviallyRelocatable,
+    /// `#trivially_relocatable`, or `#unsafe(trivially_relocatable)` if `unchecked`.
+    TriviallyRelocatable {
+        unchecked: bool,
+    },
     /// One of the removed `#cpp_*` directives (`name` is e.g. `cpp_stack_owned`).
     RemovedCppDirective {
         name: &'a str,
@@ -786,7 +788,7 @@ impl ProcessedItem<'_> {
                 let mut layout = None;
                 let mut layout_span = None;
                 let mut exhaustive = true;
-                let mut trivially_relocatable = false;
+                let mut trivially_relocatable = TriviallyRelocatable::No;
                 let mut to_process = items;
                 to_process.reverse(); // create a stack of items to process
                 let check_size_align = |props: Vec<(Spanned<&str>, usize)>| {
@@ -1116,7 +1118,7 @@ impl ProcessedItem<'_> {
                             );
                             methods.push(method);
                         }
-                        ParsedTypeItem::TriviallyRelocatable => {
+                        ParsedTypeItem::TriviallyRelocatable { unchecked } => {
                             if !matches!(rust_ty, RustType::Cpp(_)) {
                                 ctx.add_error_str(
                                     "`#trivially_relocatable` is only for `c++::` types (Rust types \
@@ -1129,7 +1131,11 @@ impl ProcessedItem<'_> {
                                 &PartialSpanKey::TriviallyRelocatable(rust_ty.clone()),
                                 item_span.into_range(),
                             );
-                            trivially_relocatable = true;
+                            trivially_relocatable = trivially_relocatable.max(if unchecked {
+                                TriviallyRelocatable::Unchecked
+                            } else {
+                                TriviallyRelocatable::Checked
+                            });
                         }
                         ParsedTypeItem::RemovedCppDirective { name } => {
                             let help = match name {
@@ -2584,7 +2590,7 @@ impl ZngurSpecBuilder {
                 ctx.add_fatal_report(report.finish());
             }
             let is_cpp = matches!(ty.ty, RustType::Cpp(_));
-            if ty.trivially_relocatable && ty.cpp_by_value_layout().is_none() {
+            if ty.trivially_relocatable.is_relocatable() && ty.cpp_by_value_layout().is_none() {
                 type_error(
                     ctx,
                     &ty.ty,
@@ -3492,8 +3498,18 @@ fn inner_type_item<'a>()
                 .or_not(),
         )
         .map(|name| ParsedTypeItem::RemovedCppDirective { name });
-    let trivially_relocatable = just([Token::Sharp, Token::Ident("trivially_relocatable")])
-        .to(ParsedTypeItem::TriviallyRelocatable);
+    let trivially_relocatable = choice((
+        just([Token::Sharp, Token::Ident("trivially_relocatable")]).to(false),
+        just([
+            Token::Sharp,
+            Token::KwUnsafe,
+            Token::ParenOpen,
+            Token::Ident("trivially_relocatable"),
+            Token::ParenClose,
+        ])
+        .to(true),
+    ))
+    .map(|unchecked| ParsedTypeItem::TriviallyRelocatable { unchecked });
 
     let variant = just(Token::Ident("variant"))
         .ignore_then(select! { Token::Ident(c) => c })

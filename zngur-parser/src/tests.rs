@@ -3,7 +3,7 @@ use std::panic::catch_unwind;
 use expect_test::{Expect, expect};
 use zngur_def::{
     CppIndirection, CppTemplateHome, LayoutPolicy, Mutability, PrimitiveRustType,
-    RustPathAndGenerics, RustType, ZngurSpec,
+    RustPathAndGenerics, RustType, TriviallyRelocatable, ZngurSpec,
 };
 
 use crate::{
@@ -2457,7 +2457,10 @@ type c++::std::unique_ptr<i32> {
     let [instantiation] = parsed.spec.types.as_slice() else {
         panic!("expected one type");
     };
-    assert!(instantiation.trivially_relocatable);
+    assert_eq!(
+        instantiation.trivially_relocatable,
+        TriviallyRelocatable::Checked
+    );
     assert_eq!(instantiation.cpp_methods.len(), 1);
     assert_eq!(
         instantiation.cpp_methods[0].output,
@@ -2513,7 +2516,10 @@ type c++::std::unique_ptr<c++::a::B> {
     assert!(parsed.spec.cpp_template_homes.is_empty());
     assert!(parsed.spec.cpp_templates.is_empty());
     let instantiation = &parsed.spec.types[1];
-    assert!(instantiation.trivially_relocatable);
+    assert_eq!(
+        instantiation.trivially_relocatable,
+        TriviallyRelocatable::Checked
+    );
     assert_eq!(instantiation.cpp_methods.len(), 1);
     assert_eq!(
         instantiation.cpp_methods[0].output,
@@ -2616,6 +2622,12 @@ type c++::a::Conservative {
     #trivially_relocatable;
 }
 
+// Promised, rather than checked in C++.
+type c++::a::Unchecked {
+    #layout(size = 8, align = 8);
+    #unsafe(trivially_relocatable);
+}
+
 // A layout without `#trivially_relocatable` is only checked in C++.
 type c++::a::NotRelocatable {
     #layout(size = 8, align = 4);
@@ -2647,6 +2659,18 @@ type c++::a::Opaque {
             size: 32,
             align: 16
         })
+    );
+    assert_eq!(
+        ty("Unchecked").cpp_by_value_layout(),
+        Some(LayoutPolicy::StackAllocated { size: 8, align: 8 })
+    );
+    assert_eq!(
+        ty("Unchecked").trivially_relocatable,
+        TriviallyRelocatable::Unchecked
+    );
+    assert_eq!(
+        ty("ByValue").trivially_relocatable,
+        TriviallyRelocatable::Checked
     );
     assert_eq!(ty("NotRelocatable").cpp_by_value_layout(), None);
     assert_eq!(

@@ -196,6 +196,10 @@ type c++::osmium::Node {
     #layout_conservative(size = 16, align = 8);
     #trivially_relocatable;
 }
+type c++::osmium::Relation {
+    #layout(size = 8, align = 8);
+    #unsafe(trivially_relocatable);
+}
     "#,
         expect![[r#"
             type c++::osmium::Way {
@@ -206,6 +210,11 @@ type c++::osmium::Node {
             type c++::osmium::Node {
                 #layout_conservative(size = 16, align = 8);
                 #trivially_relocatable;
+            }
+
+            type c++::osmium::Relation {
+                #layout(size = 8, align = 8);
+                #unsafe(trivially_relocatable);
             }
         "#]],
     );

@@ -392,7 +392,9 @@ namespace {{ self.namespace }} {
           static_assert(sizeof({{ cpp_stack_owned.0 }}) == {{ td.layout_size }}, "Size mismatch");
           static_assert(alignof({{ cpp_stack_owned.0 }}) == {{ td.layout_align }}, "Alignment mismatch");
           {% endif %}
+          {% if td.check_trivially_relocatable %}
           static_assert(::{{ self.namespace }}::is_trivially_relocatable< {{ cpp_stack_owned.0 }} >::value, "Type must be trivially relocatable");
+          {% endif %}
 
           inline {{ cpp_stack_owned.0 }}& cpp() & {
               return *reinterpret_cast< {{ cpp_stack_owned.0 }}* >(__zngur_data.data());

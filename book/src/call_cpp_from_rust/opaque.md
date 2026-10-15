@@ -204,5 +204,18 @@ template <> struct is_trivially_relocatable<CppType> : std::true_type {};
 In a future where `std::is_trivially_relocatable` exists in the standard, we can specialize it for
 all types.
 
+If you can't (or don't want to) specialize the type trait, write `#unsafe(trivially_relocatable)`
+instead. Rust still holds the type by value, but the C++ code doesn't check that it's trivially
+relocatable: you promise it. This is meant for types that are relocatable but not trivially
+copyable, like `[[clang::trivial_abi]]` types, and for tools that generate `.zng` files and already
+know the answer. If the promise is wrong, moving the value in Rust is undefined behavior.
+
+```zng
+type c++::ns::Handle {
+    #layout(size = 8, align = 8);
+    #unsafe(trivially_relocatable);
+}
+```
+
 > **NOTE**: `#cpp_stack_owned`, `#cpp_ref`, `#cpp_heap_allocated` and `#cpp_value` were removed.
 > zngur explains how to replace them when it finds them.

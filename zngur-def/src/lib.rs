@@ -155,9 +155,8 @@ pub struct ZngurType {
     /// `StackAllocated` or `Conservative` layout and are `trivially_relocatable`, and only refers
     /// to them otherwise.
     pub layout: Option<LayoutPolicy>,
-    /// `#trivially_relocatable`: the C++ type can be moved with `memcpy`, so Rust can hold it by
-    /// value. The generated C++ code checks this with `rust::is_trivially_relocatable`.
-    pub trivially_relocatable: bool,
+    /// Whether the C++ type can be moved with `memcpy`, so that Rust can hold it by value.
+    pub trivially_relocatable: TriviallyRelocatable,
     pub wellknown_traits: Vec<ZngurWellknownTrait>,
     pub exhaustive: bool,
     pub methods: Vec<ZngurMethodDetails>,
@@ -190,9 +189,33 @@ impl ZngurType {
                     layout @ (LayoutPolicy::StackAllocated { .. }
                     | LayoutPolicy::Conservative { .. }),
                 ),
-            ) if self.trivially_relocatable => Some(layout),
+            ) if self.trivially_relocatable.is_relocatable() => Some(layout),
             _ => None,
         }
+    }
+}
+
+/// Whether a C++ (`c++::`) type can be moved with `memcpy` (without running its move constructor
+/// and destructor), which Rust needs to hold it by value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TriviallyRelocatable {
+    /// No directive: Rust only refers to the type.
+    #[default]
+    No,
+    /// `#trivially_relocatable`. The generated C++ code checks it with
+    /// `rust::is_trivially_relocatable`, which is true for trivially copyable types and
+    /// `std::unique_ptr`, and which C++ code can specialize for other types.
+    Checked,
+    /// `#unsafe(trivially_relocatable)`. The author promises it, and the generated C++ code
+    /// doesn't check it, e.g. for `[[clang::trivial_abi]]` types or when a tool (like a bindings
+    /// generator) knows it.
+    Unchecked,
+}
+
+impl TriviallyRelocatable {
+    /// Whether the type is trivially relocatable (checked or not).
+    pub fn is_relocatable(self) -> bool {
+        self != TriviallyRelocatable::No
     }
 }
 

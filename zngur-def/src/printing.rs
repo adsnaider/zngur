@@ -550,9 +550,18 @@ impl WriteIDL for crate::ZngurType {
                 p.write_indent()?;
                 p.write_idl(&self.layout)?;
             }
-            if self.trivially_relocatable && p.enabled(&IDLItem::TypeLayout) {
-                p.write_indent()?;
-                writeln!(p, "#trivially_relocatable;")?;
+            if p.enabled(&IDLItem::TypeLayout) {
+                match self.trivially_relocatable {
+                    crate::TriviallyRelocatable::No => {}
+                    crate::TriviallyRelocatable::Checked => {
+                        p.write_indent()?;
+                        writeln!(p, "#trivially_relocatable;")?;
+                    }
+                    crate::TriviallyRelocatable::Unchecked => {
+                        p.write_indent()?;
+                        writeln!(p, "#unsafe(trivially_relocatable);")?;
+                    }
+                }
             }
 
             if p.enabled(&IDLItem::TypeWellknownTrait) {
@@ -984,7 +993,7 @@ fn print_spec() {
                 deref: None,
                 cpp_name: Some("fooBar".into()),
             }],
-            trivially_relocatable: false,
+            trivially_relocatable: crate::TriviallyRelocatable::No,
             cpp_methods: vec![],
             cpp_constructors: vec![],
             cpp_fields: vec![],

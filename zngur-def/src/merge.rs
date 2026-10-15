@@ -154,7 +154,8 @@ impl Merge for ZngurType {
             into.layout = into.layout.or(self.layout);
         }
 
-        into.trivially_relocatable |= self.trivially_relocatable;
+        // An unchecked promise (`#unsafe(trivially_relocatable)`) wins over a checked one.
+        into.trivially_relocatable = into.trivially_relocatable.max(self.trivially_relocatable);
 
         inplace_union(self.wellknown_traits, &mut into.wellknown_traits);
         merge_by_identity(self.methods, &mut into.methods, |a, b| {

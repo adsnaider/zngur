@@ -568,6 +568,9 @@ pub struct CppTypeDefinition {
     pub wellknown_traits: Vec<ZngurWellknownTraitData>,
     pub cpp_ref: Option<CppRef>,
     pub cpp_stack_owned: Option<CppStackOwned>,
+    /// Whether the C++ code checks that the type that Rust holds by value is trivially
+    /// relocatable (`#trivially_relocatable`, but not `#unsafe(trivially_relocatable)`).
+    pub check_trivially_relocatable: bool,
     /// The (mangled) name of the C++ function that destroys a C++ object that Rust holds by value. Rust
     /// calls it by this name, so the C++ side must define it with exactly this name.
     pub stack_owned_destructor: Option<String>,
@@ -706,6 +709,7 @@ impl Default for CppTypeDefinition {
             from_trait_ref: None,
             cpp_ref: None,
             cpp_stack_owned: None,
+            check_trivially_relocatable: false,
             stack_owned_destructor: None,
         }
     }
