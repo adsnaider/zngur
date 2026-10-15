@@ -51,6 +51,16 @@ fn main() {
         generated::geometry::twice_f64(1.25)
     );
 
+    // C++ field accessors.
+    let mut point = MyCppWrapper::build((1, 2));
+    unsafe {
+        *MyCppWrapper::x_mut(point.as_mut()).as_mut().unwrap() += 100;
+        let x = *MyCppWrapper::x(point.as_ref()).as_ref().unwrap();
+        let y = *MyCppWrapper::y(point.as_ref()).as_ref().unwrap();
+        println!("fields = {x} {y}");
+    }
+    point.print();
+
     assert_eq!(std::mem::size_of::<MyConservativeWrapper>(), 32);
     assert_eq!(std::mem::align_of::<MyConservativeWrapper>(), 16);
 

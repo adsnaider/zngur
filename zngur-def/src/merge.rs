@@ -180,6 +180,9 @@ impl Merge for ZngurType {
         merge_by_identity(self.cpp_constructors, &mut into.cpp_constructors, |a, b| {
             a.inputs == b.inputs
         })?;
+        merge_by_identity(self.cpp_fields, &mut into.cpp_fields, |a, b| {
+            a.rust_name() == b.rust_name()
+        })?;
         if into.constructor.is_none() {
             into.constructor = self.constructor;
         } else if self.constructor != into.constructor {
@@ -288,6 +291,21 @@ impl Merge for crate::ZngurCppMethod {
                 (
                     ConflictSource::Method(self.as_rust_method()),
                     ConflictSource::Method(into.as_rust_method()),
+                ),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Merge for crate::ZngurCppField {
+    fn merge(self, into: &mut Self) -> MergeResult {
+        if self != *into {
+            return Err(MergeFailure::Conflict(
+                "C++ field accessor mismatch".to_string(),
+                (
+                    ConflictSource::Method(self.as_cpp_method().as_rust_method()),
+                    ConflictSource::Method(into.as_cpp_method().as_rust_method()),
                 ),
             ));
         }

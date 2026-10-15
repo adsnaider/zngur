@@ -2632,3 +2632,56 @@ mod c++::a {
         "#]],
     );
 }
+
+#[test]
+fn cpp_fields_parse() {
+    use zngur_def::{Mutability, PrimitiveRustType};
+
+    let parsed = parse_str(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #cpp_stack_owned;
+
+    field const x (type = i32);
+    field x (type = i32) as x_mut;
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let ty = parsed.spec.types.first().expect("no type parsed");
+    let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+    let fields = &ty.cpp_fields;
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0].name, "x");
+    assert_eq!(fields[0].rust_name(), "x");
+    assert_eq!(fields[0].ty, i32);
+    assert_eq!(fields[0].mutability, Mutability::Not);
+    assert_eq!(fields[1].name, "x");
+    assert_eq!(fields[1].rust_name(), "x_mut");
+    assert_eq!(fields[1].mutability, Mutability::Mut);
+    // Fields of Rust types are unaffected.
+    assert!(ty.fields.is_empty());
+}
+
+#[test]
+fn cpp_field_on_rust_type_is_rejected() {
+    check_fail(
+        r#"
+type crate::Foo {
+    #layout(size = 8, align = 4);
+    field const x (type = i32);
+}
+"#,
+        expect![[r#"
+            Error: C++ field accessors (`field name (type = T)`) can only be declared on `#cpp_stack_owned` or `#cpp_ref` types
+               ╭─[ test.zng:2:6 ]
+               │
+             2 │ type crate::Foo {
+               │      ─────┬────  
+               │           ╰────── C++ field accessors (`field name (type = T)`) can only be declared on `#cpp_stack_owned` or `#cpp_ref` types
+            ───╯
+        "#]],
+    );
+}

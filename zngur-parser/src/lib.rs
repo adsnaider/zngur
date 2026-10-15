@@ -13,9 +13,9 @@ use zngur_def::{
     AdditionalIncludes, ConflictSource, ConvertPanicToException, CppHeapAllocated, CppIndirection,
     CppRef, CppStackOwned, Import, LayoutPolicy, Merge, MergeFailure, ModuleImport, Mutability,
     PrimitiveRustType, RustPathAndGenerics, RustTrait, RustType, TypeVar, ZngurConstructor,
-    ZngurCppConstructor, ZngurCppFn, ZngurCppMethod, ZngurExternCppFn, ZngurExternCppImpl,
-    ZngurField, ZngurFn, ZngurMethod, ZngurMethodDetails, ZngurMethodReceiver, ZngurSpec,
-    ZngurTrait, ZngurType, ZngurVariant, ZngurWellknownTrait,
+    ZngurCppConstructor, ZngurCppField, ZngurCppFn, ZngurCppMethod, ZngurExternCppFn,
+    ZngurExternCppImpl, ZngurField, ZngurFn, ZngurMethod, ZngurMethodDetails, ZngurMethodReceiver,
+    ZngurSpec, ZngurTrait, ZngurType, ZngurVariant, ZngurWellknownTrait,
 };
 
 pub type Span = SimpleSpan<usize>;
@@ -444,6 +444,13 @@ enum ParsedTypeItem<'a> {
         is_safe: bool,
         inputs: Vec<ParsedRustType<'a>>,
     },
+    /// An accessor for a field of a C++ type: `field [const] name (type = T) [as rust_name];`
+    CppField {
+        is_const: bool,
+        name: &'a str,
+        ty: ParsedRustType<'a>,
+        rust_name: Option<&'a str>,
+    },
     CppValue {
         field: &'a str,
         cpp_type: &'a str,
@@ -800,6 +807,7 @@ impl ProcessedItem<'_> {
                 let mut methods = vec![];
                 let mut cpp_methods: Vec<ZngurCppMethod> = vec![];
                 let mut cpp_constructors: Vec<ZngurCppConstructor> = vec![];
+                let mut cpp_fields: Vec<ZngurCppField> = vec![];
                 let mut constructor = None;
                 let mut variants = vec![];
                 let mut fields = vec![];
@@ -1057,6 +1065,31 @@ impl ProcessedItem<'_> {
                             );
                             cpp_constructors.push(constructor);
                         }
+                        ParsedTypeItem::CppField {
+                            is_const,
+                            name,
+                            ty,
+                            rust_name,
+                        } => {
+                            let field = ZngurCppField {
+                                name: name.to_owned(),
+                                rust_name: rust_name.map(|n| n.to_owned()),
+                                ty: ty.to_zngur(scope),
+                                mutability: if is_const {
+                                    Mutability::Not
+                                } else {
+                                    Mutability::Mut
+                                },
+                            };
+                            ctx.record_span(
+                                &field
+                                    .as_cpp_method()
+                                    .as_rust_method()
+                                    .into_span_key_with(rust_ty.clone()),
+                                item_span.into_range(),
+                            );
+                            cpp_fields.push(field);
+                        }
                         ParsedTypeItem::Method {
                             data,
                             use_path,
@@ -1228,6 +1261,7 @@ impl ProcessedItem<'_> {
                     methods,
                     cpp_methods,
                     cpp_constructors,
+                    cpp_fields,
                     wellknown_traits: wt,
                     exhaustive,
                     constructor,
@@ -2682,6 +2716,22 @@ impl ZngurSpecBuilder {
                         .finish(),
                 );
             }
+            if !ty.cpp_fields.is_empty() && ty.cpp_stack_owned.is_none() && ty.cpp_ref.is_none() {
+                let span = ctx
+                    .fetch_spans_global(&*ty)
+                    .first()
+                    .copied()
+                    .cloned()
+                    .unwrap_or((0, 0usize..0));
+                let message = "C++ field accessors (`field name (type = T)`) can only be declared \
+                               on `#cpp_stack_owned` or `#cpp_ref` types";
+                ctx.add_fatal_report(
+                    Report::build(ReportKind::Error, span.clone())
+                        .with_message(message)
+                        .with_label(Label::new(span).with_message(message))
+                        .finish(),
+                );
+            }
         }
         spec
     }
@@ -3288,6 +3338,30 @@ fn inner_type_item<'a>()
         )
         .map(|(name, (offset, ty))| ParsedTypeItem::Field { name, ty, offset }),
     );
+    // Unlike fields of Rust types, accessors for fields of C++ types have no offset (C++ knows
+    // it), so they're told apart by `(type = ...)`.
+    let cpp_field = just(Token::Ident("field"))
+        .ignore_then(just(Token::KwConst).or_not().map(|c| c.is_some()))
+        .then(select! { Token::Ident(c) => c })
+        .then(
+            just(Token::KwType)
+                .then(just(Token::Eq))
+                .ignore_then(rust_type())
+                .delimited_by(just(Token::ParenOpen), just(Token::ParenClose)),
+        )
+        .then(
+            just(Token::KwAs)
+                .ignore_then(select! { Token::Ident(c) => c })
+                .or_not(),
+        )
+        .map(
+            |(((is_const, name), ty), rust_name)| ParsedTypeItem::CppField {
+                is_const,
+                name,
+                ty,
+                rust_name,
+            },
+        );
     let cpp_value = just(Token::Sharp)
         .then(just(Token::Ident("cpp_value")))
         .ignore_then(select! {
@@ -3409,6 +3483,7 @@ fn inner_type_item<'a>()
             non_exhaustive.boxed(),
             constructor.boxed(),
             field.boxed(),
+            cpp_field.boxed(),
             cpp_value.boxed(),
             cpp_heap_allocated.boxed(),
             cpp_ref.boxed(),

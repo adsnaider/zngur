@@ -1,12 +1,13 @@
-//! The C++ side of C++ functions, member functions and constructors that Rust calls
-//! (`ZngurCppFn`, `ZngurCppMethod`, `ZngurCppConstructor`): `extern "C"` functions that convert
-//! the arguments and call them directly, so that nobody has to write a forwarding body by hand.
+//! The C++ side of C++ functions, member functions, constructors and field accessors that Rust
+//! calls (`ZngurCppFn`, `ZngurCppMethod`, `ZngurCppConstructor`, `ZngurCppField`): `extern "C"`
+//! functions that convert the arguments and call them directly, so that nobody has to write a
+//! forwarding body by hand.
 
 use std::collections::HashMap;
 
 use zngur_def::{
-    CppIndirection, Mutability, PrimitiveRustType, RustType, ZngurCppConstructor, ZngurCppFn,
-    ZngurCppMethod, ZngurMethodReceiver,
+    CppIndirection, Mutability, PrimitiveRustType, RustType, ZngurCppConstructor, ZngurCppField,
+    ZngurCppFn, ZngurCppMethod, ZngurMethodReceiver,
 };
 
 use crate::rust::IntoCpp;
@@ -166,6 +167,36 @@ impl BridgeRenderer<'_> {
         format!(
             "void {mangled_name}({}) {{\n  {check}{body}\n}}\n",
             params.join(", ")
+        )
+    }
+
+    /// The bridge function `mangled_name` for the accessor `field` of `owner` (whose C++ type is
+    /// `owner_cpp_type`), which returns a pointer to the field.
+    pub fn field(
+        &self,
+        mangled_name: &str,
+        owner: &RustType,
+        owner_cpp_type: &str,
+        field: &ZngurCppField,
+    ) -> String {
+        let namespace = self.namespace;
+        let this_ty = RustType::CppPtr(
+            field.mutability,
+            CppIndirection::Pointer,
+            Box::new(owner.clone()),
+        );
+        let this = self.move_from_rust(&this_ty, 0);
+        let output = field.as_cpp_method().output;
+        let name = &field.name;
+        let field_ty = self.cpp(&field.ty);
+        format!(
+            "void {mangled_name}(uint8_t* i0, uint8_t* o) {{\n  \
+             static_assert(::std::is_same< decltype({owner_cpp_type}::{name}), \
+             ::{namespace}::CppTypeOf< {field_ty} >::type >::value, \
+             \"`{owner_cpp_type}::{name}` doesn't have the type declared in the .zng file\");\n  \
+             {} __zngur_o = &({this})->{name};\n  \
+             ::{namespace}::__zngur_internal_move_to_rust(o, __zngur_o);\n}}\n",
+            self.cpp(&output)
         )
     }
 

@@ -4,6 +4,7 @@ assocs
 autozng
 barbaz
 barbazxxx
+bitfields
 blobstore
 cerr
 chumsky

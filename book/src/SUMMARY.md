@@ -22,6 +22,7 @@
   - [C++ pointers and references](./call_cpp_from_rust/cpp_pointers.md)
   - [C++ member functions](./call_cpp_from_rust/cpp_methods.md)
   - [C++ constructors](./call_cpp_from_rust/cpp_constructors.md)
+  - [C++ fields](./call_cpp_from_rust/cpp_fields.md)
   - [Free C++ functions](./call_cpp_from_rust/cpp_functions.md)
   - [Trait objects](./call_cpp_from_rust/trait_object.md)
 - [Import](./import.md)

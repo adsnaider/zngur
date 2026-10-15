@@ -170,6 +170,29 @@ impl ZngurGenerator {
                         method,
                     ));
                 }
+                // Field accessors: like `const` / non-`const` member functions that return a
+                // pointer to the field.
+                for field in &ty_def.cpp_fields {
+                    let this = RustType::CppPtr(
+                        field.mutability,
+                        CppIndirection::Pointer,
+                        Box::new(ty.clone()),
+                    );
+                    let mangled_name = rust_file.add_cpp_method(
+                        ty,
+                        field.rust_name(),
+                        Some(this),
+                        &[],
+                        &field.as_cpp_method().output,
+                        false,
+                    );
+                    cpp_file.cpp_method_bridges.push(bridges.field(
+                        &mangled_name,
+                        ty,
+                        owner_cpp_type,
+                        field,
+                    ));
+                }
                 // C++ constructors (`#cpp_stack_owned` types only, checked by the parser): a
                 // `ZngCppConstruct` impl, and a C++ function that runs the constructor in place.
                 for (index, constructor) in ty_def.cpp_constructors.iter().enumerate() {
@@ -701,6 +724,7 @@ mod tests {
             cpp_stack_owned: None,
             cpp_methods: vec![],
             cpp_constructors: vec![],
+            cpp_fields: vec![],
         }
     }
 
@@ -724,6 +748,7 @@ mod tests {
             cpp_stack_owned: Some(CppStackOwned(cpp_type.to_owned())),
             cpp_methods: vec![],
             cpp_constructors: vec![],
+            cpp_fields: vec![],
         }
     }
 
@@ -742,6 +767,7 @@ mod tests {
             cpp_stack_owned: None,
             cpp_methods: vec![],
             cpp_constructors: vec![],
+            cpp_fields: vec![],
         }
     }
 
@@ -1057,6 +1083,42 @@ pub type Handle = super::Handle;
             "{cpp_code}"
         );
         assert!(cpp_code.contains(".cpp())"), "{cpp_code}");
+    }
+
+    #[test]
+    fn cpp_fields_get_accessors_and_cpp_bridges() {
+        let b = cpp(&["a", "B"]);
+        let mut ty = minimal_stack_owned_type(b, "::a::B", 8, 4);
+        ty.cpp_fields = vec![ZngurCppField {
+            name: "x".to_owned(),
+            rust_name: Some("x_mut".to_owned()),
+            ty: RustType::Primitive(PrimitiveRustType::Int(32)),
+            mutability: Mutability::Mut,
+        }];
+        let spec = ZngurSpec {
+            types: vec![ty],
+            ..Default::default()
+        };
+        let (rust_code, _h, cpp_code) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let cpp_code = cpp_code.expect("C++ field accessors need a C++ file");
+
+        assert!(rust_code.contains(
+            "pub unsafe fn x_mut(i0: ::zngur_lib::CppPtr<a::B, ::zngur_lib::Mut>, ) -> \
+             ::zngur_lib::CppPtr<i32, ::zngur_lib::Mut>"
+        ));
+        assert!(
+            cpp_code.contains("static_assert(::std::is_same< decltype(::a::B::x), "),
+            "{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains(
+                "::rust::CppMutPtr< ::int32_t > __zngur_o = \
+                 &(::rust::__zngur_internal_move_from_rust< ::rust::CppMutPtr< ::rust::a::B > \
+                 >(i0))->x;"
+            ),
+            "{cpp_code}"
+        );
     }
 
     #[test]

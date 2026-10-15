@@ -19,6 +19,11 @@ type c++::MyCppWrapper {
     // pointer or reference parameters, like the copy constructor, must be `unsafe`.
     safe constructor(i32, i32);
     unsafe constructor(const c++::MyCppWrapper&);
+
+    // Accessors for C++ fields, which return a `zngur_lib::CppPtr` to the field.
+    field const x (type = i32);
+    field x (type = i32) as x_mut;
+    field const y (type = i32);
 }
 
 type crate::MyConservativeWrapper {

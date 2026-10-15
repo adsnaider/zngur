@@ -429,6 +429,8 @@ type c++::a::B {
     safe constructor();
     safe constructor(i32, i32);
     unsafe constructor(const c++::a::B&);
+    field const x (type = i32);
+    field x (type = i32) as x_mut;
 }
         "#,
         expect![[r##"
@@ -437,6 +439,9 @@ type c++::a::B {
             type c++::a::B {
                 #layout(size = 8, align = 4);
                 #cpp_stack_owned "::a::B";
+
+                field const x (type = i32);
+                field x (type = i32) as x_mut;
 
                 safe constructor();
                 safe constructor(i32, i32);

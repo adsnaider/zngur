@@ -22,6 +22,9 @@ dot = 60
 Constructed CppType 0 0
 CppType 0 0
 twice = 42 2.5
+Constructed CppType 1 2
+fields = 101 2
+CppType 101 2
 Constructed CppConservativeType 10 20
 CppConservativeType 10 20
 Constructed CppConservativeType 1 2

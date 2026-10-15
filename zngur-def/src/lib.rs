@@ -186,6 +186,8 @@ pub struct ZngurType {
     pub cpp_methods: Vec<ZngurCppMethod>,
     /// The C++ constructors of a `#cpp_stack_owned` type, which Rust can call.
     pub cpp_constructors: Vec<ZngurCppConstructor>,
+    /// Accessors for the fields (data members) of a C++ type (`#cpp_stack_owned` or `#cpp_ref`).
+    pub cpp_fields: Vec<ZngurCppField>,
     pub constructor: Option<ZngurConstructor>,
     pub variants: Vec<ZngurVariant>,
     pub fields: Vec<ZngurField>,
@@ -237,6 +239,45 @@ impl ZngurCppMethod {
 pub struct ZngurCppConstructor {
     pub inputs: Vec<RustType>,
     pub is_safe: bool,
+}
+
+/// An accessor for a field (data member) of a C++ type, declared like `field const x (type = i32);`
+/// or `field x (type = i32) as x_mut;`. zngur generates an `unsafe` Rust function that takes `this`
+/// as a `zngur_lib::CppPtr<Self, M>` and returns a `CppPtr<ty, M>` to the field, where `M` is
+/// `Const` for `const` accessors and `Mut` otherwise.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct ZngurCppField {
+    /// The name of the C++ field.
+    pub name: String,
+    /// The name of the Rust function (from `as`), if it isn't `name`.
+    pub rust_name: Option<String>,
+    /// The type of the field.
+    pub ty: RustType,
+    /// `Not` for `const` accessors.
+    pub mutability: Mutability,
+}
+
+impl ZngurCppField {
+    /// The name of the Rust function.
+    pub fn rust_name(&self) -> &str {
+        self.rust_name.as_deref().unwrap_or(&self.name)
+    }
+
+    /// The accessor as a C++ member function, which returns a pointer to the field.
+    pub fn as_cpp_method(&self) -> ZngurCppMethod {
+        ZngurCppMethod {
+            cpp_name: self.name.clone(),
+            rust_name: self.rust_name.clone(),
+            receiver: ZngurMethodReceiver::Ref(self.mutability),
+            inputs: vec![],
+            output: RustType::CppPtr(
+                self.mutability,
+                CppIndirection::Pointer,
+                Box::new(self.ty.clone()),
+            ),
+            is_safe: false,
+        }
+    }
 }
 
 /// A free C++ function, declared in a `c++::` scope like

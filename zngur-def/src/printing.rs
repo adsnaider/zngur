@@ -589,6 +589,14 @@ impl WriteIDL for crate::ZngurType {
                 }
             }
 
+            if !self.cpp_fields.is_empty() {
+                writeln!(p)?;
+                for field in &self.cpp_fields {
+                    p.write_indent()?;
+                    p.write_idl(field)?;
+                }
+            }
+
             if !self.cpp_constructors.is_empty() {
                 writeln!(p)?;
                 for constructor in &self.cpp_constructors {
@@ -888,6 +896,26 @@ impl WriteIDL for crate::ZngurMethod {
     }
 }
 
+impl WriteIDL for crate::ZngurCppField {
+    fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
+        if p.enabled(&IDLItem::TypeField) {
+            let constness = match self.mutability {
+                crate::Mutability::Not => "const ",
+                crate::Mutability::Mut => "",
+            };
+            let name = &self.name;
+            write!(p, "field {constness}{name} (type = ")?;
+            p.write_idl(&self.ty)?;
+            write!(p, ")")?;
+            if let Some(rust_name) = &self.rust_name {
+                write!(p, " as {rust_name}")?;
+            }
+            writeln!(p, ";")?;
+        }
+        Ok(())
+    }
+}
+
 impl WriteIDL for crate::ZngurCppConstructor {
     fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
         if p.enabled(&IDLItem::TypeConstructor) {
@@ -983,6 +1011,7 @@ fn print_spec() {
             cpp_stack_owned: None,
             cpp_methods: vec![],
             cpp_constructors: vec![],
+            cpp_fields: vec![],
         }],
         traits: indexmap::IndexMap::default(),
         funcs: vec![crate::ZngurFn {
