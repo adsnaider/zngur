@@ -80,6 +80,20 @@ fn main() {
         generated::Pair::<i32>::sum(pair.as_const())
     });
 
+    let mut first = generated::Node::build((1,));
+    let mut second = generated::Node::build((2,));
+    unsafe {
+        *generated::Node::next_mut(first.as_mut()).as_mut().unwrap() = second.as_mut();
+        *generated::Node::type_mut(second.as_mut()).as_mut().unwrap() = 5;
+        let next = *generated::Node::next(first.as_ref()).as_ref().unwrap();
+        println!(
+            "nodes = {} -> {}, type = {}",
+            *generated::Node::id(first.as_ref()).as_ref().unwrap(),
+            *generated::Node::id(next.into()).as_ref().unwrap(),
+            *generated::Node::type_mut(next).as_ref().unwrap()
+        );
+    }
+
     assert_eq!(std::mem::size_of::<MyConservativeWrapper>(), 32);
     assert_eq!(std::mem::align_of::<MyConservativeWrapper>(), 16);
 

@@ -87,3 +87,12 @@ inline std::unique_ptr<Pair<int32_t>> boxed(int32_t first, int32_t second) {
 }
 } // namespace pairs
 
+
+// C++ fields of different kinds: `const`, named like a zngur keyword (`type`), and a pointer.
+struct Node {
+  const int32_t id;
+  int32_t type;
+  Node *next;
+
+  explicit Node(int32_t id) : id(id), type(0), next(nullptr) {}
+};

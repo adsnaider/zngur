@@ -27,6 +27,7 @@ fields = 101 2
 CppType 101 2
 pairs = 34 3.75
 boxed = 11
+nodes = 1 -> 2, type = 5
 Constructed CppConservativeType 10 20
 CppConservativeType 10 20
 Constructed CppConservativeType 1 2

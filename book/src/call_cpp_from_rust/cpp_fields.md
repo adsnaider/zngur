@@ -15,6 +15,7 @@ type c++::geo::Point {
 
 - A `const` accessor gives a `const` pointer to the field, and the others a non-`const` one.
 - `as` gives the Rust function a different name, e.g. to have both kinds of accessor for a field.
+  It's also needed for C++ names that are Rust keywords: `field const type (type = i32) as type_;`.
 - There's no offset to declare, since C++ knows it. That's also what distinguishes these from the
   fields of Rust types, which have an `offset`.
 
@@ -32,4 +33,6 @@ unsafe {
 
 zngur generates the C++ function that takes the field's address, `&this->x`, so C++ checks that the
 field is accessible: accessors for private fields don't compile. A `static_assert` checks that the
-field has the declared type. Bitfields and fields of reference type aren't supported.
+field has the declared type (ignoring a top-level `const`; `const` fields only have `const`
+accessors). Fields can be C++ pointers (`field next (type = c++::Node*)`). Bitfields and fields of
+reference type aren't supported.

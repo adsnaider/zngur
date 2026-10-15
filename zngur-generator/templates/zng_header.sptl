@@ -99,6 +99,13 @@ namespace {{ self.cpp_namespace }} {
   template<typename T>
   struct CppTypeOf;
 
+  // C++ pointers stand for themselves, e.g. for fields of pointer type, whose accessors return a
+  // `CppMutPtr<CppMutPtr<T>>` (a pointer to a pointer).
+  template<typename T>
+  struct CppTypeOf<T*> {
+    using type = T*;
+  };
+
   // A C++ pointer (`zngur_lib::CppPtr<T, Const>` / `CppPtr<T, Mut>` in Rust) to the C++ type that
   // `T` stands for, e.g. `CppConstPtr<rust::ns::Bar>` is `const ::ns::Bar*`.
   template<typename T>

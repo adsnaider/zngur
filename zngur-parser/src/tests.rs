@@ -2868,3 +2868,28 @@ type c++::a::B {
     );
     assert_eq!(parsed.spec.types.len(), 1);
 }
+
+#[test]
+fn cpp_names_can_be_zngur_keywords() {
+    let parsed = parse_str(
+        r#"
+type c++::a::B {
+    field const type (type = i32) as type_;
+    unsafe fn match(i32) const -> i32 as match_;
+}
+
+mod c++::a {
+    safe fn use(i32) as use_;
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let ty = &parsed.spec.types[0];
+    assert_eq!(ty.cpp_fields[0].name, "type");
+    assert_eq!(ty.cpp_fields[0].rust_name(), "type_");
+    assert_eq!(ty.cpp_methods[0].cpp_name, "match");
+    assert_eq!(ty.cpp_methods[0].rust_name(), "match_");
+    assert_eq!(parsed.spec.cpp_funcs[0].cpp_name, "use");
+    assert_eq!(parsed.spec.cpp_funcs[0].rust_name(), "use_");
+}

@@ -191,7 +191,7 @@ impl BridgeRenderer<'_> {
         let field_ty = self.cpp(&field.ty);
         format!(
             "void {mangled_name}(uint8_t* i0, uint8_t* o) {{\n  \
-             static_assert(::std::is_same< decltype({owner_cpp_type}::{name}), \
+             static_assert(::std::is_same< ::std::remove_cv< decltype({owner_cpp_type}::{name}) >::type, \
              ::{namespace}::CppTypeOf< {field_ty} >::type >::value, \
              \"`{owner_cpp_type}::{name}` doesn't have the type declared in the .zng file\");\n  \
              {} __zngur_o = &({this})->{name};\n  \

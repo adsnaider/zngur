@@ -3458,7 +3458,7 @@ fn inner_type_item<'a>()
     // it), so they're told apart by `(type = ...)`.
     let cpp_field = just(Token::Ident("field"))
         .ignore_then(just(Token::KwConst).or_not().map(|c| c.is_some()))
-        .then(select! { Token::Ident(c) => c })
+        .then(cpp_name())
         .then(
             just(Token::KwType)
                 .then(just(Token::Eq))
@@ -3539,7 +3539,7 @@ fn inner_type_item<'a>()
             .or_not()
             .map(|s| s.is_some())
             .then_ignore(just(Token::KwFn))
-            .then(select! { Token::Ident(c) => c })
+            .then(cpp_name())
             .then(cpp_params.clone())
             .then(just(Token::KwConst).or_not().map(|c| c.is_some()))
             .then(just(Token::Arrow).ignore_then(rust_type()).or_not())
@@ -3695,6 +3695,30 @@ fn fn_item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngParserEx
         .boxed()
 }
 
+/// The name of a C++ declaration: an identifier, or a word that is a zngur keyword but can be a
+/// C++ name (e.g. a field named `type`).
+fn cpp_name<'a>() -> impl Parser<'a, ParserInput<'a>, &'a str, ZngParserExtra<'a>> + Clone {
+    select! {
+        Token::Ident(c) => c,
+        Token::KwAs => "as",
+        Token::KwAsync => "async",
+        Token::KwCrate => "crate",
+        Token::KwDyn => "dyn",
+        Token::KwFn => "fn",
+        Token::KwImpl => "impl",
+        Token::KwImport => "import",
+        Token::KwMatch => "match",
+        Token::KwMerge => "merge",
+        Token::KwMod => "mod",
+        Token::KwMut => "mut",
+        Token::KwSafe => "safe",
+        Token::KwTrait => "trait",
+        Token::KwType => "type",
+        Token::KwUnsafe => "unsafe",
+        Token::KwUse => "use",
+    }
+}
+
 fn cpp_fn_item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngParserExtra<'a>> + Clone
 {
     let cpp_fn = choice((
@@ -3702,7 +3726,7 @@ fn cpp_fn_item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngPars
         just(Token::KwUnsafe).to(false),
     ))
     .then_ignore(just(Token::KwFn))
-    .then(select! { Token::Ident(c) => c })
+    .then(cpp_name())
     .then(
         rust_type()
             .separated_by(just(Token::Comma))

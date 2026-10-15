@@ -1103,7 +1103,9 @@ mod tests {
              ::zngur_lib::CppPtr<i32, ::zngur_lib::Mut>"
         ));
         assert!(
-            cpp_code.contains("static_assert(::std::is_same< decltype(::a::B::x), "),
+            cpp_code.contains(
+                "static_assert(::std::is_same< ::std::remove_cv< decltype(::a::B::x) >::type, "
+            ),
             "{cpp_code}"
         );
         assert!(

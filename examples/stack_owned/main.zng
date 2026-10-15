@@ -73,6 +73,19 @@ mod c++::pairs {
     safe fn boxed(i32, i32) -> c++::std::unique_ptr<c++::Pair<i32>>;
 }
 
+// Fields can be `const` (and then only have a `const` accessor), be named like a zngur keyword,
+// and be C++ pointers.
+type c++::Node {
+    #layout(size = 16, align = 8);
+    #trivially_relocatable;
+
+    safe constructor(i32);
+    field const id (type = i32);
+    field type (type = i32) as type_mut;
+    field const next (type = c++::Node*);
+    field next (type = c++::Node*) as next_mut;
+}
+
 extern "C++" {
     impl c++::MyCppWrapper {
         safe fn new(i32, i32) -> c++::MyCppWrapper;
