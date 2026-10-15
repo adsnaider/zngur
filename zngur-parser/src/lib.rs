@@ -416,14 +416,16 @@ enum ParsedTypeItem<'a> {
         field: &'a str,
         cpp_type: &'a str,
     },
+    // For the `#cpp_*` directives, `cpp_type` is `None` if the C++ type name is omitted, which is
+    // allowed for `c++::` types: the name is the type's path.
     CppHeapAllocated {
-        cpp_type: &'a str,
+        cpp_type: Option<&'a str>,
     },
     CppRef {
-        cpp_type: &'a str,
+        cpp_type: Option<&'a str>,
     },
     CppStackOwned {
-        cpp_type: &'a str,
+        cpp_type: Option<&'a str>,
         props: Option<Vec<(Spanned<&'a str>, usize)>>,
     },
     MatchOnCfg(Condition<CfgConditional<'a>, ParsedTypeItem<'a>, NItems>),
@@ -461,6 +463,27 @@ impl ParsedMethod<'_> {
 struct MergeContext {
     outer_ty: RustType,
     variant: Option<String>,
+}
+
+/// The C++ type name of a `#cpp_heap_allocated`, `#cpp_ref` or `#cpp_stack_owned` directive on
+/// `ty`: the explicit one if given, otherwise the path of a `c++::` type (`c++::a::B` is `::a::B`).
+fn cpp_type_name(
+    explicit: Option<&str>,
+    ty: &RustType,
+    span: Span,
+    ctx: &mut ParseContext,
+) -> Option<String> {
+    match (explicit, ty) {
+        (Some(name), _) => Some(name.to_owned()),
+        (None, RustType::Cpp(segs)) => Some(format!("::{}", segs.join("::"))),
+        (None, _) => {
+            ctx.add_error_str(
+                "the C++ type name can only be omitted for `c++::` types, whose path is the name",
+                span,
+            );
+            None
+        }
+    }
 }
 
 fn checked_merge<T, U>(
@@ -939,7 +962,11 @@ impl ProcessedItem<'_> {
                             cpp_heap_allocated = Some(cpp);
                         }
                         ParsedTypeItem::CppHeapAllocated { cpp_type } => {
-                            let cpp = CppHeapAllocated(cpp_type.to_owned());
+                            let Some(cpp_type) = cpp_type_name(cpp_type, &rust_ty, item_span, ctx)
+                            else {
+                                continue;
+                            };
+                            let cpp = CppHeapAllocated(cpp_type);
                             ctx.record_span(
                                 &cpp.into_span_key_with(rust_ty.clone()),
                                 item_span.into_range(),
@@ -947,6 +974,10 @@ impl ProcessedItem<'_> {
                             cpp_heap_allocated = Some(cpp);
                         }
                         ParsedTypeItem::CppRef { cpp_type } => {
+                            let Some(cpp_type) = cpp_type_name(cpp_type, &rust_ty, item_span, ctx)
+                            else {
+                                continue;
+                            };
                             match layout_span {
                                 Some(span) => {
                                     ctx.add_error_str("Duplicate layout policy found", span);
@@ -957,7 +988,7 @@ impl ProcessedItem<'_> {
                                     layout_span = Some(item_span);
                                 }
                             }
-                            let cpp = CppRef(cpp_type.to_owned());
+                            let cpp = CppRef(cpp_type);
                             ctx.record_span(
                                 &cpp.into_span_key_with(rust_ty.clone()),
                                 item_span.into_range(),
@@ -965,6 +996,10 @@ impl ProcessedItem<'_> {
                             cpp_ref = Some(cpp);
                         }
                         ParsedTypeItem::CppStackOwned { cpp_type, props } => {
+                            let Some(cpp_type) = cpp_type_name(cpp_type, &rust_ty, item_span, ctx)
+                            else {
+                                continue;
+                            };
                             if let Some(props) = props {
                                 let size = props
                                     .iter()
@@ -991,7 +1026,7 @@ impl ProcessedItem<'_> {
                                 ctx.add_fatal_report(report);
                                 continue;
                             }
-                            let cpp = CppStackOwned(cpp_type.to_owned());
+                            let cpp = CppStackOwned(cpp_type);
                             ctx.record_span(
                                 &cpp.into_span_key_with(rust_ty.clone()),
                                 item_span.into_range(),
@@ -2917,21 +2952,30 @@ fn inner_type_item<'a>()
         });
     let cpp_heap_allocated = just(Token::Sharp)
         .then(just(Token::Ident("cpp_heap_allocated")))
-        .ignore_then(select! {
-            Token::Str(c) => c,
-        })
+        .ignore_then(
+            select! {
+                Token::Str(c) => c,
+            }
+            .or_not(),
+        )
         .map(|cpp_type| ParsedTypeItem::CppHeapAllocated { cpp_type });
     let cpp_ref = just(Token::Sharp)
         .then(just(Token::Ident("cpp_ref")))
-        .ignore_then(select! {
-            Token::Str(c) => c,
-        })
+        .ignore_then(
+            select! {
+                Token::Str(c) => c,
+            }
+            .or_not(),
+        )
         .map(|x| ParsedTypeItem::CppRef { cpp_type: x });
     let cpp_stack_owned = just(Token::Sharp)
         .then(just(Token::Ident("cpp_stack_owned")))
-        .ignore_then(select! {
-            Token::Str(c) => c,
-        })
+        .ignore_then(
+            select! {
+                Token::Str(c) => c,
+            }
+            .or_not(),
+        )
         .then(
             property_item
                 .clone()

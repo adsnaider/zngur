@@ -20,6 +20,16 @@ type c++::Way {
 ```
 
 Note that `#cpp_ref` types don't need manual layout policy.
+
+If the `c++::` path of the type matches the C++ type, you can omit the name: it defaults to the
+path. This works for `#cpp_ref`, `#cpp_heap_allocated` and `#cpp_stack_owned`:
+
+```
+type c++::osmium::Way {
+    #cpp_ref; // Same as `#cpp_ref "::osmium::Way";`
+}
+```
+
 This enables creating `rust::Ref<rust::Way>` from a `const osmium::Way&` in C++
 and you can pass it to the Rust side.
 Rust side can't do anything meaningful with it, except passing it again to the C++ side.

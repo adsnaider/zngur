@@ -8,7 +8,8 @@ type c++::task::CppTask {
 }
 
 type c++::task::Dispatcher {
-    #cpp_stack_owned "::task::Dispatcher";
+    // The C++ type name defaults to the path: `::task::Dispatcher`.
+    #cpp_stack_owned;
     #layout(size = 1, align = 1);
 }
 

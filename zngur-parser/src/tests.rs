@@ -1557,6 +1557,89 @@ type c++::a::b::Name {
 }
 
 #[test]
+fn cpp_type_name_defaults_to_the_cpp_path() {
+    let parsed = parse_str(
+        r#"
+type c++::a::b::Stack {
+    #cpp_stack_owned;
+    #layout(size = 8, align = 4);
+}
+
+mod c++::a {
+    type Ref {
+        #cpp_ref;
+    }
+
+    type Heap {
+        #layout(size = 16, align = 8);
+        #cpp_heap_allocated;
+    }
+}
+
+type c++::a::Explicit {
+    #cpp_ref "::other::Name";
+}
+    "#,
+        NullCfg,
+        |_| {},
+    );
+    let ty = |path: &[&str]| {
+        parsed
+            .spec
+            .types
+            .iter()
+            .find(|t| matches!(&t.ty, RustType::Cpp(segs) if segs == path))
+            .unwrap_or_else(|| panic!("no type {path:?}"))
+    };
+    assert_eq!(
+        ty(&["a", "b", "Stack"]).cpp_stack_owned,
+        Some(CppStackOwned("::a::b::Stack".to_owned())),
+    );
+    assert_eq!(
+        ty(&["a", "Ref"]).cpp_ref,
+        Some(CppRef("::a::Ref".to_owned()))
+    );
+    assert_eq!(
+        ty(&["a", "Heap"]).cpp_heap_allocated,
+        Some(CppHeapAllocated("::a::Heap".to_owned())),
+    );
+    // An explicit name still wins.
+    assert_eq!(
+        ty(&["a", "Explicit"]).cpp_ref,
+        Some(CppRef("::other::Name".to_owned())),
+    );
+}
+
+#[test]
+fn cpp_type_name_required_for_rust_paths() {
+    check_fail(
+        r#"
+type crate::Foo {
+    #cpp_ref;
+}
+    "#,
+        expect![[r#"
+            Error: the C++ type name can only be omitted for `c++::` types, whose path is the name
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     #cpp_ref;
+               │     ────┬────  
+               │         ╰────── the C++ type name can only be omitted for `c++::` types, whose path is the name
+            ───╯
+            Error: No layout policy found for type crate::Foo.
+               ╭─[ test.zng:1:1 ]
+               │
+             2 │ type crate::Foo {
+               │      ─────┬────  
+               │           ╰────── Type first declared here.
+               │ 
+               │ Note: Use one of `#layout(size = X, align = Y)`, `#heap_allocated` or `#only_by_ref`.
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
 fn mod_cpp_shorthand_matches_explicit_cpp_path() {
     let direct = parse_str(
         r#"
