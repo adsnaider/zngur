@@ -288,6 +288,17 @@ pub enum RustType {
     Adt(RustPathAndGenerics),
     TypeVar(TypeVar),
     Cpp(Vec<String>),
+    /// A C++ pointer or reference (`const T*`, `T*`, `const T&` or `T&` in the `.zng` file). In
+    /// Rust, all of them are a `zngur_lib::CppPtr<T, Const or Mut>`. The indirection only matters
+    /// when calling C++ functions, which take either a pointer or a reference.
+    CppPtr(Mutability, CppIndirection, Box<RustType>),
+}
+
+/// Whether a C++ function takes (or returns) a [`RustType::CppPtr`] as a pointer or a reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CppIndirection {
+    Pointer,
+    Reference,
 }
 
 impl RustType {
@@ -383,6 +394,13 @@ impl Display for RustType {
             RustType::Slice(s) => write!(f, "[{s}]"),
             RustType::TypeVar(TypeVar(v)) => write!(f, "{v}"),
             RustType::Cpp(segs) => write!(f, "{}", segs.join("::")),
+            RustType::CppPtr(m, _, ty) => {
+                let constness = match m {
+                    Mutability::Not => "Const",
+                    Mutability::Mut => "Mut",
+                };
+                write!(f, "::zngur_lib::CppPtr<{ty}, ::zngur_lib::{constness}>")
+            }
         }
     }
 }
@@ -390,6 +408,19 @@ impl Display for RustType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_cpp_ptr_display() {
+        let ty = RustType::CppPtr(
+            Mutability::Not,
+            CppIndirection::Reference,
+            Box::new(RustType::Cpp(vec!["a".to_owned(), "Name".to_owned()])),
+        );
+        assert_eq!(
+            ty.to_string(),
+            "::zngur_lib::CppPtr<a::Name, ::zngur_lib::Const>"
+        );
+    }
 
     #[test]
     fn test_cpp_display() {

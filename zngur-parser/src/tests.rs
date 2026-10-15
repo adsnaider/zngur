@@ -1757,6 +1757,41 @@ type crate::Foo {
 }
 
 #[test]
+fn cpp_pointers_and_references_parse() {
+    use zngur_def::{CppIndirection, Mutability, PrimitiveRustType};
+
+    let parsed = parse_str(
+        r#"
+type c++::a::B {
+    #cpp_ref;
+}
+
+extern "C++" {
+    unsafe fn f(const c++::a::B&, c++::a::B&, const i32*, i32*) -> const c++::a::B*;
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let f = &parsed.spec.extern_cpp_funcs[0];
+    let b = || Box::new(RustType::Cpp(vec!["a".to_owned(), "B".to_owned()]));
+    let i32 = || Box::new(RustType::Primitive(PrimitiveRustType::Int(32)));
+    assert_eq!(
+        f.inputs,
+        vec![
+            RustType::CppPtr(Mutability::Not, CppIndirection::Reference, b()),
+            RustType::CppPtr(Mutability::Mut, CppIndirection::Reference, b()),
+            RustType::CppPtr(Mutability::Not, CppIndirection::Pointer, i32()),
+            RustType::CppPtr(Mutability::Mut, CppIndirection::Pointer, i32()),
+        ]
+    );
+    assert_eq!(
+        f.output,
+        RustType::CppPtr(Mutability::Not, CppIndirection::Pointer, b())
+    );
+}
+
+#[test]
 fn mod_cpp_shorthand_matches_explicit_cpp_path() {
     let direct = parse_str(
         r#"
@@ -1941,12 +1976,12 @@ type c ++ :: Name {
 }
     "#,
         expect![[r#"
-            Error: found '+' expected '::', '<', or '{'
+            Error: found '+' expected '::', '<', '*', '&', or '{'
                ╭─[ test.zng:2:8 ]
                │
              2 │ type c ++ :: Name {
                │        ┬  
-               │        ╰── found '+' expected '::', '<', or '{'
+               │        ╰── found '+' expected '::', '<', '*', '&', or '{'
             ───╯
         "#]],
     );

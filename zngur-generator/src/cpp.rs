@@ -539,6 +539,17 @@ pub struct CppTypeDefinition {
 }
 
 impl CppTypeDefinition {
+    /// The C++ type that this type's Rust wrapper holds or refers to directly, so that a
+    /// `zngur_lib::CppPtr` to the wrapper is a C++ pointer to it. Heap-allocated types don't have
+    /// one: their wrapper only holds a pointer to the C++ object.
+    pub fn cpp_object_type(&self) -> Option<&str> {
+        match (&self.cpp_stack_owned, &self.cpp_ref) {
+            (Some(stack_owned), _) => Some(&stack_owned.0),
+            (None, Some(cpp_ref)) => Some(&cpp_ref.0),
+            (None, None) => None,
+        }
+    }
+
     pub fn has_unsized(&self) -> bool {
         self.wellknown_traits
             .iter()

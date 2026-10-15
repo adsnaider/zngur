@@ -142,6 +142,21 @@ namespace {{ self.namespace }} {
   {% endif %}
 {% endfor %}
 
+{# The C++ types behind `CppConstPtr` / `CppMutPtr` of these wrappers. #}
+{% for td in self.type_defs %}
+  {% if let Some(cpp_type) = td.cpp_object_type() %}
+    template<>
+    struct CppTypeOf< {{ td.ty }} > {
+      using type = {{ cpp_type }};
+    };
+  {% else if td.ty.path.to_string() == format!("::{}::Bool", self.namespace) %}
+    template<>
+    struct CppTypeOf< {{ td.ty }} > {
+      using type = bool;
+    };
+  {% endif %}
+{% endfor %}
+
 }
 
 {% for (_, td) in self.trait_defs %}

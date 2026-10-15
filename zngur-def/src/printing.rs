@@ -202,6 +202,16 @@ impl WriteIDL for crate::RustType {
             Self::Adt(pg) => p.write_idl(pg),
             Self::TypeVar(var) => p.write_idl(var),
             Self::Cpp(segs) => write!(p, "c++::{}", segs.join("::")),
+            Self::CppPtr(m, kind, ty) => {
+                if *m == crate::Mutability::Not {
+                    write!(p, "const ")?;
+                }
+                p.write_idl(ty)?;
+                match kind {
+                    crate::CppIndirection::Pointer => write!(p, "*"),
+                    crate::CppIndirection::Reference => write!(p, "&"),
+                }
+            }
         }
     }
 }

@@ -79,6 +79,32 @@ namespace {{ self.cpp_namespace }} {
     static inline size_t size_of() noexcept ;
   };
 
+  // Plain C++ pointers (e.g. `zngur_lib::CppPtr` in Rust) cross the boundary as themselves.
+  template<typename T>
+  struct __zngur_internal<T*> {
+    static inline uint8_t* data_ptr(T* const& t) noexcept {
+      return const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(&t));
+    }
+    static inline void assume_init(T*&) noexcept {}
+    static inline void assume_deinit(T*&) noexcept {}
+    static inline void check_init(T* const&) noexcept {}
+    static inline size_t size_of() noexcept {
+      return sizeof(T*);
+    }
+  };
+
+  // The C++ type that a zngur type stands for: builtins stand for themselves, and the Rust
+  // wrapper of a `#cpp_stack_owned` or `#cpp_ref` type for the C++ type it wraps.
+  template<typename T>
+  struct CppTypeOf;
+
+  // A C++ pointer (`zngur_lib::CppPtr<T, Const>` / `CppPtr<T, Mut>` in Rust) to the C++ type that
+  // `T` stands for, e.g. `CppConstPtr<rust::ns::Bar>` is `const ::ns::Bar*`.
+  template<typename T>
+  using CppConstPtr = const typename CppTypeOf<T>::type*;
+  template<typename T>
+  using CppMutPtr = typename CppTypeOf<T>::type*;
+
   template<typename T>
   inline uint8_t* __zngur_internal_data_ptr(const T& t) noexcept {
     return __zngur_internal<T>::data_ptr(t);
@@ -732,7 +758,7 @@ namespace {{ self.cpp_namespace }} {
     static inline void assume_deinit({{ ty }}*&) noexcept {}
     static inline void check_init({{ ty }}*&) noexcept {}
     static inline size_t size_of() noexcept {
-      return sizeof({{ ty }});
+      return sizeof({{ ty }}*);
     }
   };
 
@@ -745,9 +771,16 @@ namespace {{ self.cpp_namespace }} {
     static inline void assume_deinit({{ ty }} const*&) noexcept {}
     static inline void check_init({{ ty }} const*&) noexcept {}
     static inline size_t size_of() noexcept {
-      return sizeof({{ ty }});
+      return sizeof({{ ty }} const*);
     }
   };
+
+  {% if !ty.contains("Ref") && !ty.contains("ZngurCppOpaqueOwnedObject") %}
+  template<>
+  struct CppTypeOf< {{ ty }} > {
+    using type = {{ ty }};
+  };
+  {% endif %}
 
 
   template<>

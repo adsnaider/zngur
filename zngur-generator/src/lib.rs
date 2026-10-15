@@ -216,6 +216,20 @@ impl ZngurGenerator {
             }}
         }}
     }}
+
+    impl {type_name} {{
+        /// A C++ pointer (`const T*`) to this object.
+        #[allow(dead_code, clippy::should_implement_trait)]
+        pub fn as_ref(&self) -> ::zngur_lib::CppPtr<Self, ::zngur_lib::Const> {{
+            ::zngur_lib::CppPtr::from(self)
+        }}
+
+        /// A C++ pointer (`T*`) to this object.
+        #[allow(dead_code, clippy::should_implement_trait)]
+        pub fn as_mut(&mut self) -> ::zngur_lib::CppPtr<Self, ::zngur_lib::Mut> {{
+            ::zngur_lib::CppPtr::from(self)
+        }}
+    }}
 "#
                 );
                 if is_cpp {

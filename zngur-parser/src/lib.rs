@@ -10,8 +10,8 @@ use chumsky::{input::MapExtra, prelude::*};
 use itertools::{Either, Itertools};
 
 use zngur_def::{
-    AdditionalIncludes, ConflictSource, ConvertPanicToException, CppHeapAllocated, CppRef,
-    CppStackOwned, Import, LayoutPolicy, Merge, MergeFailure, ModuleImport, Mutability,
+    AdditionalIncludes, ConflictSource, ConvertPanicToException, CppHeapAllocated, CppIndirection,
+    CppRef, CppStackOwned, Import, LayoutPolicy, Merge, MergeFailure, ModuleImport, Mutability,
     PrimitiveRustType, RustPathAndGenerics, RustTrait, RustType, TypeVar, ZngurConstructor,
     ZngurExternCppFn, ZngurExternCppImpl, ZngurField, ZngurFn, ZngurMethod, ZngurMethodDetails,
     ZngurMethodReceiver, ZngurSpec, ZngurTrait, ZngurType, ZngurVariant, ZngurWellknownTrait,
@@ -1240,12 +1240,17 @@ enum ParsedRustType<'a> {
     Impl(ParsedRustTrait<'a>, Vec<&'a str>),
     Tuple(Vec<ParsedRustType<'a>>),
     Adt(ParsedRustPathAndGenerics<'a>),
+    /// `const T*`, `T*`, `const T&` or `T&`.
+    CppPtr(Mutability, CppIndirection, Box<ParsedRustType<'a>>),
 }
 
 impl ParsedRustType<'_> {
     fn to_zngur(self, scope: &Scope<'_>) -> RustType {
         match self {
             ParsedRustType::Primitive(s) => RustType::Primitive(s),
+            ParsedRustType::CppPtr(m, kind, s) => {
+                RustType::CppPtr(m, kind, Box::new(s.to_zngur(scope)))
+            }
             ParsedRustType::Ref(m, s) => RustType::Ref(m, Box::new(s.to_zngur(scope))),
             ParsedRustType::Raw(m, s) => RustType::Raw(m, Box::new(s.to_zngur(scope))),
             ParsedRustType::Boxed(s) => RustType::Boxed(Box::new(s.to_zngur(scope))),
@@ -2764,7 +2769,7 @@ fn rust_type<'a>() -> Boxed<'a, 'a, ParserInput<'a>, ParsedRustType<'a>, ZngPars
             )
             .then(parser)
             .map(|(m, x)| ParsedRustType::Raw(m, Box::new(x)));
-        choice((
+        let non_cpp_ptr = choice((
             scalar.boxed(),
             boxed.boxed(),
             unit.boxed(),
@@ -2775,6 +2780,23 @@ fn rust_type<'a>() -> Boxed<'a, 'a, ParserInput<'a>, ParsedRustType<'a>, ZngPars
             raw_ptr.boxed(),
             dyn_trait.boxed(),
         ))
+        .boxed();
+        // C++ pointers and references: `const T*`, `T*`, `const T&` and `T&`.
+        let cpp_ptr = just(Token::KwConst)
+            .or_not()
+            .then(non_cpp_ptr.clone())
+            .then(choice((
+                just(Token::Star).to(CppIndirection::Pointer),
+                just(Token::And).to(CppIndirection::Reference),
+            )))
+            .map(|((constness, x), kind)| {
+                let m = match constness {
+                    Some(_) => Mutability::Not,
+                    None => Mutability::Mut,
+                };
+                ParsedRustType::CppPtr(m, kind, Box::new(x))
+            });
+        choice((cpp_ptr.boxed(), non_cpp_ptr))
     })
     .boxed()
 }

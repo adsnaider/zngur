@@ -128,6 +128,16 @@ impl IntoCpp for RustType {
                 named_generics: vec![],
             }
             .into_cpp(namespace, crate_name),
+            // `CppConstPtr<W>` / `CppMutPtr<W>` (from zngur.h) are aliases for `const T*` / `T*`,
+            // where `T` is the C++ type that `W` (the Rust wrapper, or a builtin) stands for.
+            RustType::CppPtr(m, _, t) => CppType {
+                path: CppPath::from(&*match m {
+                    Mutability::Not => format!("{namespace}::CppConstPtr"),
+                    Mutability::Mut => format!("{namespace}::CppMutPtr"),
+                }),
+                generic_args: vec![t.into_cpp(namespace, crate_name)],
+                tail: None,
+            },
             RustType::Tuple(v) => {
                 if v.is_empty() {
                     return CppType::from(&*format!("{namespace}::Unit"));

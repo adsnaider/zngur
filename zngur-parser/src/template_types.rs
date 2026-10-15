@@ -87,6 +87,9 @@ fn matches_template<'a, 'b>(
         (RustType::Tuple(tys1), RustType::Tuple(tys2)) => match_lists(tys1, tys2, mapping),
         (RustType::Adt(adt1), RustType::Adt(adt2)) => match_generics(adt1, adt2, mapping),
         (RustType::Cpp(a), RustType::Cpp(b)) => a == b,
+        (RustType::CppPtr(m1, k1, t1), RustType::CppPtr(m2, k2, t2)) => {
+            m1 == m2 && k1 == k2 && matches_template(t1, t2, mapping)
+        }
         (_, _) => false,
     }
 }
@@ -174,6 +177,9 @@ fn substitute_vars<'a>(
                 RustType::Adt(substitute_generics(path_and_generics, mapping)?)
             }
             c @ RustType::Cpp(_) => c.clone(),
+            RustType::CppPtr(m, kind, t) => {
+                RustType::CppPtr(*m, *kind, Box::new(substitute_type(t, mapping)?))
+            }
         };
         Ok(ty)
     }

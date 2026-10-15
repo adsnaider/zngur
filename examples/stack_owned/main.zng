@@ -22,4 +22,9 @@ extern "C++" {
         safe fn new(i64, i32) -> crate::MyConservativeWrapper;
         safe fn print(&self);
     }
+
+    // C++ pointers and references are `zngur_lib::CppPtr`s in Rust, and plain pointers in C++.
+    unsafe fn sum_into(const c++::MyCppWrapper&, i32*);
+    unsafe fn swap_xy(c++::MyCppWrapper*);
+    unsafe fn larger_x(const c++::MyCppWrapper&, const c++::MyCppWrapper&) -> const c++::MyCppWrapper*;
 }

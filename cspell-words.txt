@@ -10,6 +10,7 @@ chumsky
 cloneable
 Conds
 constexpr
+constness
 coro
 cout
 cplusplus
@@ -36,6 +37,7 @@ funcs
 fvec
 GNUC
 hkalbasi
+hypot
 ilog
 impls
 indexmap
