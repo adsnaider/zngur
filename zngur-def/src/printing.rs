@@ -361,6 +361,33 @@ impl WriteIDL for crate::ZngurSpec {
                 }
             }
         }
+        if !self.cpp_funcs.is_empty() {
+            separate(p)?;
+            if p.enabled(&IDLItem::Function) {
+                // Consecutive C++ functions in the same namespace share a `mod c++::` block.
+                let mut open_namespace: Option<&[String]> = None;
+                for func in &self.cpp_funcs {
+                    if open_namespace != Some(&func.namespace) {
+                        if open_namespace.is_some() {
+                            p.dedent();
+                            p.write_indent()?;
+                            writeln!(p, "}}")?;
+                        }
+                        p.write_indent()?;
+                        writeln!(p, "mod c++::{} {{", func.namespace.join("::"))?;
+                        p.indent();
+                        open_namespace = Some(&func.namespace);
+                    }
+                    p.write_indent()?;
+                    p.write_idl(func)?;
+                }
+                if open_namespace.is_some() {
+                    p.dedent();
+                    p.write_indent()?;
+                    writeln!(p, "}}")?;
+                }
+            }
+        }
         if !self.traits.is_empty() {
             separate(p)?;
             for (i, trt) in self.traits.values().enumerate() {
@@ -465,6 +492,28 @@ impl WriteIDL for crate::ZngurFn {
             write_mod_open(p, parent)?;
             write_fn_decl(p, name, self)?;
             write_mod_close(p, parent)?;
+        }
+        Ok(())
+    }
+}
+
+impl WriteIDL for crate::ZngurCppFn {
+    /// Only the declaration inside its `mod c++::<namespace>` block.
+    fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
+        if p.enabled(&IDLItem::Function) {
+            let safety = if self.is_safe { "safe" } else { "unsafe" };
+            let name = &self.cpp_name;
+            write!(p, "{safety} fn {name}(")?;
+            p.write_idl(&self.inputs)?;
+            write!(p, ")")?;
+            if self.output != crate::RustType::UNIT {
+                write!(p, " -> ")?;
+                p.write_idl(&self.output)?;
+            }
+            if let Some(rust_name) = &self.rust_name {
+                write!(p, " as {rust_name}")?;
+            }
+            writeln!(p, ";")?;
         }
         Ok(())
     }

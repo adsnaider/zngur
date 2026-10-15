@@ -29,6 +29,15 @@ type crate::MyConservativeWrapper {
     safe constructor(i64, i32);
 }
 
+// Free C++ functions, in their C++ namespace. Rust calls them directly, as
+// `generated::geometry::dot(...)`; `as` names C++ overloads.
+mod c++::geometry {
+    unsafe fn dot(const c++::MyCppWrapper&, const c++::MyCppWrapper&) -> i32;
+    safe fn origin() -> c++::MyCppWrapper;
+    safe fn twice(i64) -> i64;
+    safe fn twice(f64) -> f64 as twice_f64;
+}
+
 extern "C++" {
     impl c++::MyCppWrapper {
         safe fn new(i32, i32) -> c++::MyCppWrapper;

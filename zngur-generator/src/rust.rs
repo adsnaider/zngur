@@ -1159,6 +1159,42 @@ pub {}fn {rust_name}("#,
         mangled_name
     }
 
+    /// Adds the Rust function `name` for a free C++ function, which calls the C++ bridge function
+    /// whose (mangled) name is returned.
+    pub fn add_cpp_function(
+        &mut self,
+        name: &str,
+        inputs: &[RustType],
+        output: &RustType,
+        is_safe: bool,
+    ) -> String {
+        let mangled_name = self.mangle_name(&format!("{name}_cpp_fn"));
+        w!(
+            self,
+            r#"
+unsafe extern "C" {{ fn {mangled_name}("#
+        );
+        for n in 0..inputs.len() {
+            w!(self, "i{n}: *mut u8, ");
+        }
+        wln!(self, r#"o: *mut u8); }}"#);
+        w!(
+            self,
+            r#"
+#[doc(hidden)]
+#[allow(non_snake_case, clippy::too_many_arguments)]
+pub {}fn {name}("#,
+            if is_safe { "" } else { "unsafe " }
+        );
+        for (n, ty) in inputs.iter().enumerate() {
+            w!(self, "i{n}: {ty}, ");
+        }
+        wln!(self, ") -> {output} {{ unsafe {{");
+        self.call_cpp_function(&format!("{mangled_name}("), inputs.len());
+        wln!(self, "}} }}");
+        mangled_name
+    }
+
     /// Adds the `zngur_lib::ZngCppConstruct` impl for the C++ constructor `constructor` of
     /// `owner` (its `index`th one), which calls the C++ bridge function whose (mangled) name is
     /// returned.

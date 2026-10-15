@@ -41,6 +41,16 @@ fn main() {
     constructed.print();
     MyConservativeWrapper::build((30, 40)).print();
 
+    // Free C++ functions.
+    let dot = unsafe { generated::geometry::dot(built.as_ref(), constructed.as_ref()) };
+    println!("dot = {dot}");
+    generated::geometry::origin().print();
+    println!(
+        "twice = {} {}",
+        generated::geometry::twice(21),
+        generated::geometry::twice_f64(1.25)
+    );
+
     assert_eq!(std::mem::size_of::<MyConservativeWrapper>(), 32);
     assert_eq!(std::mem::align_of::<MyConservativeWrapper>(), 16);
 

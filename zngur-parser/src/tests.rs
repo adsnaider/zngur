@@ -2039,12 +2039,12 @@ mod c++::a {
 }
     "#,
         expect![[r#"
-            Error: a free function cannot be declared inside a c++:: scope
+            Error: a free function cannot be declared inside a c++:: scope (declare C++ functions as `safe fn` or `unsafe fn`)
                ╭─[ test.zng:3:5 ]
                │
              3 │     fn foo(i32) -> bool;
                │     ─────────┬─────────  
-               │              ╰─────────── a free function cannot be declared inside a c++:: scope
+               │              ╰─────────── a free function cannot be declared inside a c++:: scope (declare C++ functions as `safe fn` or `unsafe fn`)
             ───╯
         "#]],
     );
@@ -2539,6 +2539,95 @@ type c++::B {
              2 │ type c++::B {
                │      ───┬──  
                │         ╰──── C++ constructors can only be declared on `#cpp_stack_owned` types
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_functions_parse() {
+    use zngur_def::{CppIndirection, Mutability, PrimitiveRustType};
+
+    let parsed = parse_str(
+        r#"
+mod c++::a {
+    type B {
+        #layout(size = 8, align = 4);
+        #cpp_stack_owned;
+    }
+
+    mod b {
+        unsafe fn f(const c++::a::B&) -> i32;
+        safe fn g(i32) -> c++::a::B as make_b;
+        safe fn h();
+    }
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let funcs = &parsed.spec.cpp_funcs;
+    assert_eq!(funcs.len(), 3);
+    let b = RustType::Cpp(vec!["a".to_owned(), "B".to_owned()]);
+    let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+
+    assert_eq!(funcs[0].namespace, ["a", "b"]);
+    assert_eq!(funcs[0].cpp_path(), "::a::b::f");
+    assert_eq!(funcs[0].rust_name(), "f");
+    assert_eq!(
+        funcs[0].inputs,
+        vec![RustType::CppPtr(
+            Mutability::Not,
+            CppIndirection::Reference,
+            Box::new(b.clone())
+        )]
+    );
+    assert_eq!(funcs[0].output, i32);
+    assert!(!funcs[0].is_safe);
+
+    assert_eq!(funcs[1].cpp_name, "g");
+    assert_eq!(funcs[1].rust_name(), "make_b");
+    assert_eq!(funcs[1].output, b);
+    assert!(funcs[1].is_safe);
+
+    assert_eq!(funcs[2].output, RustType::UNIT);
+}
+
+#[test]
+fn cpp_function_outside_cpp_scope_is_rejected() {
+    check_fail(
+        r#"
+mod crate::a {
+    safe fn f(i32);
+}
+"#,
+        expect![[r#"
+            Error: C++ functions (`safe fn` / `unsafe fn`) can only be declared inside a `mod c++::...` scope, which is their C++ namespace
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     safe fn f(i32);
+               │     ───────┬──────  
+               │            ╰──────── C++ functions (`safe fn` / `unsafe fn`) can only be declared inside a `mod c++::...` scope, which is their C++ namespace
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn safe_cpp_function_with_cpp_ptr_is_rejected() {
+    check_fail(
+        r#"
+mod c++::a {
+    safe fn f(i32*);
+}
+"#,
+        expect![[r#"
+            Error: this C++ function must be `unsafe`, because it takes a C++ pointer or reference, which may be invalid
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     safe fn f(i32*);
+               │     ───────┬───────  
+               │            ╰───────── this C++ function must be `unsafe`, because it takes a C++ pointer or reference, which may be invalid
             ───╯
         "#]],
     );

@@ -13,9 +13,9 @@ use zngur_def::{
     AdditionalIncludes, ConflictSource, ConvertPanicToException, CppHeapAllocated, CppIndirection,
     CppRef, CppStackOwned, Import, LayoutPolicy, Merge, MergeFailure, ModuleImport, Mutability,
     PrimitiveRustType, RustPathAndGenerics, RustTrait, RustType, TypeVar, ZngurConstructor,
-    ZngurCppConstructor, ZngurCppMethod, ZngurExternCppFn, ZngurExternCppImpl, ZngurField, ZngurFn,
-    ZngurMethod, ZngurMethodDetails, ZngurMethodReceiver, ZngurSpec, ZngurTrait, ZngurType,
-    ZngurVariant, ZngurWellknownTrait,
+    ZngurCppConstructor, ZngurCppFn, ZngurCppMethod, ZngurExternCppFn, ZngurExternCppImpl,
+    ZngurField, ZngurFn, ZngurMethod, ZngurMethodDetails, ZngurMethodReceiver, ZngurSpec,
+    ZngurTrait, ZngurType, ZngurVariant, ZngurWellknownTrait,
 };
 
 pub type Span = SimpleSpan<usize>;
@@ -326,6 +326,7 @@ enum ParsedItem<'a> {
         methods: Vec<ParsedMethod<'a>>,
     },
     Fn(Spanned<ParsedMethod<'a>>),
+    CppFn(Spanned<ParsedCppFn<'a>>),
     ExternCpp(Vec<ParsedExternCppItem<'a>>),
     Alias(ParsedAlias<'a>),
     Import(ParsedImportPath),
@@ -356,12 +357,24 @@ enum ProcessedItem<'a> {
         methods: Vec<ParsedMethod<'a>>,
     },
     Fn(Spanned<ParsedMethod<'a>>),
+    CppFn(Spanned<ParsedCppFn<'a>>),
     ExternCpp(Vec<ParsedExternCppItem<'a>>),
     Import(ParsedImportPath),
     ModuleImport {
         path: std::path::PathBuf,
         span: Span,
     },
+}
+
+/// A free C++ function, declared in a `c++::` scope:
+/// `(safe | unsafe) fn name(types...) [-> type] [as rust_name];`
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedCppFn<'a> {
+    is_safe: bool,
+    name: &'a str,
+    inputs: Vec<ParsedRustType<'a>>,
+    output: ParsedRustType<'a>,
+    rust_name: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1258,7 +1271,8 @@ impl ProcessedItem<'_> {
                     EntityPath::Rust(v) => v,
                     EntityPath::Cpp(_) => {
                         ctx.add_error_str(
-                            "a free function cannot be declared inside a c++:: scope",
+                            "a free function cannot be declared inside a c++:: scope (declare C++ \
+                             functions as `safe fn` or `unsafe fn`)",
                             f.span,
                         );
                         return;
@@ -1275,6 +1289,50 @@ impl ProcessedItem<'_> {
                 };
                 ctx.record_span(&func, f.span.into_range());
                 checked_merge(func, &mut r.spec, f.span, ctx, None);
+            }
+            ProcessedItem::CppFn(f) => {
+                let span = f.span;
+                let f = f.inner;
+                let namespace = match scope.base.child(f.name) {
+                    EntityPath::Cpp(mut segments) => {
+                        segments.pop();
+                        segments
+                    }
+                    EntityPath::Rust(_) => {
+                        ctx.add_error_str(
+                            "C++ functions (`safe fn` / `unsafe fn`) can only be declared inside a \
+                             `mod c++::...` scope, which is their C++ namespace",
+                            span,
+                        );
+                        return;
+                    }
+                };
+                if namespace.is_empty() {
+                    ctx.add_error_str(
+                        "C++ functions in the global namespace aren't supported",
+                        span,
+                    );
+                    return;
+                }
+                let inputs: Vec<RustType> =
+                    f.inputs.into_iter().map(|x| x.to_zngur(scope)).collect();
+                if f.is_safe && inputs.iter().any(contains_cpp_ptr) {
+                    ctx.add_error_str(
+                        "this C++ function must be `unsafe`, because it takes a C++ pointer or \
+                         reference, which may be invalid",
+                        span,
+                    );
+                    return;
+                }
+                let func = ZngurCppFn {
+                    namespace,
+                    cpp_name: f.name.to_owned(),
+                    rust_name: f.rust_name.map(|n| n.to_owned()),
+                    inputs,
+                    output: f.output.to_zngur(scope),
+                    is_safe: f.is_safe,
+                };
+                checked_merge(func, &mut r.spec, span, ctx, None);
             }
             ProcessedItem::ExternCpp(items) => {
                 for item in items {
@@ -2380,6 +2438,7 @@ fn process_parsed_item<'a>(
         }),
         ParsedItem::Trait { tr, methods } => Ret::Processed(ProcessedItem::Trait { tr, methods }),
         ParsedItem::Fn(method) => Ret::Processed(ProcessedItem::Fn(method)),
+        ParsedItem::CppFn(f) => Ret::Processed(ProcessedItem::CppFn(f)),
         ParsedItem::ExternCpp(items) => Ret::Processed(ProcessedItem::ExternCpp(items)),
         ParsedItem::Import(path) => Ret::Processed(ProcessedItem::Import(path)),
         ParsedItem::ModuleImport { path, span } => {
@@ -3457,6 +3516,42 @@ fn fn_item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngParserEx
         .boxed()
 }
 
+fn cpp_fn_item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngParserExtra<'a>> + Clone
+{
+    let cpp_fn = choice((
+        just(Token::KwSafe).to(true),
+        just(Token::KwUnsafe).to(false),
+    ))
+    .then_ignore(just(Token::KwFn))
+    .then(select! { Token::Ident(c) => c })
+    .then(
+        rust_type()
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::ParenOpen), just(Token::ParenClose)),
+    )
+    .then(just(Token::Arrow).ignore_then(rust_type()).or_not())
+    .then(
+        just(Token::KwAs)
+            .ignore_then(select! { Token::Ident(c) => c })
+            .or_not(),
+    )
+    .map(
+        |((((is_safe, name), inputs), output), rust_name)| ParsedCppFn {
+            is_safe,
+            name,
+            inputs,
+            output: output.unwrap_or(ParsedRustType::Tuple(vec![])),
+            rust_name,
+        },
+    );
+    spanned(cpp_fn)
+        .then_ignore(just(Token::Semicolon))
+        .map(ParsedItem::CppFn)
+        .boxed()
+}
+
 fn additional_include_item<'a>()
 -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngParserExtra<'a>> + Clone {
     just(Token::Sharp)
@@ -3571,6 +3666,7 @@ fn item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngParserExtra
             type_item(),
             trait_item(),
             extern_cpp_item(),
+            cpp_fn_item(),
             fn_item(),
             additional_include_item(),
             import_item(),

@@ -451,6 +451,42 @@ type c++::a::B {
     );
 }
 
+#[test]
+fn reparse_cpp_functions() {
+    let _ = check_round_trip(
+        r#"
+#crate my_crate
+mod c++::a {
+    type B {
+        #layout(size = 8, align = 4);
+        #cpp_stack_owned;
+    }
+    unsafe fn f(const B&) -> i32;
+    safe fn g(i32) -> B as make_b;
+    mod b {
+        safe fn h();
+    }
+}
+        "#,
+        expect![[r##"
+            #crate my_crate
+
+            type c++::a::B {
+                #layout(size = 8, align = 4);
+                #cpp_stack_owned "::a::B";
+            }
+
+            mod c++::a {
+                unsafe fn f(const c++::a::B&) -> i32;
+                safe fn g(i32) -> c++::a::B as make_b;
+            }
+            mod c++::a::b {
+                safe fn h();
+            }
+        "##]],
+    );
+}
+
 /// Recursively collects every `.zng` file under `dir`.
 fn collect_zng_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     let mut entries: Vec<_> = std::fs::read_dir(dir)

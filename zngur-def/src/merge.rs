@@ -382,6 +382,14 @@ impl Merge<ZngurSpec> for ZngurFn {
     }
 }
 
+impl Merge<ZngurSpec> for crate::ZngurCppFn {
+    /// Merges a C++ function into a specification's C++ function list.
+    fn merge(self, into: &mut ZngurSpec) -> MergeResult {
+        push_unique(self, &mut into.cpp_funcs);
+        Ok(())
+    }
+}
+
 impl Merge<ZngurSpec> for ZngurExternCppFn {
     /// Merges an extern C++ function into a specification's C++ function list.
     fn merge(self, into: &mut ZngurSpec) -> MergeResult {

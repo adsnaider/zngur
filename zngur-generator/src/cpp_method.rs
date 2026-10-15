@@ -1,12 +1,12 @@
-//! The C++ side of C++ member functions and constructors that Rust calls (`ZngurCppMethod`,
-//! `ZngurCppConstructor`): `extern "C"` functions that convert the arguments and call the member
-//! function or constructor directly, so that nobody has to write a forwarding body by hand.
+//! The C++ side of C++ functions, member functions and constructors that Rust calls
+//! (`ZngurCppFn`, `ZngurCppMethod`, `ZngurCppConstructor`): `extern "C"` functions that convert
+//! the arguments and call them directly, so that nobody has to write a forwarding body by hand.
 
 use std::collections::HashMap;
 
 use zngur_def::{
-    CppIndirection, Mutability, PrimitiveRustType, RustType, ZngurCppConstructor, ZngurCppMethod,
-    ZngurMethodReceiver,
+    CppIndirection, Mutability, PrimitiveRustType, RustType, ZngurCppConstructor, ZngurCppFn,
+    ZngurCppMethod, ZngurMethodReceiver,
 };
 
 use crate::rust::IntoCpp;
@@ -66,7 +66,6 @@ impl BridgeRenderer<'_> {
         owner_cpp_type: &str,
         method: &ZngurCppMethod,
     ) -> String {
-        let namespace = self.namespace;
         let mut params = vec![];
         let this = match method.receiver {
             ZngurMethodReceiver::Ref(m) => {
@@ -84,17 +83,47 @@ impl BridgeRenderer<'_> {
             Some(this) => format!("({this})->{name}({args})"),
             None => format!("{owner_cpp_type}::{name}({args})"),
         };
+        self.call(
+            mangled_name,
+            &params,
+            &call,
+            &method.output,
+            &format!("{owner_cpp_type}::{name}"),
+        )
+    }
+
+    /// The bridge function `mangled_name` for the free C++ function `func`.
+    pub fn function(&self, mangled_name: &str, func: &ZngurCppFn) -> String {
+        let mut params = vec![];
+        let args = self.args(&func.inputs, &mut params);
+        params.push("uint8_t* o".to_owned());
+        let cpp_path = func.cpp_path();
+        let call = format!("{cpp_path}({args})");
+        self.call(mangled_name, &params, &call, &func.output, &cpp_path)
+    }
+
+    /// A bridge function that makes the C++ call `call`, of the function `callee`, and passes its
+    /// result, which must be an `output`, to Rust.
+    fn call(
+        &self,
+        mangled_name: &str,
+        params: &[String],
+        call: &str,
+        output: &RustType,
+        callee: &str,
+    ) -> String {
+        let namespace = self.namespace;
         let move_to_rust = |init: String| {
             format!(
                 "{} __zngur_o = {init};\n  ::{namespace}::__zngur_internal_move_to_rust(o, __zngur_o);",
-                self.cpp(&method.output)
+                self.cpp(output)
             )
         };
-        // The C++ type that the member function must return, so that nothing is converted
-        // implicitly (`None` if zngur can't name it, e.g. for Rust types).
-        let expected_output = match &method.output {
+        // The C++ type that the function must return, so that nothing is converted implicitly
+        // (`None` if zngur can't name it, e.g. for Rust types).
+        let expected_output = match output {
             output if *output == RustType::UNIT => Some("void".to_owned()),
-            RustType::CppPtr(_, CppIndirection::Pointer, _) => Some(self.cpp(&method.output)),
+            RustType::CppPtr(_, CppIndirection::Pointer, _) => Some(self.cpp(output)),
             RustType::CppPtr(m, CppIndirection::Reference, inner) => {
                 let constness = if *m == Mutability::Not { "const " } else { "" };
                 Some(format!(
@@ -110,7 +139,7 @@ impl BridgeRenderer<'_> {
             {
                 Some(format!(
                     "::{namespace}::CppTypeOf< {} >::type",
-                    self.cpp(&method.output)
+                    self.cpp(output)
                 ))
             }
             _ => None,
@@ -119,21 +148,20 @@ impl BridgeRenderer<'_> {
             Some(expected) => {
                 format!(
                     "static_assert(::{namespace}::__zngur_same_repr< decltype({call}), {expected} \
-                     >::value, \"`{owner_cpp_type}::{name}` doesn't return the type declared in \
-                     the .zng file\");\n  "
+                     >::value, \"`{callee}` doesn't return the type declared in the .zng file\");\n  "
                 )
             }
             None => String::new(),
         };
-        let body = match &method.output {
+        let body = match output {
             output if *output == RustType::UNIT => format!("(void)o;\n  {call};"),
-            RustType::CppPtr(_, CppIndirection::Pointer, _) => move_to_rust(call),
+            RustType::CppPtr(_, CppIndirection::Pointer, _) => move_to_rust(call.to_owned()),
             RustType::CppPtr(_, CppIndirection::Reference, _) => move_to_rust(format!("&({call})")),
             // Constructed in place, in the Rust value.
             output if self.stack_owned.contains_key(output) => {
                 format!("new (o) {}({call});", self.stack_owned[output])
             }
-            _ => move_to_rust(call),
+            _ => move_to_rust(call.to_owned()),
         };
         format!(
             "void {mangled_name}({}) {{\n  {check}{body}\n}}\n",

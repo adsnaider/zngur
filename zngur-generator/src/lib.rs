@@ -558,6 +558,24 @@ pub mod cpp {{
                 );
             }
         }
+        // Free C++ functions: a Rust function that calls a C++ function that calls the C++
+        // function. The Rust function is defined at the top level, where the generated code's
+        // paths resolve, and re-exported in the `c++::` tree, at the C++ namespace's path.
+        for func in &zng.cpp_funcs {
+            let rust_name = func.rust_name();
+            // `__` separators, so that `a::b_c` and `a_b::c` don't collide.
+            let hidden_name = format!("__zngur_cpp_fn__{}__{rust_name}", func.namespace.join("__"));
+            let mangled_name =
+                rust_file.add_cpp_function(&hidden_name, &func.inputs, &func.output, func.is_safe);
+            let supers = "super::".repeat(func.namespace.len());
+            cpp_tree.insert(
+                &func.namespace,
+                &format!("\npub use {supers}{hidden_name} as {rust_name};\n"),
+            );
+            cpp_file
+                .cpp_method_bridges
+                .push(bridges.function(&mangled_name, func));
+        }
         rust_file.text.push_str(&cpp_tree.render());
         for func in zng.funcs {
             let sig = rust_file.add_function(
@@ -1039,6 +1057,37 @@ pub type Handle = super::Handle;
             "{cpp_code}"
         );
         assert!(cpp_code.contains(".cpp())"), "{cpp_code}");
+    }
+
+    #[test]
+    fn cpp_functions_get_rust_functions_in_the_cpp_tree_and_cpp_bridges() {
+        let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+        let spec = ZngurSpec {
+            cpp_funcs: vec![ZngurCppFn {
+                namespace: vec!["a".to_owned(), "b".to_owned()],
+                cpp_name: "f".to_owned(),
+                rust_name: Some("g".to_owned()),
+                inputs: vec![i32.clone()],
+                output: i32,
+                is_safe: true,
+            }],
+            ..Default::default()
+        };
+        let (rust_code, _h, cpp_code) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let cpp_code = cpp_code.expect("C++ functions need a C++ file");
+
+        assert!(rust_code.contains("pub fn __zngur_cpp_fn__a__b__g(i0: i32, ) -> i32"));
+        assert!(rust_code.contains("pub mod a {"));
+        assert!(rust_code.contains("pub mod b {"));
+        assert!(rust_code.contains("pub use super::super::__zngur_cpp_fn__a__b__g as g;"));
+        assert!(
+            cpp_code.contains(
+                "::int32_t __zngur_o = ::a::b::f(::rust::__zngur_internal_move_from_rust< \
+                 ::int32_t >(i0));"
+            ),
+            "{cpp_code}"
+        );
     }
 
     #[test]
