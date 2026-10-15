@@ -414,6 +414,36 @@ extern "C++" {
     );
 }
 
+#[test]
+fn reparse_cpp_methods() {
+    let _ = check_round_trip(
+        r#"
+#crate my_crate
+type c++::a::B {
+    #layout(size = 8, align = 4);
+    #cpp_stack_owned;
+    unsafe fn value() const -> i32;
+    unsafe fn set(i32, const c++::a::B&);
+    safe static fn make(i32) -> c++::a::B;
+    unsafe fn get(i32) const -> const i32& as get_const;
+}
+        "#,
+        expect![[r##"
+            #crate my_crate
+
+            type c++::a::B {
+                #layout(size = 8, align = 4);
+                #cpp_stack_owned "::a::B";
+
+                unsafe fn value() const -> i32;
+                unsafe fn set(i32, const c++::a::B&);
+                safe static fn make(i32) -> c++::a::B;
+                unsafe fn get(i32) const -> const i32& as get_const;
+            }
+        "##]],
+    );
+}
+
 /// Recursively collects every `.zng` file under `dir`.
 fn collect_zng_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     let mut entries: Vec<_> = std::fs::read_dir(dir)

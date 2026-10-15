@@ -5,11 +5,22 @@
 type c++::MyCppWrapper {
     #cpp_stack_owned "::CppType";
     #layout(size = 8, align = 4);
+
+    // C++ member functions, which Rust calls directly. They take `this` as a
+    // `zngur_lib::CppPtr`, so they must be `unsafe` (static ones may be `safe`).
+    unsafe fn sum() const -> i32;
+    unsafe fn scale(i32);
+    unsafe fn add(const c++::MyCppWrapper&);
+    unsafe fn x_ref() const -> const i32&;
+    unsafe fn swapped() const -> c++::MyCppWrapper;
+    safe static fn diagonal(i32) -> c++::MyCppWrapper;
 }
 
 type crate::MyConservativeWrapper {
     #cpp_stack_owned "::CppConservativeType";
     #layout_conservative(size = 32, align = 16);
+
+    unsafe fn total_with(crate::MyConservativeWrapper) const -> i64;
 }
 
 extern "C++" {

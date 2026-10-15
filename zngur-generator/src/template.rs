@@ -552,4 +552,5 @@ pub(crate) struct CppSourceTemplate<'a> {
     pub(crate) exported_impls: &'a Vec<CppExportedImplDefinition>,
     pub(crate) cpp_namespace: &'a str,
     pub(crate) coro_support: &'a Option<crate::rust::CoroSupport>,
+    pub(crate) cpp_method_bridges: &'a Vec<String>,
 }

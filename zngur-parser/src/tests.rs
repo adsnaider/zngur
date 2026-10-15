@@ -207,12 +207,12 @@ type () {
 }
     "#,
         expect![[r#"
-            Error: found 'welcome_traits' expected '#', 'variant', 'wellknown_traits', 'non_exhaustive', 'constructor', 'field', 'async', 'fn', or '}'
+            Error: found 'welcome_traits' expected '#', 'variant', 'wellknown_traits', 'non_exhaustive', 'constructor', 'field', 'safe', 'unsafe', 'async', 'fn', or '}'
                ╭─[ test.zng:4:5 ]
                │
              4 │     welcome_traits(Copy);
                │     ───────┬──────  
-               │            ╰──────── found 'welcome_traits' expected '#', 'variant', 'wellknown_traits', 'non_exhaustive', 'constructor', 'field', 'async', 'fn', or '}'
+               │            ╰──────── found 'welcome_traits' expected '#', 'variant', 'wellknown_traits', 'non_exhaustive', 'constructor', 'field', 'safe', 'unsafe', 'async', 'fn', or '}'
             ───╯
         "#]],
     );
@@ -2213,4 +2213,230 @@ fn scope_reference_to_cpp_target_from_cpp_base_uses_super_as_needed() {
         scope.reference_to(&EntityPath::cpp(["a", "b", "Name"])),
         Some("Name".to_owned()),
     );
+}
+
+#[test]
+fn cpp_methods_parse() {
+    use zngur_def::{CppIndirection, Mutability, PrimitiveRustType, ZngurMethodReceiver};
+
+    let parsed = parse_str(
+        r#"
+mod c++::a {
+    type B {
+        #layout(size = 8, align = 4);
+        #cpp_stack_owned;
+
+        unsafe fn value() const -> i32;
+        unsafe fn set(i32, const B&);
+        safe static fn make(i32) -> B;
+        unsafe fn get(i32) const -> const i32& as get_const;
+    }
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let ty = parsed.spec.types.first().expect("no type parsed");
+    let b = RustType::Cpp(vec!["a".to_owned(), "B".to_owned()]);
+    let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+    let methods = &ty.cpp_methods;
+    assert_eq!(methods.len(), 4);
+
+    assert_eq!(methods[0].cpp_name, "value");
+    assert_eq!(methods[0].rust_name(), "value");
+    assert_eq!(
+        methods[0].receiver,
+        ZngurMethodReceiver::Ref(Mutability::Not)
+    );
+    assert!(methods[0].inputs.is_empty());
+    assert_eq!(methods[0].output, i32);
+    assert!(!methods[0].is_safe);
+
+    assert_eq!(
+        methods[1].receiver,
+        ZngurMethodReceiver::Ref(Mutability::Mut)
+    );
+    assert_eq!(
+        methods[1].inputs,
+        vec![
+            i32.clone(),
+            RustType::CppPtr(
+                Mutability::Not,
+                CppIndirection::Reference,
+                Box::new(b.clone())
+            ),
+        ]
+    );
+    assert_eq!(methods[1].output, RustType::UNIT);
+
+    assert_eq!(methods[2].receiver, ZngurMethodReceiver::Static);
+    assert_eq!(methods[2].output, b);
+    assert!(methods[2].is_safe);
+
+    assert_eq!(methods[3].cpp_name, "get");
+    assert_eq!(methods[3].rust_name(), "get_const");
+    assert_eq!(
+        methods[3].output,
+        RustType::CppPtr(Mutability::Not, CppIndirection::Reference, Box::new(i32))
+    );
+}
+
+#[test]
+fn safe_cpp_method_with_this_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #cpp_stack_owned;
+    safe fn value() const -> i32;
+}
+"#,
+        expect![[r#"
+            Error: this C++ member function must be `unsafe`, because it takes a C++ pointer or reference (including `this`, for non-static member functions), which may be invalid
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     safe fn value() const -> i32;
+               │     ──────────────┬──────────────  
+               │                   ╰──────────────── this C++ member function must be `unsafe`, because it takes a C++ pointer or reference (including `this`, for non-static member functions), which may be invalid
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn safe_static_cpp_method_with_cpp_ptr_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #cpp_stack_owned;
+    safe static fn sum(const c++::B&) -> i32;
+}
+"#,
+        expect![[r#"
+            Error: this C++ member function must be `unsafe`, because it takes a C++ pointer or reference (including `this`, for non-static member functions), which may be invalid
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     safe static fn sum(const c++::B&) -> i32;
+               │     ────────────────────┬────────────────────  
+               │                         ╰────────────────────── this C++ member function must be `unsafe`, because it takes a C++ pointer or reference (including `this`, for non-static member functions), which may be invalid
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn static_const_cpp_method_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #cpp_stack_owned;
+    safe static fn make() const -> c++::B;
+}
+"#,
+        expect![[r#"
+            Error: a static member function can't be `const`
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     safe static fn make() const -> c++::B;
+               │     ───────────────────┬──────────────────  
+               │                        ╰──────────────────── a static member function can't be `const`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_method_on_rust_type_is_rejected() {
+    check_fail(
+        r#"
+type crate::Foo {
+    #layout(size = 8, align = 4);
+    unsafe fn value() const -> i32;
+}
+"#,
+        expect![[r#"
+            Error: C++ member functions (`safe fn` / `unsafe fn`) can only be declared on `#cpp_stack_owned` or `#cpp_ref` types
+               ╭─[ test.zng:2:6 ]
+               │
+             2 │ type crate::Foo {
+               │      ─────┬────  
+               │           ╰────── C++ member functions (`safe fn` / `unsafe fn`) can only be declared on `#cpp_stack_owned` or `#cpp_ref` types
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn conflicting_cpp_methods_across_files() {
+    let resolver = MockFilesystem::new(vec![(
+        "./a.zng",
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #cpp_stack_owned;
+    unsafe fn value() const -> i32;
+}
+"#,
+    )]);
+
+    check_import_fail(
+        r#"
+merge "./a.zng";
+type c++::B {
+    unsafe fn value() const -> i64;
+}
+"#,
+        expect![[r#"
+            Error: C++ method mismatch
+               ╭─[ ./a.zng:2:6 ]
+               │
+             2 │ type c++::B {
+               │      ───┬──  
+               │         ╰──── C++ method mismatch
+               │ 
+             5 │     unsafe fn value() const -> i32;
+               │     ───────────────┬───────────────  
+               │                    ╰───────────────── declaration here ...
+               │
+               ├─[ test.zng:4:5 ]
+               │
+             4 │     unsafe fn value() const -> i64;
+               │     ───────────────┬───────────────  
+               │                    ╰───────────────── conflicts with the declaration here.
+            ───╯
+        "#]],
+        &resolver,
+    );
+}
+
+#[test]
+fn cpp_methods_can_be_declared_in_another_file() {
+    // E.g. a hand-written file amending a generated one.
+    let resolver = MockFilesystem::new(vec![(
+        "./a.zng",
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #cpp_stack_owned;
+    unsafe fn value() const -> i32;
+}
+"#,
+    )]);
+    let parsed = parse_str_with_resolver(
+        r#"
+merge "./a.zng";
+type c++::B {
+    unsafe fn set(i32);
+}
+"#,
+        NullCfg,
+        &resolver,
+        |_| {},
+    );
+    let ty = parsed.spec.types.first().expect("no type parsed");
+    let mut names: Vec<_> = ty.cpp_methods.iter().map(|m| m.rust_name()).collect();
+    names.sort();
+    assert_eq!(names, ["set", "value"]);
 }

@@ -105,6 +105,25 @@ namespace {{ self.cpp_namespace }} {
   template<typename T>
   using CppMutPtr = typename CppTypeOf<T>::type*;
 
+  // Whether a C++ function returning `Actual` matches a `.zng` declaration returning `Declared`
+  // (both C++ types): the same type, or an arithmetic type of the same size and kind (e.g. `long
+  // long` for `int64_t`), so that nothing is converted implicitly.
+  template<typename Actual, typename Declared,
+           bool = std::is_arithmetic<Actual>::value && std::is_arithmetic<Declared>::value>
+  struct __zngur_same_arithmetic_repr : std::false_type {};
+  template<typename Actual, typename Declared>
+  struct __zngur_same_arithmetic_repr<Actual, Declared, true>
+      : std::integral_constant<
+            bool,
+            sizeof(Actual) == sizeof(Declared) &&
+                std::is_integral<Actual>::value == std::is_integral<Declared>::value &&
+                std::is_signed<Actual>::value == std::is_signed<Declared>::value &&
+                std::is_same<Actual, bool>::value == std::is_same<Declared, bool>::value> {};
+  template<typename Actual, typename Declared>
+  struct __zngur_same_repr
+      : std::integral_constant<bool, std::is_same<Actual, Declared>::value ||
+                                         __zngur_same_arithmetic_repr<Actual, Declared>::value> {};
+
   template<typename T>
   inline uint8_t* __zngur_internal_data_ptr(const T& t) noexcept {
     return __zngur_internal<T>::data_ptr(t);

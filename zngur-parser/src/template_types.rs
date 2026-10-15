@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use zngur_def::{
-    Merge, RustPathAndGenerics, RustTrait, RustType, TypeVar, ZngurConstructor, ZngurField,
-    ZngurMethod, ZngurMethodDetails, ZngurType, ZngurVariant,
+    Merge, RustPathAndGenerics, RustTrait, RustType, TypeVar, ZngurConstructor, ZngurCppMethod,
+    ZngurField, ZngurMethod, ZngurMethodDetails, ZngurType, ZngurVariant,
 };
 
 fn matches_template<'a, 'b>(
@@ -240,6 +240,7 @@ pub fn try_match_template(ty: &RustType, template: &ZngurType) -> Option<Templat
         wellknown_traits,
         exhaustive,
         methods,
+        cpp_methods,
         constructor,
         variants,
         fields,
@@ -248,11 +249,26 @@ pub fn try_match_template(ty: &RustType, template: &ZngurType) -> Option<Templat
         cpp_stack_owned,
     } = template;
     debug_assert_eq!(substitute_vars(template_ty, &mapping).unwrap(), *ty);
+    let substitute = |t: &RustType| match substitute_vars(t, &mapping) {
+        Ok(t) => t,
+        Err(SubstitutionError::UnboundVar(var)) => unreachable!(
+            "Unbound type variable {} in template {} for type {}",
+            var.0, template.ty, ty
+        ),
+    };
     let new_ty = ZngurType {
         ty: ty.clone(),
         layout: *layout,
         wellknown_traits: wellknown_traits.clone(),
         exhaustive: *exhaustive,
+        cpp_methods: cpp_methods
+            .iter()
+            .map(|m| ZngurCppMethod {
+                inputs: m.inputs.iter().map(substitute).collect(),
+                output: substitute(&m.output),
+                ..m.clone()
+            })
+            .collect(),
         methods: methods
             .iter()
             .map(|method| match substitute_method_vars(method, &mapping) {

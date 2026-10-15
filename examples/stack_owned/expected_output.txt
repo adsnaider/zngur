@@ -3,6 +3,17 @@ CppType 5 6
 sum = 11
 CppType 6 5
 Constructed CppType 1 2
+sum() = 11
+CppType 61 52
+x_ref() = 61
+Constructed CppType 52 61
+CppType 52 61
+Constructed CppType 7 7
+CppType 7 7
 Constructed CppConservativeType 10 20
 CppConservativeType 10 20
+Constructed CppConservativeType 1 2
+Destructed CppConservativeType 1 2
+Destructed CppConservativeType 1 2
+total_with() = 33
 Destructed CppConservativeType 10 20

@@ -1119,6 +1119,46 @@ pub {}fn {rust_name}("#,
         mangled_name
     }
 
+    /// Adds the Rust function for a C++ member function of `owner`, which calls the C++ bridge
+    /// function whose (mangled) name is returned. `this` is the type of the object argument
+    /// (a `CppPtr` to `owner`), or `None` for static member functions.
+    pub fn add_cpp_method(
+        &mut self,
+        owner: &RustType,
+        rust_name: &str,
+        this: Option<RustType>,
+        inputs: &[RustType],
+        output: &RustType,
+        is_safe: bool,
+    ) -> String {
+        let mangled_name = self.mangle_name(&format!("{owner}_cpp_method_{rust_name}"));
+        let inputs: Vec<RustType> = this.into_iter().chain(inputs.iter().cloned()).collect();
+        w!(
+            self,
+            r#"
+unsafe extern "C" {{ fn {mangled_name}("#
+        );
+        for n in 0..inputs.len() {
+            w!(self, "i{n}: *mut u8, ");
+        }
+        wln!(self, r#"o: *mut u8); }}"#);
+        w!(
+            self,
+            r#"
+impl {owner} {{
+#[allow(non_snake_case, clippy::too_many_arguments)]
+pub {}fn {rust_name}("#,
+            if is_safe { "" } else { "unsafe " }
+        );
+        for (n, ty) in inputs.iter().enumerate() {
+            w!(self, "i{n}: {ty}, ");
+        }
+        wln!(self, ") -> {output} {{ unsafe {{");
+        self.call_cpp_function(&format!("{mangled_name}("), inputs.len());
+        wln!(self, "}} }} }}");
+        mangled_name
+    }
+
     pub fn add_cpp_heap_allocated_bridge(&mut self, ty: &RustType) -> String {
         let wrapper_ref = match ty {
             RustType::Cpp(_) => ty.to_string(),

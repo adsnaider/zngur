@@ -15,6 +15,7 @@ use rust::CoroSupport;
 use rust::IntoCpp;
 
 pub mod cpp;
+mod cpp_method;
 mod rust;
 mod template;
 
@@ -124,8 +125,52 @@ impl ZngurGenerator {
         let mut cpp_mod_content = String::new();
         let mut cpp_tree = CppModuleTree::default();
         cpp_file.coro_support = coro_support;
+        let stack_owned_types: cpp_method::StackOwnedTypes = zng
+            .types
+            .iter()
+            .filter_map(|ty_def| {
+                let cpp_type = &ty_def.cpp_stack_owned.as_ref()?.0;
+                Some((ty_def.ty.clone(), cpp_type.clone()))
+            })
+            .collect();
+        let bridges = cpp_method::BridgeRenderer {
+            stack_owned: &stack_owned_types,
+            namespace: default_ns,
+            crate_name: &sanitized_crate_name,
+        };
         for ty_def in zng.types {
             let ty = &ty_def.ty;
+            // C++ member functions that Rust calls: a Rust function, and a C++ function that
+            // calls the member function (`#cpp_stack_owned` / `#cpp_ref` types only, checked by
+            // the parser).
+            let owner_cpp_type = (ty_def.cpp_stack_owned.as_ref().map(|c| &c.0))
+                .or(ty_def.cpp_ref.as_ref().map(|c| &c.0));
+            if let Some(owner_cpp_type) = owner_cpp_type {
+                for method in &ty_def.cpp_methods {
+                    let this = match method.receiver {
+                        ZngurMethodReceiver::Ref(m) => Some(RustType::CppPtr(
+                            m,
+                            CppIndirection::Pointer,
+                            Box::new(ty.clone()),
+                        )),
+                        ZngurMethodReceiver::Static | ZngurMethodReceiver::Move => None,
+                    };
+                    let mangled_name = rust_file.add_cpp_method(
+                        ty,
+                        method.rust_name(),
+                        this,
+                        &method.inputs,
+                        &method.output,
+                        method.is_safe,
+                    );
+                    cpp_file.cpp_method_bridges.push(bridges.method(
+                        &mangled_name,
+                        ty,
+                        owner_cpp_type,
+                        method,
+                    ));
+                }
+            }
             let is_copy = ty_def.wellknown_traits.contains(&ZngurWellknownTrait::Copy);
             let Some(layout) = ty_def.layout else {
                 unreachable!("Every type should have a defined layout policy before rendering")
@@ -626,6 +671,7 @@ mod tests {
             cpp_heap_allocated: Some(CppHeapAllocated(cpp_path.to_owned())),
             cpp_ref: None,
             cpp_stack_owned: None,
+            cpp_methods: vec![],
         }
     }
 
@@ -647,6 +693,7 @@ mod tests {
             cpp_heap_allocated: None,
             cpp_ref: None,
             cpp_stack_owned: Some(CppStackOwned(cpp_type.to_owned())),
+            cpp_methods: vec![],
         }
     }
 
@@ -663,6 +710,7 @@ mod tests {
             cpp_heap_allocated: None,
             cpp_ref: Some(CppRef(cpp_type.to_owned())),
             cpp_stack_owned: None,
+            cpp_methods: vec![],
         }
     }
 
@@ -915,5 +963,68 @@ pub type Handle = super::Handle;
         assert!(rust_code.contains("pub struct Foo"));
         assert!(rust_code.contains("pub struct Bar"));
         assert!(!rust_code.contains("pub mod cpp {"));
+    }
+
+    #[test]
+    fn cpp_methods_get_rust_functions_and_cpp_bridges() {
+        let b = cpp(&["a", "B"]);
+        let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+        let mut ty = minimal_stack_owned_type(b.clone(), "::a::B", 8, 4);
+        ty.cpp_methods = vec![
+            ZngurCppMethod {
+                cpp_name: "value".to_owned(),
+                rust_name: None,
+                receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+                inputs: vec![],
+                output: i32.clone(),
+                is_safe: false,
+            },
+            ZngurCppMethod {
+                cpp_name: "set".to_owned(),
+                rust_name: Some("set_from".to_owned()),
+                receiver: ZngurMethodReceiver::Ref(Mutability::Mut),
+                inputs: vec![RustType::CppPtr(
+                    Mutability::Not,
+                    CppIndirection::Reference,
+                    Box::new(b.clone()),
+                )],
+                output: RustType::UNIT,
+                is_safe: false,
+            },
+            ZngurCppMethod {
+                cpp_name: "make".to_owned(),
+                rust_name: None,
+                receiver: ZngurMethodReceiver::Static,
+                inputs: vec![i32.clone(), b.clone()],
+                output: b.clone(),
+                is_safe: true,
+            },
+        ];
+        let spec = ZngurSpec {
+            types: vec![ty],
+            ..Default::default()
+        };
+        let (rust_code, _h, cpp_code) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let cpp_code = cpp_code.expect("C++ member functions need a C++ file");
+
+        // Rust: an associated function per member function, taking `this` as a `CppPtr`.
+        assert!(rust_code.contains(
+            "pub unsafe fn value(i0: ::zngur_lib::CppPtr<a::B, ::zngur_lib::Const>, ) -> i32"
+        ));
+        assert!(rust_code.contains(
+            "pub unsafe fn set_from(i0: ::zngur_lib::CppPtr<a::B, ::zngur_lib::Mut>, \
+             i1: ::zngur_lib::CppPtr<a::B, ::zngur_lib::Const>, ) -> ()"
+        ));
+        assert!(rust_code.contains("pub fn make(i0: i32, i1: a::B, ) -> a::B"));
+
+        // C++: bridges calling the member functions directly.
+        assert!(cpp_code.contains("->value()"), "{cpp_code}");
+        assert!(cpp_code.contains("->set(*"), "{cpp_code}");
+        assert!(
+            cpp_code.contains("new (o) ::a::B(::a::B::make("),
+            "{cpp_code}"
+        );
+        assert!(cpp_code.contains(".cpp())"), "{cpp_code}");
     }
 }

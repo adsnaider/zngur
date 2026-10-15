@@ -540,6 +540,14 @@ impl WriteIDL for crate::ZngurType {
                 }
             }
 
+            if !self.cpp_methods.is_empty() {
+                writeln!(p)?;
+                for method in &self.cpp_methods {
+                    p.write_indent()?;
+                    p.write_idl(method)?;
+                }
+            }
+
             if !self.methods.is_empty() {
                 writeln!(p)?;
                 for method in &self.methods {
@@ -823,6 +831,40 @@ impl WriteIDL for crate::ZngurMethod {
     }
 }
 
+impl WriteIDL for crate::ZngurCppMethod {
+    fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
+        if p.enabled(&IDLItem::TypeMethod) {
+            let safety = if self.is_safe { "safe" } else { "unsafe" };
+            let is_static = matches!(self.receiver, crate::ZngurMethodReceiver::Static);
+            let static_kw = if is_static { "static " } else { "" };
+            let name = &self.cpp_name;
+            write!(p, "{safety} {static_kw}fn {name}(")?;
+            for (i, input) in self.inputs.iter().enumerate() {
+                if i > 0 {
+                    write!(p, ", ")?;
+                }
+                p.write_idl(input)?;
+            }
+            write!(p, ")")?;
+            if matches!(
+                self.receiver,
+                crate::ZngurMethodReceiver::Ref(crate::Mutability::Not)
+            ) {
+                write!(p, " const")?;
+            }
+            if self.output != crate::RustType::UNIT {
+                write!(p, " -> ")?;
+                p.write_idl(&self.output)?;
+            }
+            if let Some(rust_name) = &self.rust_name {
+                write!(p, " as {rust_name}")?;
+            }
+            writeln!(p, ";")?;
+        }
+        Ok(())
+    }
+}
+
 #[test]
 fn print_spec() {
     let spec = crate::ZngurSpec {
@@ -865,6 +907,7 @@ fn print_spec() {
             cpp_heap_allocated: None,
             cpp_ref: None,
             cpp_stack_owned: None,
+            cpp_methods: vec![],
         }],
         traits: indexmap::IndexMap::default(),
         funcs: vec![crate::ZngurFn {

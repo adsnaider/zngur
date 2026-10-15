@@ -690,6 +690,8 @@ pub struct CppFile {
     pub rust_cfg_defines: Vec<String>,
     pub zng_header_in_place: bool,
     pub coro_support: Option<crate::rust::CoroSupport>,
+    /// `extern "C"` functions that call C++ member functions for Rust (see `ZngurCppMethod`).
+    pub cpp_method_bridges: Vec<String>,
 }
 
 impl CppFile {
@@ -731,6 +733,7 @@ impl CppFile {
             exported_impls: &self.exported_impls,
             cpp_namespace: namespace,
             coro_support: &self.coro_support,
+            cpp_method_bridges: &self.cpp_method_bridges,
         };
         state.text += normalize_whitespace(template.render().unwrap().as_str()).as_str();
 
@@ -738,6 +741,7 @@ impl CppFile {
             || !self.exported_fn_defs.is_empty()
             || !self.exported_impls.is_empty()
             || self.coro_support.is_some()
+            || !self.cpp_method_bridges.is_empty()
             // Rust calls the destructors of `#cpp_stack_owned` types, which are defined here.
             || self
                 .type_defs

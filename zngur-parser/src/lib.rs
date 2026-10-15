@@ -13,8 +13,9 @@ use zngur_def::{
     AdditionalIncludes, ConflictSource, ConvertPanicToException, CppHeapAllocated, CppIndirection,
     CppRef, CppStackOwned, Import, LayoutPolicy, Merge, MergeFailure, ModuleImport, Mutability,
     PrimitiveRustType, RustPathAndGenerics, RustTrait, RustType, TypeVar, ZngurConstructor,
-    ZngurExternCppFn, ZngurExternCppImpl, ZngurField, ZngurFn, ZngurMethod, ZngurMethodDetails,
-    ZngurMethodReceiver, ZngurSpec, ZngurTrait, ZngurType, ZngurVariant, ZngurWellknownTrait,
+    ZngurCppMethod, ZngurExternCppFn, ZngurExternCppImpl, ZngurField, ZngurFn, ZngurMethod,
+    ZngurMethodDetails, ZngurMethodReceiver, ZngurSpec, ZngurTrait, ZngurType, ZngurVariant,
+    ZngurWellknownTrait,
 };
 
 pub type Span = SimpleSpan<usize>;
@@ -414,6 +415,17 @@ enum ParsedTypeItem<'a> {
         deref: Option<ParsedRustType<'a>>,
         cpp_name: Option<&'a str>,
     },
+    /// A C++ member function, declared C++-style:
+    /// `(safe | unsafe) [static] fn name(types...) [const] [-> type] [as rust_name];`
+    CppMethod {
+        is_safe: bool,
+        is_static: bool,
+        name: &'a str,
+        inputs: Vec<ParsedRustType<'a>>,
+        is_const: bool,
+        output: ParsedRustType<'a>,
+        rust_name: Option<&'a str>,
+    },
     CppValue {
         field: &'a str,
         cpp_type: &'a str,
@@ -465,6 +477,23 @@ impl ParsedMethod<'_> {
 struct MergeContext {
     outer_ty: RustType,
     variant: Option<String>,
+}
+
+/// Whether `ty` is or contains a C++ pointer or reference.
+fn contains_cpp_ptr(ty: &RustType) -> bool {
+    match ty {
+        RustType::CppPtr(..) => true,
+        RustType::Ref(_, t) | RustType::Raw(_, t) | RustType::Boxed(t) | RustType::Slice(t) => {
+            contains_cpp_ptr(t)
+        }
+        RustType::Tuple(tys) => tys.iter().any(contains_cpp_ptr),
+        RustType::Adt(pg) => pg
+            .generics
+            .iter()
+            .chain(pg.named_generics.iter().map(|(_, t)| t))
+            .any(contains_cpp_ptr),
+        _ => false,
+    }
 }
 
 /// The C++ type name of a `#cpp_heap_allocated`, `#cpp_ref` or `#cpp_stack_owned` directive on
@@ -743,6 +772,7 @@ impl ProcessedItem<'_> {
                 };
 
                 let mut methods = vec![];
+                let mut cpp_methods: Vec<ZngurCppMethod> = vec![];
                 let mut constructor = None;
                 let mut variants = vec![];
                 let mut fields = vec![];
@@ -914,6 +944,55 @@ impl ProcessedItem<'_> {
                             );
                             fields.push(field);
                         }
+                        ParsedTypeItem::CppMethod {
+                            is_safe,
+                            is_static,
+                            name,
+                            inputs,
+                            is_const,
+                            output,
+                            rust_name,
+                        } => {
+                            let receiver = match (is_static, is_const) {
+                                (true, true) => {
+                                    ctx.add_error_str(
+                                        "a static member function can't be `const`",
+                                        item_span,
+                                    );
+                                    continue;
+                                }
+                                (true, false) => ZngurMethodReceiver::Static,
+                                (false, true) => ZngurMethodReceiver::Ref(Mutability::Not),
+                                (false, false) => ZngurMethodReceiver::Ref(Mutability::Mut),
+                            };
+                            let inputs: Vec<RustType> =
+                                inputs.into_iter().map(|x| x.to_zngur(scope)).collect();
+                            if is_safe
+                                && (receiver != ZngurMethodReceiver::Static
+                                    || inputs.iter().any(contains_cpp_ptr))
+                            {
+                                ctx.add_error_str(
+                                    "this C++ member function must be `unsafe`, because it takes a \
+                                     C++ pointer or reference (including `this`, for non-static \
+                                     member functions), which may be invalid",
+                                    item_span,
+                                );
+                                continue;
+                            }
+                            let method = ZngurCppMethod {
+                                cpp_name: name.to_owned(),
+                                rust_name: rust_name.map(|n| n.to_owned()),
+                                receiver,
+                                inputs,
+                                output: output.to_zngur(scope),
+                                is_safe,
+                            };
+                            ctx.record_span(
+                                &method.as_rust_method().into_span_key_with(rust_ty.clone()),
+                                item_span.into_range(),
+                            );
+                            cpp_methods.push(method);
+                        }
                         ParsedTypeItem::Method {
                             data,
                             use_path,
@@ -1083,6 +1162,7 @@ impl ProcessedItem<'_> {
                     ty: rust_ty.clone(),
                     layout,
                     methods,
+                    cpp_methods,
                     wellknown_traits: wt,
                     exhaustive,
                     constructor,
@@ -2452,6 +2532,24 @@ impl ZngurSpecBuilder {
 
                 ctx.add_fatal_report(report.finish());
             }
+            // Checked after merging, since the C++ member functions may be declared in a
+            // different file than the type's `#cpp_stack_owned` / `#cpp_ref`.
+            if !ty.cpp_methods.is_empty() && ty.cpp_stack_owned.is_none() && ty.cpp_ref.is_none() {
+                let span = ctx
+                    .fetch_spans_global(&*ty)
+                    .first()
+                    .copied()
+                    .cloned()
+                    .unwrap_or((0, 0usize..0));
+                let message = "C++ member functions (`safe fn` / `unsafe fn`) can only be declared \
+                               on `#cpp_stack_owned` or `#cpp_ref` types";
+                ctx.add_fatal_report(
+                    Report::build(ReportKind::Error, span.clone())
+                        .with_message(message)
+                        .with_label(Label::new(span).with_message(message))
+                        .finish(),
+                );
+            }
         }
         spec
     }
@@ -3120,6 +3218,42 @@ fn inner_type_item<'a>()
         .map(|(name, items)| ParsedTypeItem::Variant { name, items });
 
     recursive(|item| {
+        // C++ member functions. Unlike methods of Rust types, they always start with `safe` or
+        // `unsafe`, and take `this` implicitly (`const` after the parameters).
+        let cpp_method = choice((
+            just(Token::KwSafe).to(true),
+            just(Token::KwUnsafe).to(false),
+        ))
+        .then(just(Token::Ident("static")).or_not().map(|s| s.is_some()))
+        .then_ignore(just(Token::KwFn))
+        .then(select! { Token::Ident(c) => c })
+        .then(
+            rust_type()
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::ParenOpen), just(Token::ParenClose)),
+        )
+        .then(just(Token::KwConst).or_not().map(|c| c.is_some()))
+        .then(just(Token::Arrow).ignore_then(rust_type()).or_not())
+        .then(
+            just(Token::KwAs)
+                .ignore_then(select! { Token::Ident(c) => c })
+                .or_not(),
+        )
+        .map(
+            |((((((is_safe, is_static), name), inputs), is_const), output), rust_name)| {
+                ParsedTypeItem::CppMethod {
+                    is_safe,
+                    is_static,
+                    name,
+                    inputs,
+                    is_const,
+                    output: output.unwrap_or(ParsedRustType::Tuple(vec![])),
+                    rust_name,
+                }
+            },
+        );
         let inner_item = choice((
             layout.boxed(),
             traits.boxed(),
@@ -3130,6 +3264,7 @@ fn inner_type_item<'a>()
             cpp_heap_allocated.boxed(),
             cpp_ref.boxed(),
             cpp_stack_owned.boxed(),
+            cpp_method.boxed(),
             method()
                 .then(
                     just(Token::KwUse)

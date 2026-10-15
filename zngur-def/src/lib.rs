@@ -182,12 +182,51 @@ pub struct ZngurType {
     pub wellknown_traits: Vec<ZngurWellknownTrait>,
     pub exhaustive: bool,
     pub methods: Vec<ZngurMethodDetails>,
+    /// The C++ methods of a C++ type (`#cpp_stack_owned` or `#cpp_ref`), which Rust can call.
+    pub cpp_methods: Vec<ZngurCppMethod>,
     pub constructor: Option<ZngurConstructor>,
     pub variants: Vec<ZngurVariant>,
     pub fields: Vec<ZngurField>,
     pub cpp_heap_allocated: Option<CppHeapAllocated>,
     pub cpp_ref: Option<CppRef>,
     pub cpp_stack_owned: Option<CppStackOwned>,
+}
+
+/// A C++ member function of a C++ type, declared C++-style in the type's block, e.g.
+/// `unsafe fn value() const -> i32;` or `safe static fn make(i32) -> c++::ns::Bar;`. zngur
+/// generates a Rust function for it that calls the C++ member function directly.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct ZngurCppMethod {
+    /// The name of the C++ member function.
+    pub cpp_name: String,
+    /// The name of the Rust function (from `as`), if it isn't `cpp_name`.
+    pub rust_name: Option<String>,
+    /// `Static` for static member functions, `Ref(Not)` for `const` member functions, and
+    /// `Ref(Mut)` for the others. The Rust function takes the object as its first argument, as a
+    /// `zngur_lib::CppPtr<Self, Const or Mut>`.
+    pub receiver: ZngurMethodReceiver,
+    pub inputs: Vec<RustType>,
+    pub output: RustType,
+    pub is_safe: bool,
+}
+
+impl ZngurCppMethod {
+    /// The name of the Rust function.
+    pub fn rust_name(&self) -> &str {
+        self.rust_name.as_deref().unwrap_or(&self.cpp_name)
+    }
+
+    /// The Rust function's signature, as a method of the Rust wrapper (for diagnostics).
+    pub fn as_rust_method(&self) -> ZngurMethod {
+        ZngurMethod {
+            name: self.rust_name().to_owned(),
+            generics: vec![],
+            receiver: self.receiver,
+            inputs: self.inputs.clone(),
+            output: self.output.clone(),
+            is_safe: self.is_safe,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]

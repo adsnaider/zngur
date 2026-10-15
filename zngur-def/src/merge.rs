@@ -172,6 +172,9 @@ impl Merge for ZngurType {
         merge_by_identity(self.methods, &mut into.methods, |a, b| {
             a.data.name == b.data.name
         })?;
+        merge_by_identity(self.cpp_methods, &mut into.cpp_methods, |a, b| {
+            a.rust_name() == b.rust_name()
+        })?;
         if into.constructor.is_none() {
             into.constructor = self.constructor;
         } else if self.constructor != into.constructor {
@@ -267,6 +270,21 @@ impl Merge<ZngurSpec> for ZngurType {
             self.merge(existing)?;
         } else {
             into.types.push(self);
+        }
+        Ok(())
+    }
+}
+
+impl Merge for crate::ZngurCppMethod {
+    fn merge(self, into: &mut Self) -> MergeResult {
+        if self != *into {
+            return Err(MergeFailure::Conflict(
+                "C++ method mismatch".to_string(),
+                (
+                    ConflictSource::Method(self.as_rust_method()),
+                    ConflictSource::Method(into.as_rust_method()),
+                ),
+            ));
         }
         Ok(())
     }
