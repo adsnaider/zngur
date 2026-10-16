@@ -13,6 +13,7 @@ CppType 7 7
 Constructed CppType 3 4
 CppType 3 4
 CppType 3 4
+CppType 13 4
 Constructed CppType 8 9
 CppType 8 9
 Constructed CppConservativeType 30 40

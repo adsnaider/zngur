@@ -19,7 +19,7 @@
   - [Writing `impl` blocks for Rust types in C++](./call_cpp_from_rust/rust_impl.md)
   - [`Box<dyn Fn>`]()
   - [Opaque C++ types](./call_cpp_from_rust/opaque.md)
-  - [C++ pointers and references](./call_cpp_from_rust/cpp_pointers.md)
+  - [C++ references and pointers](./call_cpp_from_rust/cpp_pointers.md)
   - [C++ member functions](./call_cpp_from_rust/cpp_methods.md)
   - [C++ constructors](./call_cpp_from_rust/cpp_constructors.md)
   - [C++ fields](./call_cpp_from_rust/cpp_fields.md)

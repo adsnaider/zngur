@@ -1862,22 +1862,41 @@ mod c++::a {
 }
 
 #[test]
-fn safe_cpp_method_with_this_is_rejected() {
-    check_fail(
+fn safe_cpp_methods_taking_references_are_accepted() {
+    // `this` and the other arguments are `CppRef`s, which refer to valid objects.
+    let parsed = parse_str(
         r#"
 type c++::B {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
     safe fn value() const -> i32;
+    safe fn set(const c++::B&);
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let ty = parsed.spec.types.first().expect("no type parsed");
+    assert!(ty.cpp_methods.iter().all(|m| m.is_safe));
+}
+
+#[test]
+fn safe_cpp_method_with_cpp_ptr_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe fn set(const c++::B*);
 }
 "#,
         expect![[r#"
-            Error: this C++ member function must be `unsafe`, because it takes a C++ pointer or reference (including `this`, for non-static member functions), which may be invalid
+            Error: this C++ member function must be `unsafe`, because it takes a C++ pointer, which may be null or invalid
                ╭─[ test.zng:5:5 ]
                │
-             5 │     safe fn value() const -> i32;
-               │     ──────────────┬──────────────  
-               │                   ╰──────────────── this C++ member function must be `unsafe`, because it takes a C++ pointer or reference (including `this`, for non-static member functions), which may be invalid
+             5 │     safe fn set(const c++::B*);
+               │     ─────────────┬─────────────  
+               │                  ╰─────────────── this C++ member function must be `unsafe`, because it takes a C++ pointer, which may be null or invalid
             ───╯
         "#]],
     );
@@ -1890,16 +1909,16 @@ fn safe_static_cpp_method_with_cpp_ptr_is_rejected() {
 type c++::B {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
-    safe static fn sum(const c++::B&) -> i32;
+    safe static fn sum(const c++::B*) -> i32;
 }
 "#,
         expect![[r#"
-            Error: this C++ member function must be `unsafe`, because it takes a C++ pointer or reference (including `this`, for non-static member functions), which may be invalid
+            Error: this C++ member function must be `unsafe`, because it takes a C++ pointer, which may be null or invalid
                ╭─[ test.zng:5:5 ]
                │
-             5 │     safe static fn sum(const c++::B&) -> i32;
+             5 │     safe static fn sum(const c++::B*) -> i32;
                │     ────────────────────┬────────────────────  
-               │                         ╰────────────────────── this C++ member function must be `unsafe`, because it takes a C++ pointer or reference (including `this`, for non-static member functions), which may be invalid
+               │                         ╰────────────────────── this C++ member function must be `unsafe`, because it takes a C++ pointer, which may be null or invalid
             ───╯
         "#]],
     );
@@ -2065,16 +2084,16 @@ fn safe_cpp_constructor_with_cpp_ptr_is_rejected() {
 type c++::B {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
-    safe constructor(const c++::B&);
+    safe constructor(const c++::B*);
 }
 "#,
         expect![[r#"
-            Error: this C++ constructor must be `unsafe`, because it takes a C++ pointer or reference, which may be invalid
+            Error: this C++ constructor must be `unsafe`, because it takes a C++ pointer, which may be null or invalid
                ╭─[ test.zng:5:5 ]
                │
-             5 │     safe constructor(const c++::B&);
+             5 │     safe constructor(const c++::B*);
                │     ────────────────┬───────────────  
-               │                     ╰───────────────── this C++ constructor must be `unsafe`, because it takes a C++ pointer or reference, which may be invalid
+               │                     ╰───────────────── this C++ constructor must be `unsafe`, because it takes a C++ pointer, which may be null or invalid
             ───╯
         "#]],
     );
@@ -2087,20 +2106,38 @@ fn cpp_constructors_with_the_same_rust_signature_are_rejected() {
 type c++::B {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
-    unsafe constructor(const c++::B&);
-    unsafe constructor(const c++::B*);
+    safe constructor(i32);
+    unsafe constructor(i32);
 }
 "#,
         expect![[r#"
-            Error: another C++ constructor has the same Rust argument types (C++ pointers and references to the same type are the same `CppPtr` in Rust)
+            Error: another C++ constructor has the same argument types
                ╭─[ test.zng:6:5 ]
                │
-             6 │     unsafe constructor(const c++::B*);
-               │     ─────────────────┬────────────────  
-               │                      ╰────────────────── another C++ constructor has the same Rust argument types (C++ pointers and references to the same type are the same `CppPtr` in Rust)
+             6 │     unsafe constructor(i32);
+               │     ────────────┬───────────  
+               │                 ╰───────────── another C++ constructor has the same argument types
             ───╯
         "#]],
     );
+}
+
+#[test]
+fn cpp_constructors_taking_a_pointer_or_a_reference_are_different() {
+    let parsed = parse_str(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe constructor(const c++::B&);
+    unsafe constructor(const c++::B*);
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let ty = parsed.spec.types.first().expect("no type parsed");
+    assert_eq!(ty.cpp_constructors.len(), 2);
 }
 
 #[test]
@@ -2201,12 +2238,12 @@ mod c++::a {
 }
 "#,
         expect![[r#"
-            Error: this C++ function must be `unsafe`, because it takes a C++ pointer or reference, which may be invalid
+            Error: this C++ function must be `unsafe`, because it takes a C++ pointer, which may be null or invalid
                ╭─[ test.zng:3:5 ]
                │
              3 │     safe fn f(i32*);
                │     ───────┬───────  
-               │            ╰───────── this C++ function must be `unsafe`, because it takes a C++ pointer or reference, which may be invalid
+               │            ╰───────── this C++ function must be `unsafe`, because it takes a C++ pointer, which may be null or invalid
             ───╯
         "#]],
     );
@@ -2373,8 +2410,9 @@ type c++::std::vector<i32, c++::MyAlloc> {
 }
 
 #[test]
-fn cpp_template_instantiations_with_the_same_rust_type_are_rejected() {
-    check_fail(
+fn cpp_template_instantiations_of_a_pointer_and_a_reference_are_different() {
+    // `CppRef<i32, Const>` and `CppPtr<i32, Const>` in Rust.
+    let parsed = parse_str(
         r#"
 type c++::std::pair<const i32&> {
 }
@@ -2382,16 +2420,10 @@ type c++::std::pair<const i32&> {
 type c++::std::pair<const i32*> {
 }
 "#,
-        expect![[r#"
-            Error: another instantiation of this C++ class template is the same Rust type (C++ pointers and references to the same type are the same `CppPtr` in Rust)
-               ╭─[ test.zng:5:6 ]
-               │
-             5 │ type c++::std::pair<const i32*> {
-               │      ─────────────┬────────────  
-               │                   ╰────────────── another instantiation of this C++ class template is the same Rust type (C++ pointers and references to the same type are the same `CppPtr` in Rust)
-            ───╯
-        "#]],
+        NullCfg,
+        |_| {},
     );
+    assert_eq!(parsed.spec.types.len(), 2);
 }
 
 #[test]

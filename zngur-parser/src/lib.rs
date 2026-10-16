@@ -496,21 +496,16 @@ struct MergeContext {
     variant: Option<String>,
 }
 
-/// `ty` as Rust sees it: C++ pointers and references are both `CppPtr`s.
-fn erase_cpp_indirection(ty: &RustType) -> RustType {
-    match ty {
-        RustType::CppPtr(m, _, t) => RustType::CppPtr(*m, CppIndirection::Pointer, t.clone()),
-        _ => ty.clone(),
-    }
-}
-
-/// Whether `ty` is or contains a C++ pointer or reference.
+/// Whether `ty` is or contains a C++ pointer (which may be null or invalid, unlike a C++
+/// reference).
 fn contains_cpp_ptr(ty: &RustType) -> bool {
     match ty {
-        RustType::CppPtr(..) => true,
-        RustType::Ref(_, t) | RustType::Raw(_, t) | RustType::Boxed(t) | RustType::Slice(t) => {
-            contains_cpp_ptr(t)
-        }
+        RustType::CppPtr(_, CppIndirection::Pointer, _) => true,
+        RustType::CppPtr(_, CppIndirection::Reference, t)
+        | RustType::Ref(_, t)
+        | RustType::Raw(_, t)
+        | RustType::Boxed(t)
+        | RustType::Slice(t) => contains_cpp_ptr(t),
         RustType::Tuple(tys) => tys.iter().any(contains_cpp_ptr),
         RustType::Adt(pg) => pg
             .generics
@@ -987,14 +982,10 @@ impl ProcessedItem<'_> {
                             };
                             let inputs: Vec<RustType> =
                                 inputs.into_iter().map(|x| x.to_zngur(scope)).collect();
-                            if is_safe
-                                && (receiver != ZngurMethodReceiver::Static
-                                    || inputs.iter().any(contains_cpp_ptr))
-                            {
+                            if is_safe && inputs.iter().any(contains_cpp_ptr) {
                                 ctx.add_error_str(
                                     "this C++ member function must be `unsafe`, because it takes a \
-                                     C++ pointer or reference (including `this`, for non-static \
-                                     member functions), which may be invalid",
+                                     C++ pointer, which may be null or invalid",
                                     item_span,
                                 );
                                 continue;
@@ -1019,23 +1010,18 @@ impl ProcessedItem<'_> {
                             if is_safe && inputs.iter().any(contains_cpp_ptr) {
                                 ctx.add_error_str(
                                     "this C++ constructor must be `unsafe`, because it takes a C++ \
-                                     pointer or reference, which may be invalid",
+                                     pointer, which may be null or invalid",
                                     item_span,
                                 );
                                 continue;
                             }
-                            // `const T&` and `const T*` are both `CppPtr<T, Const>` in Rust, so
-                            // they'd implement the same `ZngCppConstruct<Args>`.
-                            let rust_inputs = |inputs: &[RustType]| {
-                                inputs.iter().map(erase_cpp_indirection).collect::<Vec<_>>()
-                            };
-                            if cpp_constructors.iter().any(|c: &ZngurCppConstructor| {
-                                rust_inputs(&c.inputs) == rust_inputs(&inputs)
-                            }) {
+                            // They'd implement the same `ZngCppConstruct<Args>`.
+                            if cpp_constructors
+                                .iter()
+                                .any(|c: &ZngurCppConstructor| c.inputs == inputs)
+                            {
                                 ctx.add_error_str(
-                                    "another C++ constructor has the same Rust argument types \
-                                     (C++ pointers and references to the same type are the same \
-                                     `CppPtr` in Rust)",
+                                    "another C++ constructor has the same argument types",
                                     item_span,
                                 );
                                 continue;
@@ -1309,8 +1295,8 @@ impl ProcessedItem<'_> {
                     f.inputs.into_iter().map(|x| x.to_zngur(scope)).collect();
                 if f.is_safe && inputs.iter().any(contains_cpp_ptr) {
                     ctx.add_error_str(
-                        "this C++ function must be `unsafe`, because it takes a C++ pointer or \
-                         reference, which may be invalid",
+                        "this C++ function must be `unsafe`, because it takes a C++ pointer, \
+                         which may be null or invalid",
                         span,
                     );
                     return;
@@ -2782,7 +2768,7 @@ fn resolve_cpp_templates(
             );
             continue;
         }
-        // `const T&` and `const T*` arguments are the same `CppPtr` in Rust.
+        // Each instantiation must be its own Rust type, for its own Rust struct.
         let rust_type = ty_def.ty.to_string();
         match instantiations
             .iter_mut()
@@ -2792,8 +2778,7 @@ fn resolve_cpp_templates(
                 type_error(
                     ctx,
                     &ty_def.ty,
-                    "another instantiation of this C++ class template is the same Rust type (C++ \
-                     pointers and references to the same type are the same `CppPtr` in Rust)",
+                    "another instantiation of this C++ class template is the same Rust type",
                 );
                 continue;
             }

@@ -172,7 +172,7 @@ impl ZngurGenerator {
                     let this = match method.receiver {
                         ZngurMethodReceiver::Ref(m) => Some(RustType::CppPtr(
                             m,
-                            CppIndirection::Pointer,
+                            CppIndirection::Reference,
                             Box::new(ty.clone()),
                         )),
                         ZngurMethodReceiver::Static | ZngurMethodReceiver::Move => None,
@@ -193,11 +193,11 @@ impl ZngurGenerator {
                     ));
                 }
                 // Field accessors: like `const` / non-`const` member functions that return a
-                // pointer to the field.
+                // reference to the field.
                 for field in &ty_def.cpp_fields {
                     let this = RustType::CppPtr(
                         field.mutability,
-                        CppIndirection::Pointer,
+                        CppIndirection::Reference,
                         Box::new(ty.clone()),
                     );
                     let mangled_name = rust_file.add_cpp_method(
@@ -206,7 +206,8 @@ impl ZngurGenerator {
                         Some(this),
                         &[],
                         &field.as_cpp_method().output,
-                        false,
+                        // `this` refers to a valid object, so its field is valid too.
+                        true,
                     );
                     cpp_file.cpp_method_bridges.push(bridges.field(
                         &mangled_name,
@@ -332,16 +333,16 @@ impl ZngurGenerator {
     }}
 
     impl {type_name} {{
-        /// A C++ pointer (`const T*`) to this object.
+        /// A C++ reference (`const T&`) to this object.
         #[allow(dead_code, clippy::should_implement_trait)]
-        pub fn as_ref(&self) -> ::zngur_lib::CppPtr<Self, ::zngur_lib::Const> {{
-            ::zngur_lib::CppPtr::from(self)
+        pub fn as_ref(&self) -> ::zngur_lib::CppRef<Self, ::zngur_lib::Const> {{
+            ::zngur_lib::CppRef::from(self)
         }}
 
-        /// A C++ pointer (`T*`) to this object.
+        /// A C++ reference (`T&`) to this object.
         #[allow(dead_code, clippy::should_implement_trait)]
-        pub fn as_mut(&mut self) -> ::zngur_lib::CppPtr<Self, ::zngur_lib::Mut> {{
-            ::zngur_lib::CppPtr::from(self)
+        pub fn as_mut(&mut self) -> ::zngur_lib::CppRef<Self, ::zngur_lib::Mut> {{
+            ::zngur_lib::CppRef::from(self)
         }}
     }}
 "#
@@ -949,13 +950,13 @@ mod tests {
             ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
         let cpp_code = cpp_code.expect("C++ member functions need a C++ file");
 
-        // Rust: an associated function per member function, taking `this` as a `CppPtr`.
+        // Rust: an associated function per member function, taking `this` as a `CppRef`.
         assert!(rust_code.contains(
-            "pub unsafe fn value(i0: ::zngur_lib::CppPtr<a::B, ::zngur_lib::Const>, ) -> i32"
+            "pub unsafe fn value(i0: ::zngur_lib::CppRef<a::B, ::zngur_lib::Const>, ) -> i32"
         ));
         assert!(rust_code.contains(
-            "pub unsafe fn set_from(i0: ::zngur_lib::CppPtr<a::B, ::zngur_lib::Mut>, \
-             i1: ::zngur_lib::CppPtr<a::B, ::zngur_lib::Const>, ) -> ()"
+            "pub unsafe fn set_from(i0: ::zngur_lib::CppRef<a::B, ::zngur_lib::Mut>, \
+             i1: ::zngur_lib::CppRef<a::B, ::zngur_lib::Const>, ) -> ()"
         ));
         assert!(rust_code.contains("pub fn make(i0: i32, i1: a::B, ) -> a::B"));
 
@@ -1103,8 +1104,8 @@ mod tests {
         let cpp_code = cpp_code.expect("C++ field accessors need a C++ file");
 
         assert!(rust_code.contains(
-            "pub unsafe fn x_mut(i0: ::zngur_lib::CppPtr<a::B, ::zngur_lib::Mut>, ) -> \
-             ::zngur_lib::CppPtr<i32, ::zngur_lib::Mut>"
+            "pub fn x_mut(i0: ::zngur_lib::CppRef<a::B, ::zngur_lib::Mut>, ) -> \
+             ::zngur_lib::CppRef<i32, ::zngur_lib::Mut>"
         ));
         assert!(
             cpp_code.contains(
@@ -1183,7 +1184,7 @@ mod tests {
         assert!(rust_code.contains("type Safety = ::zngur_lib::IsSafe;"));
         assert!(rust_code.contains(
             "unsafe impl ::zngur_lib::ZngCppConstruct<(i32, \
-             ::zngur_lib::CppPtr<a::B, ::zngur_lib::Const>, )> for a::B {"
+             ::zngur_lib::CppRef<a::B, ::zngur_lib::Const>, )> for a::B {"
         ));
         assert!(rust_code.contains("type Safety = ::zngur_lib::IsUnsafe;"));
 

@@ -6,7 +6,7 @@ says about it:
 
 | Declaration                                | Rust can                                          |
 | ------------------------------------------ | ------------------------------------------------- |
-| no layout                                  | only refer to it (`&T`, `CppPtr`, smart pointers) |
+| no layout                                  | only refer to it (`&T`, `CppRef`, smart pointers) |
 | a layout, without `#trivially_relocatable` | only refer to it (the layout is checked in C++)   |
 | a layout and `#trivially_relocatable`      | hold it by value, like a Rust value               |
 

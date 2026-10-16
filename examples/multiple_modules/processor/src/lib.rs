@@ -18,10 +18,8 @@ impl Processor {
         config: &unique_ptr<RunConfig>,
     ) {
         // SAFETY: `config` owns a valid `RunConfig`, which outlives this call.
-        let packets = unsafe {
-            let config = unique_ptr::<RunConfig>::get(config.as_ref());
-            *RunConfig::packets(config.into()).as_ref().unwrap()
-        };
+        let config = unsafe { unique_ptr::<RunConfig>::get(config.as_ref()).as_cpp_ref() };
+        let packets = RunConfig::packets(config.expect("null").as_const()).read();
         for _ in 0..packets {
             let packet = receiver.next_packet();
             stats.add_packet(packet);

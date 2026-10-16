@@ -230,7 +230,7 @@ pub struct ZngurCppMethod {
     pub rust_name: Option<String>,
     /// `Static` for static member functions, `Ref(Not)` for `const` member functions, and
     /// `Ref(Mut)` for the others. The Rust function takes the object as its first argument, as a
-    /// `zngur_lib::CppPtr<Self, Const or Mut>`.
+    /// `zngur_lib::CppRef<Self, Const or Mut>`.
     pub receiver: ZngurMethodReceiver,
     pub inputs: Vec<RustType>,
     pub output: RustType,
@@ -265,9 +265,9 @@ pub struct ZngurCppConstructor {
 }
 
 /// An accessor for a field (data member) of a C++ type, declared like `field const x (type = i32);`
-/// or `field x (type = i32) as x_mut;`. zngur generates an `unsafe` Rust function that takes `this`
-/// as a `zngur_lib::CppPtr<Self, M>` and returns a `CppPtr<ty, M>` to the field, where `M` is
-/// `Const` for `const` accessors and `Mut` otherwise.
+/// or `field x (type = i32) as x_mut;`. zngur generates a Rust function that takes `this` as a
+/// `zngur_lib::CppRef<Self, M>` and returns a `CppRef<ty, M>` to the field, where `M` is `Const`
+/// for `const` accessors and `Mut` otherwise.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct ZngurCppField {
     /// The name of the C++ field.
@@ -286,7 +286,7 @@ impl ZngurCppField {
         self.rust_name.as_deref().unwrap_or(&self.name)
     }
 
-    /// The accessor as a C++ member function, which returns a pointer to the field.
+    /// The accessor as a C++ member function, which returns a reference to the field.
     pub fn as_cpp_method(&self) -> ZngurCppMethod {
         ZngurCppMethod {
             cpp_name: self.name.clone(),
@@ -295,7 +295,7 @@ impl ZngurCppField {
             inputs: vec![],
             output: RustType::CppPtr(
                 self.mutability,
-                CppIndirection::Pointer,
+                CppIndirection::Reference,
                 Box::new(self.ty.clone()),
             ),
             is_safe: false,
@@ -469,8 +469,8 @@ pub enum RustType {
     /// `::a::B`, and `c++::std::unique_ptr<c++::a::B>` is `::std::unique_ptr<::a::B>`.
     Cpp(CppTypePath),
     /// A C++ pointer or reference (`const T*`, `T*`, `const T&` or `T&` in the `.zng` file). In
-    /// Rust, all of them are a `zngur_lib::CppPtr<T, Const or Mut>`. The indirection only matters
-    /// when calling C++ functions, which take either a pointer or a reference.
+    /// Rust, pointers are a `zngur_lib::CppPtr<T, Const or Mut>`, which may be null or invalid,
+    /// and references a `zngur_lib::CppRef<T, Const or Mut>`, which refers to a valid object.
     CppPtr(Mutability, CppIndirection, Box<RustType>),
 }
 
@@ -683,12 +683,16 @@ impl Display for RustType {
             RustType::Slice(s) => write!(f, "[{s}]"),
             RustType::TypeVar(TypeVar(v)) => write!(f, "{v}"),
             RustType::Cpp(path) => write!(f, "{path}"),
-            RustType::CppPtr(m, _, ty) => {
+            RustType::CppPtr(m, indirection, ty) => {
                 let constness = match m {
                     Mutability::Not => "Const",
                     Mutability::Mut => "Mut",
                 };
-                write!(f, "::zngur_lib::CppPtr<{ty}, ::zngur_lib::{constness}>")
+                let wrapper = match indirection {
+                    CppIndirection::Pointer => "CppPtr",
+                    CppIndirection::Reference => "CppRef",
+                };
+                write!(f, "::zngur_lib::{wrapper}<{ty}, ::zngur_lib::{constness}>")
             }
         }
     }
@@ -709,8 +713,14 @@ mod tests {
         );
         assert_eq!(
             ty.to_string(),
-            "::zngur_lib::CppPtr<a::Name, ::zngur_lib::Const>"
+            "::zngur_lib::CppRef<a::Name, ::zngur_lib::Const>"
         );
+        let ty = RustType::CppPtr(
+            Mutability::Mut,
+            CppIndirection::Pointer,
+            Box::new(RustType::Primitive(PrimitiveRustType::Int(32))),
+        );
+        assert_eq!(ty.to_string(), "::zngur_lib::CppPtr<i32, ::zngur_lib::Mut>");
     }
 
     #[test]

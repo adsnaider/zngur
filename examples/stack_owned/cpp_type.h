@@ -16,6 +16,9 @@ struct CppType {
     std::cout << "Constructed CppType " << x << " " << y << std::endl;
   }
 
+  // Takes a pointer, which must not be null, so Rust can only call it with `unsafe`.
+  CppType(const CppType *other, int dx) : x(other->x + dx), y(other->y) {}
+
   // Member functions that Rust calls directly (declared in `main.zng`).
   int sum() const { return x + y; }
   void scale(int factor) {

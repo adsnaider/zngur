@@ -7,20 +7,21 @@ type c++::MyCppWrapper {
     #layout(size = 8, align = 4);
 
     // C++ member functions, which Rust calls directly. They take `this` as a
-    // `zngur_lib::CppPtr`, so they must be `unsafe` (static ones may be `safe`).
-    unsafe fn sum() const -> i32;
-    unsafe fn scale(i32);
-    unsafe fn add(const c++::MyCppWrapper&);
-    unsafe fn x_ref() const -> const i32&;
-    unsafe fn swapped() const -> c++::MyCppWrapper;
+    // `zngur_lib::CppRef`, which refers to a valid object, so they can be `safe`.
+    safe fn sum() const -> i32;
+    safe fn scale(i32);
+    safe fn add(const c++::MyCppWrapper&);
+    safe fn x_ref() const -> const i32&;
+    safe fn swapped() const -> c++::MyCppWrapper;
     safe static fn diagonal(i32) -> c++::MyCppWrapper;
 
     // C++ constructors, which `zngur_lib::ZngCppConstruct` runs in place. Constructors with C++
-    // pointer or reference parameters, like the copy constructor, must be `unsafe`.
+    // pointer parameters, which may be null or invalid, must be `unsafe`.
     safe constructor(i32, i32);
-    unsafe constructor(const c++::MyCppWrapper&);
+    safe constructor(const c++::MyCppWrapper&);
+    unsafe constructor(const c++::MyCppWrapper*, i32);
 
-    // Accessors for C++ fields, which return a `zngur_lib::CppPtr` to the field.
+    // Accessors for C++ fields, which return a `zngur_lib::CppRef` to the field.
     field const x (type = i32);
     field x (type = i32) as x_mut;
     field const y (type = i32);
@@ -30,14 +31,14 @@ type c++::MyConservativeWrapper {
     #trivially_relocatable;
     #layout_conservative(size = 32, align = 16);
 
-    unsafe fn total_with(c++::MyConservativeWrapper) const -> i64;
+    safe fn total_with(c++::MyConservativeWrapper) const -> i64;
     safe constructor(i64, i32);
 }
 
 // Free C++ functions, in their C++ namespace. Rust calls them directly, as
 // `generated::geometry::dot(...)`; `as` names C++ overloads.
 mod c++::geometry {
-    unsafe fn dot(const c++::MyCppWrapper&, const c++::MyCppWrapper&) -> i32;
+    safe fn dot(const c++::MyCppWrapper&, const c++::MyCppWrapper&) -> i32;
     safe fn origin() -> c++::MyCppWrapper;
     safe fn twice(i64) -> i64;
     safe fn twice(f64) -> f64 as twice_f64;
@@ -50,7 +51,7 @@ type c++::Pair<i32> {
     #trivially_relocatable;
 
     safe constructor(i32, i32);
-    unsafe fn sum() const -> i32;
+    safe fn sum() const -> i32;
     field first (type = i32) as first_mut;
 }
 
@@ -59,14 +60,14 @@ type c++::Pair<f64> {
     #trivially_relocatable;
 
     safe constructor(f64, f64);
-    unsafe fn sum() const -> f64;
+    safe fn sum() const -> f64;
 }
 
 type c++::std::unique_ptr<c++::Pair<i32>> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
 
-    unsafe fn get() const -> c++::Pair<i32>*;
+    safe fn get() const -> c++::Pair<i32>*;
 }
 
 mod c++::pairs {
@@ -97,7 +98,8 @@ extern "C++" {
         safe fn print(&self);
     }
 
-    // C++ pointers and references are `zngur_lib::CppPtr`s in Rust, and plain pointers in C++.
+    // C++ references are `zngur_lib::CppRef`s in Rust and C++ pointers `zngur_lib::CppPtr`s. Both
+    // are plain pointers in C++.
     unsafe fn sum_into(const c++::MyCppWrapper&, i32*);
     unsafe fn swap_xy(c++::MyCppWrapper*);
     unsafe fn larger_x(const c++::MyCppWrapper&, const c++::MyCppWrapper&) -> const c++::MyCppWrapper*;

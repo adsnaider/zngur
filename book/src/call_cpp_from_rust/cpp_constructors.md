@@ -11,13 +11,14 @@ type c++::geo::Point {
 
     safe constructor();
     safe constructor(i32, i32);
-    unsafe constructor(const c++::geo::Point&);
+    safe constructor(const c++::geo::Point&);
+    unsafe constructor(const c++::geo::Point*, i32);
 }
 ```
 
 Each constructor is `safe` or `unsafe`, like the functions in `extern "C++"` blocks. Constructors
-with [C++ pointer or reference](./cpp_pointers.md) parameters, like copy constructors, must be
-`unsafe`.
+with [C++ pointer](./cpp_pointers.md) parameters, which may be null or invalid, must be `unsafe`.
+References are fine, so copy constructors can be `safe`.
 
 ## In Rust
 
@@ -40,7 +41,8 @@ use zngur_lib::ZngCppConstruct;
 
 let origin = Point::build(());
 let p = Point::build((3, 4));
-let copy = unsafe { Point::build_unchecked((p.as_ref(),)) };
+let copy = Point::build((p.as_ref(),));
+let shifted = unsafe { Point::build_unchecked((p.as_ref().as_ptr(), 10)) };
 
 let mut slot = MaybeUninit::uninit();
 Point::construct(&mut slot, (5, 6));

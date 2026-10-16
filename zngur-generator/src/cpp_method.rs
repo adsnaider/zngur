@@ -70,7 +70,7 @@ impl BridgeRenderer<'_> {
         let mut params = vec![];
         let this = match method.receiver {
             ZngurMethodReceiver::Ref(m) => {
-                let ptr = RustType::CppPtr(m, CppIndirection::Pointer, Box::new(owner.clone()));
+                let ptr = RustType::CppPtr(m, CppIndirection::Reference, Box::new(owner.clone()));
                 params.push("uint8_t* i0".to_owned());
                 Some(self.move_from_rust(&ptr, 0))
             }
@@ -171,7 +171,7 @@ impl BridgeRenderer<'_> {
     }
 
     /// The bridge function `mangled_name` for the accessor `field` of `owner` (whose C++ type is
-    /// `owner_cpp_type`), which returns a pointer to the field.
+    /// `owner_cpp_type`), which returns a reference to the field.
     pub fn field(
         &self,
         mangled_name: &str,
@@ -182,7 +182,7 @@ impl BridgeRenderer<'_> {
         let namespace = self.namespace;
         let this_ty = RustType::CppPtr(
             field.mutability,
-            CppIndirection::Pointer,
+            CppIndirection::Reference,
             Box::new(owner.clone()),
         );
         let this = self.move_from_rust(&this_ty, 0);

@@ -8,7 +8,7 @@ type c++::std::unique_ptr<c++::geo::Point> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
 
-    unsafe fn get() const -> c++::geo::Point*;
+    safe fn get() const -> c++::geo::Point*;
 }
 
 type c++::std::map<i32, const c++::geo::Point*> {
@@ -17,7 +17,7 @@ type c++::std::map<i32, const c++::geo::Point*> {
 
 The C++ type is the path with its template arguments: `::std::unique_ptr< ::geo::Point >` and
 `::std::map< ::int32_t, const ::geo::Point* >` above. Template arguments can be `c++::` types,
-builtins like `i32` or `bool`, and [C++ pointers and references](./cpp_pointers.md). Each
+builtins like `i32` or `bool`, and [C++ references and pointers](./cpp_pointers.md). Each
 instantiation is declared separately, with its own layout, member functions, constructors and so
 on.
 
@@ -27,7 +27,7 @@ Rust code names instantiations the way C++ code does:
 
 ```rust
 let p: generated::std::unique_ptr<generated::geo::Point> = make_point();
-let raw = unsafe { generated::std::unique_ptr::<generated::geo::Point>::get(p.as_ref()) };
+let raw = generated::std::unique_ptr::<generated::geo::Point>::get(p.as_ref());
 ```
 
 `generated::std::unique_ptr<T>` is an alias, and each instantiation is its own Rust struct, with
@@ -53,7 +53,7 @@ type<T> c++::std::unique_ptr<T> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
 
-    unsafe fn get() const -> T*;
+    safe fn get() const -> T*;
 }
 
 // Both get the layout, `#trivially_relocatable` and `get()`.
@@ -80,7 +80,7 @@ home.
 type<T> c++::std::unique_ptr<T> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
-    unsafe fn get() const -> T*;
+    safe fn get() const -> T*;
 }
 ```
 
@@ -107,8 +107,6 @@ See `examples/multiple_modules` for a complete example.
 ## Limitations
 
 - Every instantiation of a template must have the same number of template arguments.
-- Two instantiations can't be the same Rust type. `const T&` and `const T*` arguments are both
-  `CppPtr<T, Const>` in Rust.
 - Non-type template arguments (`std::array<T, 4>`), `const` arguments (`unique_ptr<const T>`),
   function types (`std::function<int(int)>`) and nested types (`std::vector<int>::iterator`) aren't
   supported. Give them a name with a C++ alias instead, and use that:
