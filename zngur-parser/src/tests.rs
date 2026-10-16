@@ -96,6 +96,13 @@ fn check_success(zng: &str) {
     });
 }
 
+/// Parses `zng`, which must succeed, and checks the warnings it emits.
+fn check_warnings(zng: &str, warnings: Expect) {
+    let mut emitted = String::new();
+    let _ = parse_str(zng, NullCfg, |msg| emitted.push_str(msg));
+    warnings.assert_eq(&emitted);
+}
+
 pub struct ErrorText(pub String);
 
 fn check_fail(zng: &str, error: Expect) {
@@ -1893,10 +1900,10 @@ mod c++::a {
         #layout(size = 8, align = 4);
         #trivially_relocatable;
 
-        unsafe fn value() const -> i32;
-        unsafe fn set(i32, const B&);
+        unsafe fn value(&self) -> i32;
+        unsafe fn set(&mut self, i32, const B&);
         safe static fn make(i32) -> B;
-        unsafe fn get(i32) const -> const i32& as get_const;
+        unsafe fn get(&self, i32) -> const i32& as get_const;
     }
 }
 "#,
@@ -1946,14 +1953,14 @@ mod c++::a {
 
 #[test]
 fn safe_cpp_methods_taking_references_are_accepted() {
-    // `this` and the other arguments are `CppRef`s, which refer to valid objects.
+    // `this` and the other arguments are references, which refer to valid objects.
     let parsed = parse_str(
         r#"
 type c++::B {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
-    safe fn value() const -> i32;
-    safe fn set(const c++::B&);
+    safe fn value(&self) -> i32;
+    safe fn set(&mut self, const c++::B&);
 }
 "#,
         NullCfg,
@@ -1964,30 +1971,37 @@ type c++::B {
 }
 
 #[test]
-fn safe_cpp_method_with_cpp_ptr_is_rejected() {
-    check_fail(
+fn safe_cpp_method_with_cpp_ptr_warns() {
+    check_warnings(
         r#"
 type c++::B {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
-    safe fn set(const c++::B*);
+    safe fn set(&mut self, const c++::B*);
 }
 "#,
         expect![[r#"
-            Error: this C++ member function must be `unsafe`, because it takes a C++ pointer, which may be null or invalid
+            Warning: this C++ member function has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `fn f<'a>(&'a self) -> &'a T`), or silence this with `#allow(elided_lifetimes)`
                ╭─[ test.zng:5:5 ]
                │
-             5 │     safe fn set(const c++::B*);
-               │     ─────────────┬─────────────  
-               │                  ╰─────────────── this C++ member function must be `unsafe`, because it takes a C++ pointer, which may be null or invalid
+             5 │     safe fn set(&mut self, const c++::B*);
+               │     ───────────────────┬──────────────────  
+               │                        ╰──────────────────── this C++ member function has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `fn f<'a>(&'a self) -> &'a T`), or silence this with `#allow(elided_lifetimes)`
+            ───╯
+            Warning: this C++ member function is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     safe fn set(&mut self, const c++::B*);
+               │     ───────────────────┬──────────────────  
+               │                        ╰──────────────────── this C++ member function is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
             ───╯
         "#]],
     );
 }
 
 #[test]
-fn safe_static_cpp_method_with_cpp_ptr_is_rejected() {
-    check_fail(
+fn safe_static_cpp_method_with_cpp_ptr_warns() {
+    check_warnings(
         r#"
 type c++::B {
     #layout(size = 8, align = 4);
@@ -1996,12 +2010,12 @@ type c++::B {
 }
 "#,
         expect![[r#"
-            Error: this C++ member function must be `unsafe`, because it takes a C++ pointer, which may be null or invalid
+            Warning: this C++ member function is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
                ╭─[ test.zng:5:5 ]
                │
              5 │     safe static fn sum(const c++::B*) -> i32;
                │     ────────────────────┬────────────────────  
-               │                         ╰────────────────────── this C++ member function must be `unsafe`, because it takes a C++ pointer, which may be null or invalid
+               │                         ╰────────────────────── this C++ member function is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
             ───╯
         "#]],
     );
@@ -2018,12 +2032,12 @@ type c++::B {
 }
 "#,
         expect![[r#"
-            Error: a static member function can't be `const`
+            Error: C++ member functions take an explicit receiver instead of a trailing `const`: `&self` for `const` member functions, and `&mut self` for the others
                ╭─[ test.zng:5:5 ]
                │
              5 │     safe static fn make() const -> c++::B;
                │     ───────────────────┬──────────────────  
-               │                        ╰──────────────────── a static member function can't be `const`
+               │                        ╰──────────────────── C++ member functions take an explicit receiver instead of a trailing `const`: `&self` for `const` member functions, and `&mut self` for the others
             ───╯
         "#]],
     );
@@ -2039,12 +2053,12 @@ type crate::Foo {
 }
 "#,
         expect![[r#"
-            Error: C++ member functions (`safe fn` / `unsafe fn`) can only be declared on `c++::` types
-               ╭─[ test.zng:2:6 ]
+            Error: C++ member functions take an explicit receiver instead of a trailing `const`: `&self` for `const` member functions, and `&mut self` for the others
+               ╭─[ test.zng:4:5 ]
                │
-             2 │ type crate::Foo {
-               │      ─────┬────  
-               │           ╰────── C++ member functions (`safe fn` / `unsafe fn`) can only be declared on `c++::` types
+             4 │     unsafe fn value() const -> i32;
+               │     ───────────────┬───────────────  
+               │                    ╰───────────────── C++ member functions take an explicit receiver instead of a trailing `const`: `&self` for `const` member functions, and `&mut self` for the others
             ───╯
         "#]],
     );
@@ -2058,7 +2072,7 @@ fn conflicting_cpp_methods_across_files() {
 type c++::B {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
-    unsafe fn value() const -> i32;
+    unsafe fn value(&self) -> i32;
 }
 "#,
     )]);
@@ -2067,7 +2081,7 @@ type c++::B {
         r#"
 merge "./a.zng";
 type c++::B {
-    unsafe fn value() const -> i64;
+    unsafe fn value(&self) -> i64;
 }
 "#,
         expect![[r#"
@@ -2078,15 +2092,15 @@ type c++::B {
                │      ───┬──  
                │         ╰──── C++ method mismatch
                │ 
-             5 │     unsafe fn value() const -> i32;
-               │     ───────────────┬───────────────  
-               │                    ╰───────────────── declaration here ...
+             5 │     unsafe fn value(&self) -> i32;
+               │     ───────────────┬──────────────  
+               │                    ╰──────────────── declaration here ...
                │
                ├─[ test.zng:4:5 ]
                │
-             4 │     unsafe fn value() const -> i64;
-               │     ───────────────┬───────────────  
-               │                    ╰───────────────── conflicts with the declaration here.
+             4 │     unsafe fn value(&self) -> i64;
+               │     ───────────────┬──────────────  
+               │                    ╰──────────────── conflicts with the declaration here.
             ───╯
         "#]],
         &resolver,
@@ -2102,7 +2116,7 @@ fn cpp_methods_can_be_declared_in_another_file() {
 type c++::B {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
-    unsafe fn value() const -> i32;
+    unsafe fn value(&self) -> i32;
 }
 "#,
     )]);
@@ -2110,7 +2124,7 @@ type c++::B {
         r#"
 merge "./a.zng";
 type c++::B {
-    unsafe fn set(i32);
+    unsafe fn set(&mut self, i32);
 }
 "#,
         NullCfg,
@@ -2161,8 +2175,8 @@ type c++::B {
 }
 
 #[test]
-fn safe_cpp_constructor_with_cpp_ptr_is_rejected() {
-    check_fail(
+fn safe_cpp_constructor_with_cpp_ptr_warns() {
+    check_warnings(
         r#"
 type c++::B {
     #layout(size = 8, align = 4);
@@ -2171,12 +2185,12 @@ type c++::B {
 }
 "#,
         expect![[r#"
-            Error: this C++ constructor must be `unsafe`, because it takes a C++ pointer, which may be null or invalid
+            Warning: this C++ constructor is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
                ╭─[ test.zng:5:5 ]
                │
              5 │     safe constructor(const c++::B*);
                │     ────────────────┬───────────────  
-               │                     ╰───────────────── this C++ constructor must be `unsafe`, because it takes a C++ pointer, which may be null or invalid
+               │                     ╰───────────────── this C++ constructor is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
             ───╯
         "#]],
     );
@@ -2313,20 +2327,20 @@ mod crate::a {
 }
 
 #[test]
-fn safe_cpp_function_with_cpp_ptr_is_rejected() {
-    check_fail(
+fn safe_cpp_function_with_cpp_ptr_warns() {
+    check_warnings(
         r#"
 mod c++::a {
     safe fn f(i32*);
 }
 "#,
         expect![[r#"
-            Error: this C++ function must be `unsafe`, because it takes a C++ pointer, which may be null or invalid
+            Warning: this C++ function is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
                ╭─[ test.zng:3:5 ]
                │
              3 │     safe fn f(i32*);
                │     ───────┬───────  
-               │            ╰───────── this C++ function must be `unsafe`, because it takes a C++ pointer, which may be null or invalid
+               │            ╰───────── this C++ function is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
             ───╯
         "#]],
     );
@@ -2493,9 +2507,9 @@ type c++::std::vector<i32, c++::MyAlloc> {
 }
 
 #[test]
-fn cpp_template_instantiations_of_a_pointer_and_a_reference_are_different() {
-    // `CppRef<i32, Const>` and `CppPtr<i32, Const>` in Rust.
-    let parsed = parse_str(
+fn cpp_template_instantiations_of_a_pointer_and_a_reference_are_the_same_rust_type() {
+    // Both are `*const i32` in Rust.
+    check_fail(
         r#"
 type c++::std::pair<const i32&> {
 }
@@ -2503,10 +2517,16 @@ type c++::std::pair<const i32&> {
 type c++::std::pair<const i32*> {
 }
 "#,
-        NullCfg,
-        |_| {},
+        expect![[r#"
+            Error: another instantiation of this C++ class template is the same Rust type
+               ╭─[ test.zng:5:6 ]
+               │
+             5 │ type c++::std::pair<const i32*> {
+               │      ─────────────┬────────────  
+               │                   ╰────────────── another instantiation of this C++ class template is the same Rust type
+            ───╯
+        "#]],
     );
-    assert_eq!(parsed.spec.types.len(), 2);
 }
 
 #[test]
@@ -2558,7 +2578,7 @@ const BAR_UNIQUE_PTR_HOME: &str = r#"
 type<T> c++::std::unique_ptr<T> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
-    unsafe fn get() const -> T*;
+    unsafe fn get(&self) -> T*;
 }
 "#;
 
@@ -2569,7 +2589,7 @@ fn cpp_template_declares_a_local_home_with_defaults() {
 type<T> c++::std::unique_ptr<T> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
-    unsafe fn get() const -> T*;
+    unsafe fn get(&self) -> T*;
 }
 
 type c++::std::unique_ptr<i32> {
@@ -3001,7 +3021,7 @@ fn cpp_names_can_be_zngur_keywords() {
         r#"
 type c++::a::B {
     field const type (type = i32) as type_;
-    unsafe fn match(i32) const -> i32 as match_;
+    unsafe fn match(&self, i32) -> i32 as match_;
 }
 
 mod c++::a {
@@ -3027,7 +3047,7 @@ fn cpp_function_template_args_parse() {
 type c++::geo::Point {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
-    safe fn get<i32>() const -> i32 as get_i32;
+    safe fn get<i32>(&self) -> i32 as get_i32;
 }
 
 type c++::std::unique_ptr<c++::geo::Point> {
@@ -3182,16 +3202,16 @@ fn lifetimes_in_cpp_member_functions_are_rejected() {
     check_fail(
         r#"
 type c++::B {
-    unsafe fn name(&'a i32) const -> i32;
+    unsafe fn name(&self, &'a i32) -> i32;
 }
 "#,
         expect![[r#"
-            Error: lifetimes (`'a`) aren't supported in the signatures of C++ member functions yet
+            Error: undeclared lifetime `'a`: declare it on the function, `impl` or `type` (e.g. `fn f<'a>(...)`)
                ╭─[ test.zng:3:5 ]
                │
-             3 │     unsafe fn name(&'a i32) const -> i32;
-               │     ──────────────────┬──────────────────  
-               │                       ╰──────────────────── lifetimes (`'a`) aren't supported in the signatures of C++ member functions yet
+             3 │     unsafe fn name(&self, &'a i32) -> i32;
+               │     ───────────────────┬──────────────────  
+               │                        ╰──────────────────── undeclared lifetime `'a`: declare it on the function, `impl` or `type` (e.g. `fn f<'a>(...)`)
             ───╯
         "#]],
     );
@@ -3212,6 +3232,142 @@ type ::std::slice::Iter<i32, 'static> {
              2 │ type ::std::slice::Iter<i32, 'static> {
                │      ────────────────┬───────────────  
                │                      ╰───────────────── lifetime arguments must come before type arguments
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_member_function_without_receiver_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    safe fn value() -> i32;
+}
+"#,
+        expect![[r#"
+            Error: C++ member functions need a receiver: `&self` (`const` member functions), `&mut self` (the others) or a raw one (`const self&`, `self&`, `const self*`, `self*`); static member functions are `static fn`
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     safe fn value() -> i32;
+               │     ───────────┬───────────  
+               │                ╰───────────── C++ member functions need a receiver: `&self` (`const` member functions), `&mut self` (the others) or a raw one (`const self&`, `self&`, `const self*`, `self*`); static member functions are `static fn`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_member_function_with_trailing_const_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    safe fn value() const -> i32;
+}
+"#,
+        expect![[r#"
+            Error: C++ member functions take an explicit receiver instead of a trailing `const`: `&self` for `const` member functions, and `&mut self` for the others
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     safe fn value() const -> i32;
+               │     ──────────────┬──────────────  
+               │                   ╰──────────────── C++ member functions take an explicit receiver instead of a trailing `const`: `&self` for `const` member functions, and `&mut self` for the others
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_receivers_parse() {
+    use zngur_def::{CppIndirection, Lifetime, ZngurMethodReceiver};
+
+    let parsed = parse_str(
+        r#"
+type c++::B {
+    safe fn get<'a>(&'a self) -> &'a i32;
+    safe fn set(&mut self, i32);
+    unsafe fn raw_get(const self*) -> i32;
+    unsafe fn raw_set(self&, i32);
+    safe static fn make() -> c++::B;
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let methods = &parsed.spec.types[0].cpp_methods;
+    assert_eq!(
+        methods[0].receiver,
+        ZngurMethodReceiver::Ref(Mutability::Not)
+    );
+    assert_eq!(methods[0].receiver_lifetime, Some(Lifetime("a".to_owned())));
+    assert_eq!(methods[0].lifetimes, vec![Lifetime("a".to_owned())]);
+    assert_eq!(
+        methods[1].receiver,
+        ZngurMethodReceiver::Ref(Mutability::Mut)
+    );
+    assert_eq!(methods[1].raw_receiver, None);
+    assert_eq!(methods[1].inputs.len(), 1);
+    assert_eq!(
+        methods[2].receiver,
+        ZngurMethodReceiver::Ref(Mutability::Not)
+    );
+    assert_eq!(methods[2].raw_receiver, Some(CppIndirection::Pointer));
+    assert_eq!(
+        methods[3].receiver,
+        ZngurMethodReceiver::Ref(Mutability::Mut)
+    );
+    assert_eq!(methods[3].raw_receiver, Some(CppIndirection::Reference));
+    assert_eq!(methods[4].receiver, ZngurMethodReceiver::Static);
+}
+
+#[test]
+fn elided_lifetimes_warn() {
+    check_warnings(
+        r#"
+type c++::B {
+    safe fn get(&self) -> &i32;
+}
+"#,
+        expect![[r#"
+            Warning: this C++ member function has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `fn f<'a>(&'a self) -> &'a T`), or silence this with `#allow(elided_lifetimes)`
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     safe fn get(&self) -> &i32;
+               │     ─────────────┬─────────────  
+               │                  ╰─────────────── this C++ member function has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `fn f<'a>(&'a self) -> &'a T`), or silence this with `#allow(elided_lifetimes)`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn allow_silences_warnings() {
+    check_success(
+        r#"
+#allow(elided_lifetimes)
+#allow(safe_raw_pointer)
+
+type c++::B {
+    safe fn get(&self) -> &i32;
+    safe fn set(&mut self, const c++::B*);
+}
+"#,
+    );
+}
+
+#[test]
+fn unknown_allow_is_rejected() {
+    check_fail(
+        r#"
+#allow(everything)
+"#,
+        expect![[r#"
+            Error: unknown warning `everything` (known ones: elided_lifetimes, safe_raw_pointer)
+               ╭─[ test.zng:2:1 ]
+               │
+             2 │ #allow(everything)
+               │ ─────────┬────────  
+               │          ╰────────── unknown warning `everything` (known ones: elided_lifetimes, safe_raw_pointer)
             ───╯
         "#]],
     );

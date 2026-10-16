@@ -11,14 +11,16 @@ type c++::geo::Point {
 
     safe constructor();
     safe constructor(i32, i32);
-    safe constructor(const c++::geo::Point&);
+    safe constructor<'a>(&'a c++::geo::Point);
     unsafe constructor(const c++::geo::Point*, i32);
 }
 ```
 
-Each constructor is `safe` or `unsafe`, like the functions in `extern "C++"` blocks. Constructors
-with [C++ pointer](./cpp_pointers.md) parameters, which may be null or invalid, must be `unsafe`.
-References are fine, so copy constructors can be `safe`.
+The parameter types are written like those of [member functions](./cpp_methods.md): `&'a T` for a
+`const T&`, `&'a mut T` for a `T&`, and C++-style raw pointers. Each constructor is `safe` or
+`unsafe`, like the functions in `extern "C++"` blocks. zngur warns about `safe` constructors that
+take [raw pointers](./cpp_pointers.md), which may be null or invalid. References are fine, so copy
+constructors can be `safe`.
 
 ## In Rust
 
@@ -41,8 +43,8 @@ use zngur_lib::ZngCppConstruct;
 
 let origin = Point::build(());
 let p = Point::build((3, 4));
-let copy = Point::build((p.as_ref(),));
-let shifted = unsafe { Point::build_unchecked((p.as_ref().as_ptr(), 10)) };
+let copy = Point::build((p.as_const(),));
+let shifted = unsafe { Point::build_unchecked((p.as_const() as *const _, 10)) };
 
 let mut slot = MaybeUninit::uninit();
 Point::construct(&mut slot, (5, 6));
@@ -50,7 +52,8 @@ let q = unsafe { slot.assume_init() };
 ```
 
 `build` moves the object out of the slot it was constructed in, which is fine because objects on
-the Rust stack are trivially relocatable.
+the Rust stack are trivially relocatable. Constructors make non-`const` objects; `into_const()`
+makes one `const`.
 
 Whether a constructor is safe is the trait's `Safety` associated type: `zngur_lib::IsSafe` or
 `zngur_lib::IsUnsafe`. `construct` and `build` require `Self::Safety: zngur_lib::Safe`, which only

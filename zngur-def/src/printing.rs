@@ -535,24 +535,6 @@ impl WriteIDL for crate::ZngurFn {
     }
 }
 
-/// Explicit template arguments of a C++ function (`<c++::a::B, i32>`), if any.
-fn write_template_args<W: Write>(
-    p: &mut IDLPrinter<W>,
-    args: &[crate::RustType],
-) -> std::io::Result<()> {
-    if args.is_empty() {
-        return Ok(());
-    }
-    write!(p, "<")?;
-    for (i, arg) in args.iter().enumerate() {
-        if i > 0 {
-            write!(p, ", ")?;
-        }
-        p.write_idl(arg)?;
-    }
-    write!(p, ">")
-}
-
 impl WriteIDL for crate::ZngurCppFn {
     /// Only the declaration inside its `mod c++::<namespace>` block.
     fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
@@ -560,7 +542,7 @@ impl WriteIDL for crate::ZngurCppFn {
             let safety = if self.is_safe { "safe" } else { "unsafe" };
             let name = &self.cpp_name;
             write!(p, "{safety} fn {name}")?;
-            write_template_args(p, &self.template_args)?;
+            write_lifetimes_and_generics(p, &self.lifetimes, &self.template_args)?;
             write!(p, "(")?;
             p.write_idl(&self.inputs)?;
             write!(p, ")")?;
@@ -956,7 +938,9 @@ impl WriteIDL for crate::ZngurCppConstructor {
     fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
         if p.enabled(&IDLItem::TypeConstructor) {
             let safety = if self.is_safe { "safe" } else { "unsafe" };
-            write!(p, "{safety} constructor(")?;
+            write!(p, "{safety} constructor")?;
+            write_lifetimes_and_generics(p, &self.lifetimes, &[])?;
+            write!(p, "(")?;
             for (i, input) in self.inputs.iter().enumerate() {
                 if i > 0 {
                     write!(p, ", ")?;
@@ -977,21 +961,46 @@ impl WriteIDL for crate::ZngurCppMethod {
             let static_kw = if is_static { "static " } else { "" };
             let name = &self.cpp_name;
             write!(p, "{safety} {static_kw}fn {name}")?;
-            write_template_args(p, &self.template_args)?;
+            write_lifetimes_and_generics(p, &self.lifetimes, &self.template_args)?;
             write!(p, "(")?;
+            let receiver = match (self.receiver, self.raw_receiver) {
+                (crate::ZngurMethodReceiver::Ref(m), Some(indirection)) => {
+                    let constness = if m == crate::Mutability::Not {
+                        "const "
+                    } else {
+                        ""
+                    };
+                    let sigil = match indirection {
+                        crate::CppIndirection::Pointer => "*",
+                        crate::CppIndirection::Reference => "&",
+                    };
+                    Some(format!("{constness}self{sigil}"))
+                }
+                (crate::ZngurMethodReceiver::Ref(m), None) => {
+                    let lifetime = self
+                        .receiver_lifetime
+                        .as_ref()
+                        .map(|l| format!("{l} "))
+                        .unwrap_or_default();
+                    let mutability = if m == crate::Mutability::Mut {
+                        "mut "
+                    } else {
+                        ""
+                    };
+                    Some(format!("&{lifetime}{mutability}self"))
+                }
+                _ => None,
+            };
+            if let Some(receiver) = &receiver {
+                write!(p, "{receiver}")?;
+            }
             for (i, input) in self.inputs.iter().enumerate() {
-                if i > 0 {
+                if i > 0 || receiver.is_some() {
                     write!(p, ", ")?;
                 }
                 p.write_idl(input)?;
             }
             write!(p, ")")?;
-            if matches!(
-                self.receiver,
-                crate::ZngurMethodReceiver::Ref(crate::Mutability::Not)
-            ) {
-                write!(p, " const")?;
-            }
             if self.output != crate::RustType::UNIT {
                 write!(p, " -> ")?;
                 p.write_idl(&self.output)?;
@@ -1155,6 +1164,7 @@ fn print_cpp_function_template_args() {
     let point = crate::RustType::Cpp(vec!["geo".to_owned(), "Point".to_owned()].into());
     let spec = crate::ZngurSpec {
         cpp_funcs: vec![crate::ZngurCppFn {
+            lifetimes: vec![],
             namespace: vec!["std".to_owned()],
             cpp_name: "make_unique".to_owned(),
             template_args: vec![point.clone()],

@@ -8,7 +8,7 @@ type c++::std::unique_ptr<c++::geo::Point> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
 
-    safe fn get() const -> c++::geo::Point*;
+    safe fn get(&self) -> c++::geo::Point*;
 }
 
 type c++::std::map<i32, const c++::geo::Point*> {
@@ -28,13 +28,14 @@ Rust code names instantiations the way C++ code does:
 
 ```rust
 let p: generated::std::unique_ptr<generated::geo::Point> = make_point();
-let raw = generated::std::unique_ptr::<generated::geo::Point>::get(p.as_ref());
+let raw: *mut generated::geo::Point = p.get();
 ```
 
 `generated::std::unique_ptr<T>` is an alias, and each instantiation is its own Rust struct, with
 only the functions declared for it. Member functions, constructors and fields belong to each
 instantiation, like in C++. You can implement traits for an instantiation through the alias
-(`impl Deref for unique_ptr<Point>`), but not add inherent methods to it.
+(`impl Deref for unique_ptr<Point>`), but not add inherent methods to it. The alias's last
+parameter is the constness: `unique_ptr<Point, Const>` is a `const std::unique_ptr<Point>`.
 
 zngur marks `std::unique_ptr` (with the default deleter) as trivially relocatable, so it can be
 held by value. For your own templates, specialize `rust::is_trivially_relocatable` as usual:
@@ -54,7 +55,7 @@ type<T> c++::std::unique_ptr<T> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
 
-    safe fn get() const -> T*;
+    safe fn get(&self) -> T*;
 }
 
 // Both get the layout, `#trivially_relocatable` and `get()`.
@@ -81,7 +82,7 @@ home.
 type<T> c++::std::unique_ptr<T> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
-    safe fn get() const -> T*;
+    safe fn get(&self) -> T*;
 }
 ```
 

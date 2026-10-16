@@ -284,14 +284,22 @@ impl TriviallyRelocatable {
 pub struct ZngurCppMethod {
     /// The name of the C++ member function.
     pub cpp_name: String,
+    /// The lifetime parameters that it declares (`fn get<'a>(&'a self) -> &'a i32;`).
+    pub lifetimes: Vec<Lifetime>,
     /// Explicit template arguments of a member function template (`fn get<i32>() -> i32;`).
     pub template_args: Vec<RustType>,
     /// The name of the Rust function (from `as`), if it isn't `cpp_name`.
     pub rust_name: Option<String>,
-    /// `Static` for static member functions, `Ref(Not)` for `const` member functions, and
-    /// `Ref(Mut)` for the others. The Rust function takes the object as its first argument, as a
-    /// `zngur_lib::CppRef<Const<Self>>` or a `zngur_lib::CppRef<Self>`.
+    /// `Static` for static member functions, `Ref(Not)` for `const` member functions (`&self`,
+    /// a method of `Self<C>` for both constnesses), and `Ref(Mut)` for the others (`&mut self`, a
+    /// method of `Self<NonConst>`).
     pub receiver: ZngurMethodReceiver,
+    /// The lifetime of a `&'a self` / `&'a mut self` receiver.
+    pub receiver_lifetime: Option<Lifetime>,
+    /// For a raw receiver (`const self&`, `self*`, ...), whether it's a C++ reference or pointer.
+    /// The Rust function is then an associated function taking `this: *const Self<C>` or
+    /// `this: *mut Self`, rather than a method.
+    pub raw_receiver: Option<CppIndirection>,
     pub inputs: Vec<RustType>,
     pub output: RustType,
     pub is_safe: bool,
@@ -322,14 +330,16 @@ impl ZngurCppMethod {
 /// implements `zngur_lib::ZngCppConstruct<(inputs...,)>` for it, which runs it in place.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct ZngurCppConstructor {
+    /// The lifetime parameters that it declares (`safe constructor<'a>(&'a c++::B);`).
+    pub lifetimes: Vec<Lifetime>,
     pub inputs: Vec<RustType>,
     pub is_safe: bool,
 }
 
 /// An accessor for a field (data member) of a C++ type, declared like `field const x (type = i32);`
-/// or `field x (type = i32) as x_mut;`. zngur generates a Rust function that takes `this` as a
-/// `zngur_lib::CppRef<Const<Self>>` and returns a `CppRef<Const<ty>>` to the field for `const`
-/// accessors, and `CppRef<Self>` and `CppRef<ty>` for the others.
+/// or `field x (type = i32) as x_mut;`. zngur generates a method that returns a reference to the
+/// field: `fn x(&self) -> &ty` for `const` accessors (on `Self<C>`), and
+/// `fn x_mut(&mut self) -> &mut ty` for the others (on `Self<NonConst>`).
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct ZngurCppField {
     /// The name of the C++ field.
@@ -352,11 +362,14 @@ impl ZngurCppField {
     pub fn as_cpp_method(&self) -> ZngurCppMethod {
         ZngurCppMethod {
             cpp_name: self.name.clone(),
+            lifetimes: vec![],
             template_args: vec![],
             rust_name: self.rust_name.clone(),
             receiver: ZngurMethodReceiver::Ref(self.mutability),
+            receiver_lifetime: None,
+            raw_receiver: None,
             inputs: vec![],
-            output: RustType::cpp_ptr(self.mutability, CppIndirection::Reference, self.ty.clone()),
+            output: RustType::Ref(self.mutability, None, Box::new(self.ty.clone())),
             is_safe: false,
         }
     }
@@ -376,6 +389,8 @@ pub struct ZngurCppFn {
     pub template_args: Vec<RustType>,
     /// The name of the Rust function (from `as`), if it isn't `cpp_name`.
     pub rust_name: Option<String>,
+    /// The lifetime parameters that it declares.
+    pub lifetimes: Vec<Lifetime>,
     pub inputs: Vec<RustType>,
     pub output: RustType,
     pub is_safe: bool,
@@ -554,10 +569,10 @@ pub enum RustType {
     /// A C++ type, declared with a `c++::` path. Its C++ name is the path, e.g. `c++::a::B` is
     /// `::a::B`, and `c++::std::unique_ptr<c++::a::B>` is `::std::unique_ptr<::a::B>`.
     Cpp(CppTypePath),
-    /// A C++ pointer or reference (`T*` or `T&` in the `.zng` file) to a `T`, which is `const` if
-    /// it's a [`RustType::CppConst`] (`const T*`, `const T&`). In Rust, pointers are a
-    /// `zngur_lib::CppPtr<T>`, which may be null or invalid, and references a
-    /// `zngur_lib::CppRef<T>`, which refers to a valid object.
+    /// A C++-style pointer or reference (`T*` or `T&` in the `.zng` file) to a `T`, which is
+    /// `const` if it's a [`RustType::CppConst`] (`const T*`, `const T&`). Both are raw pointers in
+    /// Rust (`*const T<Const>` / `*mut T`), which may be null or invalid. (C++ references with a
+    /// lifetime are Rust references, [`RustType::Ref`].)
     CppPtr(CppIndirection, Box<RustType>),
     /// A `const` C++ type (`const T` in the `.zng` file), where `T` is a `c++::` type or a builtin.
     /// It's a `zngur_lib::Const<T>` in Rust. It's the pointee of C++ pointers and references to
@@ -612,6 +627,36 @@ impl RustType {
             Mutability::Mut => ty,
         };
         RustType::CppPtr(indirection, Box::new(pointee))
+    }
+
+    /// The Rust type of `self` in the signature of a C++ function (member function, free function,
+    /// constructor or field accessor): a shared reference to a C++ class is a reference to a
+    /// `const` object (`&'a T` is `&'a T<Const>`, a C++ `const T&`).
+    pub fn in_cpp_signature(&self) -> RustType {
+        match self {
+            RustType::Ref(Mutability::Not, lifetime, inner)
+                if matches!(**inner, RustType::Cpp(_)) =>
+            {
+                RustType::Ref(
+                    Mutability::Not,
+                    lifetime.clone(),
+                    Box::new(RustType::CppConst(inner.clone())),
+                )
+            }
+            ty => ty.clone(),
+        }
+    }
+
+    /// How `self` crosses to C++ in a C++ function's signature: Rust references are C++ references
+    /// (`&'a T` is `const T&`, and `&'a mut T` is `T&`), which cross as pointers like the raw
+    /// C++-style ones.
+    pub fn cpp_bridge_type(&self) -> RustType {
+        match self {
+            RustType::Ref(m, _, inner) => {
+                RustType::cpp_ptr(*m, CppIndirection::Reference, (**inner).clone())
+            }
+            ty => ty.clone(),
+        }
     }
 
     /// For a C++ pointer or reference, its kind, whether it's to `const` and the type it points to
@@ -920,14 +965,25 @@ impl Display for RustType {
             RustType::Slice(s) => write!(f, "[{s}]"),
             RustType::TypeVar(TypeVar(v)) => write!(f, "{v}"),
             RustType::Cpp(path) => write!(f, "{path}"),
-            RustType::CppPtr(indirection, ty) => {
-                let wrapper = match indirection {
-                    CppIndirection::Pointer => "CppPtr",
-                    CppIndirection::Reference => "CppRef",
-                };
-                write!(f, "::zngur_lib::{wrapper}<{ty}>")
-            }
-            RustType::CppConst(ty) => write!(f, "::zngur_lib::Const<{ty}>"),
+            // C++-style pointers and references are raw pointers in Rust.
+            RustType::CppPtr(_, pointee) => match &**pointee {
+                RustType::CppConst(inner) => match &**inner {
+                    RustType::Primitive(_) => write!(f, "*const {inner}"),
+                    _ => write!(f, "*const {pointee}"),
+                },
+                pointee => write!(f, "*mut {pointee}"),
+            },
+            RustType::CppConst(inner) => match &**inner {
+                // `const` C++ classes have a constness parameter: `a::B::<::zngur_lib::Const>`.
+                RustType::Cpp(path) => {
+                    write!(f, "{}::<", path.path.join("::"))?;
+                    for g in &path.generics {
+                        write!(f, "{g}, ")?;
+                    }
+                    write!(f, "::zngur_lib::Const>")
+                }
+                inner => write!(f, "::zngur_lib::ConstValue<{inner}>"),
+            },
         }
     }
 }
@@ -943,16 +999,36 @@ mod tests {
             CppIndirection::Reference,
             RustType::Cpp(vec!["a".to_owned(), "Name".to_owned()].into()),
         );
+        // C++-style pointers and references are raw pointers.
+        assert_eq!(ty.to_string(), "*const a::Name::<::zngur_lib::Const>");
+        let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+        let ty = RustType::cpp_ptr(Mutability::Mut, CppIndirection::Pointer, i32.clone());
+        assert_eq!(ty.to_string(), "*mut i32");
+        let ty = RustType::cpp_ptr(Mutability::Not, CppIndirection::Pointer, i32.clone());
+        assert_eq!(ty.to_string(), "*const i32");
+    }
+
+    #[test]
+    fn test_references_in_cpp_signatures() {
+        let name = RustType::Cpp(vec!["a".to_owned(), "Name".to_owned()].into());
+        let lifetime = Some(Lifetime("a".to_owned()));
+        let shared = RustType::Ref(Mutability::Not, lifetime.clone(), Box::new(name.clone()));
         assert_eq!(
-            ty.to_string(),
-            "::zngur_lib::CppRef<::zngur_lib::Const<a::Name>>"
+            shared.in_cpp_signature().to_string(),
+            "&'a a::Name::<::zngur_lib::Const>"
         );
-        let ty = RustType::cpp_ptr(
-            Mutability::Mut,
-            CppIndirection::Pointer,
-            RustType::Primitive(PrimitiveRustType::Int(32)),
+        assert_eq!(
+            shared.cpp_bridge_type(),
+            RustType::cpp_ptr(Mutability::Not, CppIndirection::Reference, name.clone())
         );
-        assert_eq!(ty.to_string(), "::zngur_lib::CppPtr<i32>");
+        let exclusive = RustType::Ref(Mutability::Mut, lifetime, Box::new(name));
+        assert_eq!(exclusive.in_cpp_signature().to_string(), "&'a mut a::Name");
+        let builtin = RustType::Ref(
+            Mutability::Not,
+            None,
+            Box::new(RustType::Primitive(PrimitiveRustType::Int(32))),
+        );
+        assert_eq!(builtin.in_cpp_signature().to_string(), "&i32");
     }
 
     #[test]
@@ -966,7 +1042,18 @@ mod tests {
             span.cpp_spelling().unwrap(),
             "::std::span< const ::int32_t >"
         );
-        assert_eq!(span.to_string(), "std::span::<::zngur_lib::Const<i32>>");
+        assert_eq!(
+            span.to_string(),
+            "std::span::<::zngur_lib::ConstValue<i32>>"
+        );
+        let unique_ptr = RustType::CppConst(Box::new(RustType::Cpp(CppTypePath {
+            path: vec!["std".to_owned(), "unique_ptr".to_owned()],
+            generics: vec![RustType::Cpp(vec!["a".to_owned(), "B".to_owned()].into())],
+        })));
+        assert_eq!(
+            unique_ptr.to_string(),
+            "std::unique_ptr::<a::B, ::zngur_lib::Const>"
+        );
         let ptr = RustType::cpp_ptr(Mutability::Not, CppIndirection::Pointer, i32.clone());
         assert_eq!(ptr.cpp_spelling().unwrap(), "const ::int32_t*");
         assert_eq!(

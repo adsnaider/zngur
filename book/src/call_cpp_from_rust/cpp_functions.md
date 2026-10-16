@@ -5,8 +5,9 @@ zngur can call free C++ functions directly, with no C++ code to write. Declare t
 
 ```zng
 mod c++::geo {
-    safe fn distance(const c++::geo::Point&, const c++::geo::Point&) -> f64;
+    safe fn distance(&c++::geo::Point, &c++::geo::Point) -> f64;
     unsafe fn normalize(c++::geo::Point*);
+    safe fn longer<'a>(&'a c++::geo::Line, &'a c++::geo::Line) -> &'a c++::geo::Line;
     safe fn origin() -> c++::geo::Point;
     safe fn scale(f64) -> f64;
     safe fn scale(i32) -> i32 as scale_i32;
@@ -16,15 +17,17 @@ mod c++::geo {
 - The parameter and return types are the C++ ones, written as zngur types: builtins like `i32`,
   C++ types that Rust holds by value, and [C++ references and pointers](./cpp_pointers.md).
 - `as` gives the Rust function a different name, e.g. for C++ overloads, which Rust doesn't have.
-- Each function is `safe` or `unsafe`, like the functions in `extern "C++"` blocks. Functions with
-  C++ pointer parameters, which may be null or invalid, must be `unsafe`. C++ references are fine.
+- Lifetimes are declared like in Rust (`fn longer<'a>(...)`), and should be named, since zngur
+  can't check them against C++ ([Lifetimes](../lifetimes.md)).
+- Each function is `safe` or `unsafe`, like the functions in `extern "C++"` blocks. zngur warns about
+  `safe` functions with raw-pointer parameters, which may be null or invalid. References are fine.
 - Functions in the global namespace aren't supported.
 
 In Rust, each one is a function at the same path in the `c++::` tree as its namespace:
 
 ```rust
 let o = generated::geo::origin();
-let d = generated::geo::distance(o.as_ref(), p.as_ref());
+let d = generated::geo::distance(o.as_const(), p.as_const());
 ```
 
 zngur generates the C++ function that calls it, like for

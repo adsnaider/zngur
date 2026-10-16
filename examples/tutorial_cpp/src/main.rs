@@ -12,22 +12,14 @@ impl std::ops::Deref for unique_ptr<Inventory> {
 
     fn deref(&self) -> &Inventory {
         // SAFETY: The `unique_ptr` owns a valid object, which lives as long as it does.
-        unsafe {
-            unique_ptr::<Inventory>::get(self.as_ref())
-                .as_ref()
-                .unwrap()
-        }
+        unsafe { self.get().as_ref().unwrap() }
     }
 }
 
 impl std::ops::DerefMut for unique_ptr<Inventory> {
     fn deref_mut(&mut self) -> &mut Inventory {
         // SAFETY: As above, and `&mut self` makes the access exclusive.
-        unsafe {
-            unique_ptr::<Inventory>::get(self.as_ref())
-                .as_mut()
-                .unwrap()
-        }
+        unsafe { self.get().as_mut().unwrap() }
     }
 }
 

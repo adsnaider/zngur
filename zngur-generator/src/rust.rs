@@ -183,6 +183,35 @@ impl IntoCpp for RustType {
     }
 }
 
+/// The receiver of the Rust function for a C++ member function.
+pub enum CppRustReceiver {
+    /// A static member function.
+    Static,
+    /// A method: `&'a self` (`const` member functions) or `&'a mut self`.
+    Ref {
+        mutability: Mutability,
+        lifetime: Option<Lifetime>,
+    },
+    /// An associated function taking `this: *const Self` (`const` member functions) or
+    /// `this: *mut Self`.
+    Raw { mutability: Mutability },
+}
+
+impl CppRustReceiver {
+    /// Whether it's for a `const` member function, which both constnesses have.
+    fn is_const(&self) -> bool {
+        matches!(
+            self,
+            CppRustReceiver::Ref {
+                mutability: Mutability::Not,
+                ..
+            } | CppRustReceiver::Raw {
+                mutability: Mutability::Not
+            }
+        )
+    }
+}
+
 pub struct RustFile {
     pub text: String,
     pub panic_to_exception: bool,
@@ -1174,51 +1203,93 @@ pub {}fn {rust_name}{}("#,
     }
 
     /// Adds the Rust function for a C++ member function of `owner`, which calls the C++ bridge
-    /// function whose (mangled) name is returned. `this` is the type of the object argument
-    /// (a `CppPtr` to `owner`), or `None` for static member functions.
+    /// function whose (mangled) name is returned. `const` member functions (including `const`
+    /// field accessors) are in an `impl<C> T<C>` block, so both constnesses have them, and the
+    /// others in an `impl T` (`T<NonConst>`) block. `inputs` and `output` are their Rust types (see
+    /// `RustType::in_cpp_signature`).
+    #[allow(clippy::too_many_arguments)]
     pub fn add_cpp_method(
         &mut self,
         owner: &RustType,
         rust_name: &str,
-        this: Option<RustType>,
+        lifetimes: &[Lifetime],
+        receiver: CppRustReceiver,
         inputs: &[RustType],
         output: &RustType,
         is_safe: bool,
     ) -> String {
         let mangled_name = self.mangle_name(&format!("{owner}_cpp_method_{rust_name}"));
-        let inputs: Vec<RustType> = this.into_iter().chain(inputs.iter().cloned()).collect();
+        let has_this = !matches!(receiver, CppRustReceiver::Static);
+        let n_args = inputs.len() + usize::from(has_this);
         w!(
             self,
             r#"
 unsafe extern "C" {{ fn {mangled_name}("#
         );
-        for n in 0..inputs.len() {
+        for n in 0..n_args {
             w!(self, "i{n}: *mut u8, ");
         }
         wln!(self, r#"o: *mut u8); }}"#);
         let target = self.impl_target(owner);
+        let impl_header = if receiver.is_const() {
+            format!("impl<C: ::zngur_lib::Constness> {target}<C>")
+        } else {
+            format!("impl {target}")
+        };
         w!(
             self,
             r#"
-impl {target} {{
+{impl_header} {{
 #[allow(non_snake_case, clippy::too_many_arguments)]
-pub {}fn {rust_name}("#,
-            if is_safe { "" } else { "unsafe " }
+pub {}fn {rust_name}{}("#,
+            if is_safe { "" } else { "unsafe " },
+            lifetime_params(lifetimes)
         );
+        match &receiver {
+            CppRustReceiver::Static => {}
+            CppRustReceiver::Ref {
+                mutability,
+                lifetime,
+            } => {
+                let lifetime = lifetime
+                    .as_ref()
+                    .map(|l| format!("{l} "))
+                    .unwrap_or_default();
+                let m = if *mutability == Mutability::Mut {
+                    "mut "
+                } else {
+                    ""
+                };
+                w!(self, "&{lifetime}{m}self, ");
+            }
+            CppRustReceiver::Raw { mutability } => {
+                let ptr = if *mutability == Mutability::Mut {
+                    "*mut"
+                } else {
+                    "*const"
+                };
+                w!(self, "i0: {ptr} Self, ");
+            }
+        }
+        let offset = usize::from(has_this);
         for (n, ty) in inputs.iter().enumerate() {
-            w!(self, "i{n}: {ty}, ");
+            w!(self, "i{}: {ty}, ", n + offset);
         }
         wln!(self, ") -> {output} {{ unsafe {{");
-        self.call_cpp_function(&format!("{mangled_name}("), inputs.len());
+        if matches!(receiver, CppRustReceiver::Ref { .. }) {
+            wln!(self, "let i0 = self;");
+        }
+        self.call_cpp_function(&format!("{mangled_name}("), n_args);
         wln!(self, "}} }} }}");
         mangled_name
     }
 
     /// Adds the Rust function `name` for a free C++ function, which calls the C++ bridge function
-    /// whose (mangled) name is returned.
+    /// whose (mangled) name is returned. `inputs` and `output` are their Rust types.
     pub fn add_cpp_function(
         &mut self,
         name: &str,
+        lifetimes: &[Lifetime],
         inputs: &[RustType],
         output: &RustType,
         is_safe: bool,
@@ -1238,8 +1309,9 @@ unsafe extern "C" {{ fn {mangled_name}("#
             r#"
 #[doc(hidden)]
 #[allow(non_snake_case, clippy::too_many_arguments)]
-pub {}fn {name}("#,
-            if is_safe { "" } else { "unsafe " }
+pub {}fn {name}{}("#,
+            if is_safe { "" } else { "unsafe " },
+            lifetime_params(lifetimes)
         );
         for (n, ty) in inputs.iter().enumerate() {
             w!(self, "i{n}: {ty}, ");
@@ -1252,7 +1324,7 @@ pub {}fn {name}("#,
 
     /// Adds the `zngur_lib::ZngCppConstruct` impl for the C++ constructor `constructor` of
     /// `owner` (its `index`th one), which calls the C++ bridge function whose (mangled) name is
-    /// returned.
+    /// returned. Only non-`const` objects are constructed (`into_const()` makes them `const`).
     pub fn add_cpp_constructor(
         &mut self,
         owner: &RustType,
@@ -1260,7 +1332,11 @@ pub {}fn {name}("#,
         constructor: &ZngurCppConstructor,
     ) -> String {
         let mangled_name = self.mangle_name(&format!("{owner}_cpp_constructor_{index}"));
-        let inputs = &constructor.inputs;
+        let inputs: Vec<RustType> = constructor
+            .inputs
+            .iter()
+            .map(RustType::in_cpp_signature)
+            .collect();
         let args_ty: String = inputs.iter().map(|ty| format!("{ty}, ")).collect();
         let args_pattern: String = (0..inputs.len()).map(|n| format!("i{n}, ")).collect();
         let safety = if constructor.is_safe {
@@ -1268,6 +1344,7 @@ pub {}fn {name}("#,
         } else {
             "IsUnsafe"
         };
+        let lifetimes = lifetime_params(&constructor.lifetimes);
         w!(
             self,
             r#"
@@ -1280,7 +1357,7 @@ unsafe extern "C" {{ fn {mangled_name}("#
         wln!(
             self,
             r#"
-unsafe impl ::zngur_lib::ZngCppConstruct<({args_ty})> for {owner} {{
+unsafe impl{lifetimes} ::zngur_lib::ZngCppConstruct<({args_ty})> for {owner} {{
     type Safety = ::zngur_lib::{safety};
 
     #[allow(unused_mut)]

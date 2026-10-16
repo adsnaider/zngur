@@ -416,10 +416,10 @@ fn reparse_cpp_methods() {
 type c++::a::B {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
-    unsafe fn value() const -> i32;
-    unsafe fn set(i32, const c++::a::B&);
+    unsafe fn value(&self) -> i32;
+    unsafe fn set(&mut self, i32, const c++::a::B&);
     safe static fn make(i32) -> c++::a::B;
-    unsafe fn get(i32) const -> const i32& as get_const;
+    unsafe fn get<'a>(&'a self, i32) -> &'a i32 as get_const;
     safe constructor();
     safe constructor(i32, i32);
     unsafe constructor(const c++::a::B&);
@@ -441,10 +441,10 @@ type c++::a::B {
                 safe constructor(i32, i32);
                 unsafe constructor(const c++::a::B&);
 
-                unsafe fn value() const -> i32;
-                unsafe fn set(i32, const c++::a::B&);
+                unsafe fn value(&self) -> i32;
+                unsafe fn set(&mut self, i32, const c++::a::B&);
                 safe static fn make(i32) -> c++::a::B;
-                unsafe fn get(i32) const -> const i32& as get_const;
+                unsafe fn get<'a>(&'a self, i32) -> &'a i32 as get_const;
             }
         "##]],
     );
@@ -458,7 +458,7 @@ fn reparse_cpp_templates() {
 type c++::std::unique_ptr<c++::a::B> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
-    unsafe fn get() const -> c++::a::B*;
+    unsafe fn get(&self) -> c++::a::B*;
 }
 type c++::std::map<i32, const c++::a::B*> {
 }
@@ -470,7 +470,7 @@ type c++::std::map<i32, const c++::a::B*> {
                 #layout(size = 8, align = 8);
                 #trivially_relocatable;
 
-                unsafe fn get() const -> c++::a::B*;
+                unsafe fn get(&self) -> c++::a::B*;
             }
 
             type c++::std::map<i32, const c++::a::B*> {
@@ -486,7 +486,7 @@ fn reparse_cpp_template_home() {
 type<T> c++::std::unique_ptr<T> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
-    unsafe fn get() const -> T*;
+    unsafe fn get(&self) -> T*;
 }
 type c++::std::unique_ptr<i32> {
 }
@@ -496,14 +496,14 @@ type c++::std::unique_ptr<i32> {
                 #layout(size = 8, align = 8);
                 #trivially_relocatable;
 
-                unsafe fn get() const -> T*;
+                unsafe fn get(&self) -> T*;
             }
 
             type c++::std::unique_ptr<i32> {
                 #layout(size = 8, align = 8);
                 #trivially_relocatable;
 
-                unsafe fn get() const -> i32*;
+                unsafe fn get(&self) -> i32*;
             }
         "#]],
     );
@@ -731,6 +731,44 @@ extern "C++" {
                     safe fn first(&'a self) -> &'a str;
                 }
 
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn reparse_cpp_receivers() {
+    check_round_trip(
+        r#"
+type c++::a::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe fn get<'a>(&'a self) -> &'a i32;
+    safe fn set<'a>(&'a mut self, &'a c++::a::B);
+    unsafe fn raw_get(const self*) -> i32;
+    unsafe fn raw_set(self&, i32);
+    safe constructor<'a>(&'a c++::a::B);
+}
+
+mod c++::a {
+    safe fn pick<'a>(&'a c++::a::B, &'a c++::a::B) -> &'a c++::a::B;
+}
+"#,
+        expect![[r#"
+            type c++::a::B {
+                #layout(size = 8, align = 4);
+                #trivially_relocatable;
+
+                safe constructor<'a>(&'a c++::a::B);
+
+                safe fn get<'a>(&'a self) -> &'a i32;
+                safe fn set<'a>(&'a mut self, &'a c++::a::B);
+                unsafe fn raw_get(const self*) -> i32;
+                unsafe fn raw_set(self&, i32);
+            }
+
+            mod c++::a {
+                safe fn pick<'a>(&'a c++::a::B, &'a c++::a::B) -> &'a c++::a::B;
             }
         "#]],
     );

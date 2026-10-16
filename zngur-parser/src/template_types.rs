@@ -302,6 +302,7 @@ pub fn try_match_template(ty: &RustType, template: &ZngurType) -> Option<Templat
         cpp_constructors: cpp_constructors
             .iter()
             .map(|c| ZngurCppConstructor {
+                lifetimes: c.lifetimes.clone(),
                 inputs: c.inputs.iter().map(substitute).collect(),
                 is_safe: c.is_safe,
             })

@@ -14,6 +14,7 @@ use cpp_template::{CppTemplates, cpp_template, struct_name};
 use indexmap::map::Entry;
 use itertools::Itertools;
 use rust::CoroSupport;
+use rust::CppRustReceiver;
 use rust::IntoCpp;
 
 pub mod cpp;
@@ -173,18 +174,30 @@ impl ZngurGenerator {
             // calls the member function.
             if let Some(owner_cpp_type) = &cpp_name {
                 for method in &ty_def.cpp_methods {
-                    let this = match method.receiver {
-                        ZngurMethodReceiver::Ref(m) => {
-                            Some(RustType::cpp_ptr(m, CppIndirection::Reference, ty.clone()))
+                    let receiver = match (method.receiver, method.raw_receiver) {
+                        (ZngurMethodReceiver::Ref(mutability), None) => CppRustReceiver::Ref {
+                            mutability,
+                            lifetime: method.receiver_lifetime.clone(),
+                        },
+                        (ZngurMethodReceiver::Ref(mutability), Some(_)) => {
+                            CppRustReceiver::Raw { mutability }
                         }
-                        ZngurMethodReceiver::Static | ZngurMethodReceiver::Move => None,
+                        (ZngurMethodReceiver::Static | ZngurMethodReceiver::Move, _) => {
+                            CppRustReceiver::Static
+                        }
                     };
+                    let inputs: Vec<RustType> = method
+                        .inputs
+                        .iter()
+                        .map(RustType::in_cpp_signature)
+                        .collect();
                     let mangled_name = rust_file.add_cpp_method(
                         ty,
                         method.rust_name(),
-                        this,
-                        &method.inputs,
-                        &method.output,
+                        &method.lifetimes,
+                        receiver,
+                        &inputs,
+                        &method.output.in_cpp_signature(),
                         method.is_safe,
                     );
                     cpp_file.cpp_method_bridges.push(bridges.method(
@@ -197,14 +210,16 @@ impl ZngurGenerator {
                 // Field accessors: like `const` / non-`const` member functions that return a
                 // reference to the field.
                 for field in &ty_def.cpp_fields {
-                    let this =
-                        RustType::cpp_ptr(field.mutability, CppIndirection::Reference, ty.clone());
                     let mangled_name = rust_file.add_cpp_method(
                         ty,
                         field.rust_name(),
-                        Some(this),
                         &[],
-                        &field.as_cpp_method().output,
+                        CppRustReceiver::Ref {
+                            mutability: field.mutability,
+                            lifetime: None,
+                        },
+                        &[],
+                        &field.as_cpp_method().output.in_cpp_signature(),
                         // `this` refers to a valid object, so its field is valid too.
                         true,
                     );
@@ -299,19 +314,21 @@ impl ZngurGenerator {
                 };
                 let struct_def = format!(
                     r#"
+    /// `{type_name}<::zngur_lib::Const>` is a `const` object (see `zngur_lib::Constness`).
     #[repr(C)]
     #[repr(align({align}))]
     #[allow(non_camel_case_types)]
-    pub struct {type_name} {{
+    pub struct {type_name}<C: ::zngur_lib::Constness = ::zngur_lib::NonConst> {{
       pub(crate) buffer: ::core::cell::UnsafeCell<::core::mem::MaybeUninit<[u8; {size}]>>,
       _no_auto_traits: ::core::marker::PhantomData<*mut ()>,
       _pinned: ::core::marker::PhantomPinned,
+      _constness: ::core::marker::PhantomData<C>,
     }}
 
-    unsafe impl ::zngur_lib::ZngCppObject for {type_name} {{}}
-    unsafe impl ::zngur_lib::ZngCppStackObject for {type_name} {{}}
+    unsafe impl<C: ::zngur_lib::Constness> ::zngur_lib::ZngCppObject for {type_name}<C> {{}}
+    unsafe impl<C: ::zngur_lib::Constness> ::zngur_lib::ZngCppStackObject for {type_name}<C> {{}}
 
-    unsafe impl ::zngur_lib::ZngCppDestruct for {type_name} {{
+    unsafe impl<C: ::zngur_lib::Constness> ::zngur_lib::ZngCppDestruct for {type_name}<C> {{
         unsafe fn destruct(&mut self) {{
             unsafe extern "C" {{
                 fn {mangled_name}(i0: *mut u8, o: *mut u8);
@@ -323,7 +340,7 @@ impl ZngurGenerator {
         }}
     }}
 
-    impl Drop for {type_name} {{
+    impl<C: ::zngur_lib::Constness> Drop for {type_name}<C> {{
         fn drop(&mut self) {{
             use ::zngur_lib::ZngCppDestruct;
             unsafe {{
@@ -333,16 +350,23 @@ impl ZngurGenerator {
     }}
 
     impl {type_name} {{
-        /// A C++ reference to `const` (`const T&`) to this object.
-        #[allow(dead_code, clippy::should_implement_trait)]
-        pub fn as_ref(&self) -> ::zngur_lib::CppRef<::zngur_lib::Const<Self>> {{
-            ::zngur_lib::CppRef::from(self)
+        /// This object, as a `const` object.
+        #[allow(dead_code)]
+        pub fn as_const(&self) -> &{type_name}<::zngur_lib::Const> {{
+            unsafe {{ &*(self as *const Self as *const {type_name}<::zngur_lib::Const>) }}
         }}
 
-        /// A C++ reference (`T&`) to this object.
-        #[allow(dead_code, clippy::should_implement_trait)]
-        pub fn as_mut(&mut self) -> ::zngur_lib::CppRef<Self> {{
-            ::zngur_lib::CppRef::from(self)
+        /// This object, as a `const` object that nothing else can access meanwhile.
+        #[allow(dead_code)]
+        pub fn as_const_mut(&mut self) -> &mut {type_name}<::zngur_lib::Const> {{
+            unsafe {{ &mut *(self as *mut Self as *mut {type_name}<::zngur_lib::Const>) }}
+        }}
+
+        /// Makes this object `const`.
+        #[allow(dead_code)]
+        pub fn into_const(self) -> {type_name}<::zngur_lib::Const> {{
+            let this = ::core::mem::ManuallyDrop::new(self);
+            unsafe {{ ::core::ptr::read(&*this as *const Self as *const {type_name}<::zngur_lib::Const>) }}
         }}
     }}
 "#
@@ -354,10 +378,28 @@ impl ZngurGenerator {
                     &mut rust_file,
                     &format!(
                         r#"
+    /// `{type_name}<::zngur_lib::Const>` is a `const` object (see `zngur_lib::Constness`).
     #[allow(non_camel_case_types)]
-    pub struct {type_name}(());
+    pub struct {type_name}<C: ::zngur_lib::Constness = ::zngur_lib::NonConst>(
+        ::core::marker::PhantomData<C>,
+        (),
+    );
 
-    unsafe impl ::zngur_lib::ZngCppObject for {type_name} {{}}
+    unsafe impl<C: ::zngur_lib::Constness> ::zngur_lib::ZngCppObject for {type_name}<C> {{}}
+
+    impl {type_name} {{
+        /// This object, as a `const` object.
+        #[allow(dead_code)]
+        pub fn as_const(&self) -> &{type_name}<::zngur_lib::Const> {{
+            unsafe {{ &*(self as *const Self as *const {type_name}<::zngur_lib::Const>) }}
+        }}
+
+        /// This object, as a `const` object that nothing else can access meanwhile.
+        #[allow(dead_code)]
+        pub fn as_const_mut(&mut self) -> &mut {type_name}<::zngur_lib::Const> {{
+            unsafe {{ &mut *(self as *mut Self as *mut {type_name}<::zngur_lib::Const>) }}
+        }}
+    }}
 "#
                     ),
                 );
@@ -582,8 +624,15 @@ impl ZngurGenerator {
             let rust_name = func.rust_name();
             // `__` separators, so that `a::b_c` and `a_b::c` don't collide.
             let hidden_name = format!("__zngur_cpp_fn__{}__{rust_name}", func.namespace.join("__"));
-            let mangled_name =
-                rust_file.add_cpp_function(&hidden_name, &func.inputs, &func.output, func.is_safe);
+            let inputs: Vec<RustType> =
+                func.inputs.iter().map(RustType::in_cpp_signature).collect();
+            let mangled_name = rust_file.add_cpp_function(
+                &hidden_name,
+                &func.lifetimes,
+                &inputs,
+                &func.output.in_cpp_signature(),
+                func.is_safe,
+            );
             let supers = "super::".repeat(func.namespace.len());
             cpp_tree.insert(
                 &func.namespace,
@@ -808,7 +857,10 @@ mod tests {
             ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
         assert!(rust_code.contains("pub mod a {"));
         assert!(rust_code.contains("pub mod b {"));
-        assert!(rust_code.contains("pub struct Name(());"));
+        assert!(
+            rust_code
+                .contains("pub struct Name<C: ::zngur_lib::Constness = ::zngur_lib::NonConst>(")
+        );
     }
 
     #[test]
@@ -820,8 +872,13 @@ mod tests {
         let (rust_code, h, _cpp) =
             ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
         assert!(rust_code.contains("pub mod geo {"));
-        assert!(rust_code.contains("pub struct Point {"));
-        assert!(rust_code.contains("unsafe impl ::zngur_lib::ZngCppStackObject for Point {}"));
+        assert!(
+            rust_code
+                .contains("pub struct Point<C: ::zngur_lib::Constness = ::zngur_lib::NonConst> {")
+        );
+        assert!(rust_code.contains(
+            "unsafe impl<C: ::zngur_lib::Constness> ::zngur_lib::ZngCppStackObject for Point<C> {}"
+        ));
         assert!(h.contains(
             "static_assert(::rust::is_trivially_relocatable< ::geo::Point >::value, \"Type must \
              be trivially relocatable\");"
@@ -839,7 +896,9 @@ mod tests {
         };
         let (rust_code, h, _cpp) =
             ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
-        assert!(rust_code.contains("unsafe impl ::zngur_lib::ZngCppStackObject for Point {}"));
+        assert!(rust_code.contains(
+            "unsafe impl<C: ::zngur_lib::Constness> ::zngur_lib::ZngCppStackObject for Point<C> {}"
+        ));
         // The layout is still checked, but not that the type is trivially relocatable.
         assert!(h.contains("static_assert(sizeof(::geo::Point) == 16, \"Size mismatch\");"));
         assert!(
@@ -860,7 +919,10 @@ mod tests {
         let (rust_code, h, _cpp) =
             ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
         // Zero-sized in Rust...
-        assert!(rust_code.contains("pub struct Point(());"));
+        assert!(
+            rust_code
+                .contains("pub struct Point<C: ::zngur_lib::Constness = ::zngur_lib::NonConst>(")
+        );
         assert!(!rust_code.contains("ZngCppStackObject"));
         // ...but the layout is still checked in C++.
         assert!(h.contains("static_assert(sizeof(::geo::Point) == 16, \"Size mismatch\");"));
@@ -956,18 +1018,24 @@ mod tests {
         ty.cpp_methods = vec![
             ZngurCppMethod {
                 cpp_name: "value".to_owned(),
+                lifetimes: vec![],
                 template_args: vec![],
                 rust_name: None,
                 receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+                receiver_lifetime: None,
+                raw_receiver: None,
                 inputs: vec![],
                 output: i32.clone(),
                 is_safe: false,
             },
             ZngurCppMethod {
                 cpp_name: "set".to_owned(),
+                lifetimes: vec![],
                 template_args: vec![],
                 rust_name: Some("set_from".to_owned()),
                 receiver: ZngurMethodReceiver::Ref(Mutability::Mut),
+                receiver_lifetime: None,
+                raw_receiver: None,
                 inputs: vec![RustType::cpp_ptr(
                     Mutability::Not,
                     CppIndirection::Reference,
@@ -978,9 +1046,12 @@ mod tests {
             },
             ZngurCppMethod {
                 cpp_name: "make".to_owned(),
+                lifetimes: vec![],
                 template_args: vec![],
                 rust_name: None,
                 receiver: ZngurMethodReceiver::Static,
+                receiver_lifetime: None,
+                raw_receiver: None,
                 inputs: vec![i32.clone(), b.clone()],
                 output: b.clone(),
                 is_safe: true,
@@ -994,14 +1065,22 @@ mod tests {
             ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
         let cpp_code = cpp_code.expect("C++ member functions need a C++ file");
 
-        // Rust: an associated function per member function, taking `this` as a `CppRef`.
-        assert!(rust_code.contains(
-            "pub unsafe fn value(i0: ::zngur_lib::CppRef<::zngur_lib::Const<a::B>>, ) -> i32"
-        ));
-        assert!(rust_code.contains(
-            "pub unsafe fn set_from(i0: ::zngur_lib::CppRef<a::B>, \
-             i1: ::zngur_lib::CppRef<::zngur_lib::Const<a::B>>, ) -> ()"
-        ));
+        // Rust: methods, in an `impl<C>` block for `const` member functions and an `impl a::B`
+        // (non-`const`) block for the others.
+        assert!(
+            rust_code.contains(
+                "impl<C: ::zngur_lib::Constness> a::B<C> {\n#[allow(non_snake_case, \
+                 clippy::too_many_arguments)]\npub unsafe fn value(&self, ) -> i32"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "impl a::B {\n#[allow(non_snake_case, clippy::too_many_arguments)]\npub unsafe fn \
+                 set_from(&mut self, i1: *const a::B::<::zngur_lib::Const>, ) -> ()"
+            ),
+            "{rust_code}"
+        );
         assert!(rust_code.contains("pub fn make(i0: i32, i1: a::B, ) -> a::B"));
 
         // C++: bridges calling the member functions directly.
@@ -1038,14 +1117,17 @@ mod tests {
         assert!(rust_code.contains("pub mod std {"), "{rust_code}");
         assert_eq!(
             rust_code
-                .matches("pub trait __ZngurCppTemplate_unique_ptr {")
+                .matches("pub trait __ZngurCppTemplate_unique_ptr<C = ::zngur_lib::NonConst> {")
                 .count(),
             1,
             "{rust_code}"
         );
         assert_eq!(
             rust_code
-                .matches("pub type unique_ptr<T0> = <T0 as __ZngurCppTemplate_unique_ptr>::Type;")
+                .matches(
+                    "pub type unique_ptr<T0, C = ::zngur_lib::NonConst> = <T0 as \
+                     __ZngurCppTemplate_unique_ptr<C>>::Type;"
+                )
                 .count(),
             1,
             "{rust_code}"
@@ -1053,29 +1135,29 @@ mod tests {
         // Each instantiation is a struct that the trait names for its arguments.
         assert!(
             rust_code.contains(
-                "impl std::__ZngurCppTemplate_unique_ptr for a::B {\n    type Type = \
-                 __zngur_cpp_std__unique_ptr__a__B;\n}"
+                "impl<C: ::zngur_lib::Constness> std::__ZngurCppTemplate_unique_ptr<C> for a::B {\n    \
+                 type Type = __zngur_cpp_std__unique_ptr__a__B<C>;\n}"
             ),
             "{rust_code}"
         );
         assert!(
             rust_code.contains(
-                "impl std::__ZngurCppTemplate_unique_ptr for i32 {\n    type Type = \
-                 __zngur_cpp_std__unique_ptr__i32;\n}"
+                "impl<C: ::zngur_lib::Constness> std::__ZngurCppTemplate_unique_ptr<C> for i32 {\n    \
+                 type Type = __zngur_cpp_std__unique_ptr__i32<C>;\n}"
             ),
             "{rust_code}"
         );
         // Only by-value instantiations are `ZngCppStackObject`s.
         assert!(
             rust_code.contains(
-                "unsafe impl ::zngur_lib::ZngCppStackObject for __zngur_cpp_std__unique_ptr__a__B {}"
+                "unsafe impl<C: ::zngur_lib::Constness> ::zngur_lib::ZngCppStackObject for \
+                 __zngur_cpp_std__unique_ptr__a__B<C> {}"
             ),
             "{rust_code}"
         );
         assert!(
-            !rust_code.contains(
-                "unsafe impl ::zngur_lib::ZngCppStackObject for __zngur_cpp_std__unique_ptr__i32 {}"
-            ),
+            !rust_code
+                .contains("::zngur_lib::ZngCppStackObject for __zngur_cpp_std__unique_ptr__i32<C>"),
             "{rust_code}"
         );
     }
@@ -1122,8 +1204,8 @@ mod tests {
         );
         assert!(
             rust_code.contains(
-                "impl ::bar::generated::std::__ZngurCppTemplate_unique_ptr for a::B {\n    type Type = \
-                 __zngur_cpp_std__unique_ptr__a__B;\n}"
+                "impl<C: ::zngur_lib::Constness> ::bar::generated::std::__ZngurCppTemplate_unique_ptr<C> \
+                 for a::B {\n    type Type = __zngur_cpp_std__unique_ptr__a__B<C>;\n}"
             ),
             "{rust_code}"
         );
@@ -1148,9 +1230,8 @@ mod tests {
         let cpp_code = cpp_code.expect("C++ field accessors need a C++ file");
 
         assert!(
-            rust_code.contains(
-                "pub fn x_mut(i0: ::zngur_lib::CppRef<a::B>, ) -> ::zngur_lib::CppRef<i32>"
-            )
+            rust_code.contains("pub fn x_mut(&mut self, ) -> &mut i32"),
+            "{rust_code}"
         );
         assert!(
             cpp_code.contains(
@@ -1191,10 +1272,10 @@ mod tests {
             ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
         let cpp_code = cpp_code.expect("C++ field accessors need a C++ file");
 
-        assert!(rust_code.contains(
-            "pub fn x(i0: ::zngur_lib::CppRef<::zngur_lib::Const<a::B>>, ) -> \
-             ::zngur_lib::CppRef<::zngur_lib::Const<i32>>"
-        ));
+        assert!(
+            rust_code.contains("pub fn x(&self, ) -> &i32"),
+            "{rust_code}"
+        );
         assert!(
             cpp_code.contains(
                 "::rust::CppPtr< ::rust::CppConst< ::int32_t > > __zngur_o = \
@@ -1204,7 +1285,10 @@ mod tests {
             "{cpp_code}"
         );
         assert!(
-            rust_code.contains("impl std::__ZngurCppTemplate_span for ::zngur_lib::Const<i32> {"),
+            rust_code.contains(
+                "impl<C: ::zngur_lib::Constness> std::__ZngurCppTemplate_span<C> for \
+                 ::zngur_lib::ConstValue<i32> {"
+            ),
             "{rust_code}"
         );
         assert!(
@@ -1218,6 +1302,7 @@ mod tests {
         let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
         let spec = ZngurSpec {
             cpp_funcs: vec![ZngurCppFn {
+                lifetimes: vec![],
                 namespace: vec!["a".to_owned(), "b".to_owned()],
                 cpp_name: "f".to_owned(),
                 template_args: vec![],
@@ -1252,10 +1337,12 @@ mod tests {
         let mut ty = minimal_stack_owned_type(b.clone(), 8, 4);
         ty.cpp_constructors = vec![
             ZngurCppConstructor {
+                lifetimes: vec![],
                 inputs: vec![],
                 is_safe: true,
             },
             ZngurCppConstructor {
+                lifetimes: vec![],
                 inputs: vec![
                     i32,
                     RustType::cpp_ptr(Mutability::Not, CppIndirection::Reference, b),
@@ -1275,7 +1362,7 @@ mod tests {
         assert!(rust_code.contains("type Safety = ::zngur_lib::IsSafe;"));
         assert!(rust_code.contains(
             "unsafe impl ::zngur_lib::ZngCppConstruct<(i32, \
-             ::zngur_lib::CppRef<::zngur_lib::Const<a::B>>, )> for a::B {"
+             *const a::B::<::zngur_lib::Const>, )> for a::B {"
         ));
         assert!(rust_code.contains("type Safety = ::zngur_lib::IsUnsafe;"));
 
@@ -1300,6 +1387,7 @@ mod tests {
                 cpp_template_homes: vec![],
             }],
             cpp_funcs: vec![ZngurCppFn {
+                lifetimes: vec![],
                 namespace: vec!["shapes".to_owned()],
                 cpp_name: "Mirror".to_owned(),
                 template_args: vec![],
@@ -1338,6 +1426,7 @@ mod tests {
                 minimal_stack_owned_type(unique_ptr.clone(), 8, 8),
             ],
             cpp_funcs: vec![ZngurCppFn {
+                lifetimes: vec![],
                 namespace: vec!["std".to_owned()],
                 cpp_name: "make_unique".to_owned(),
                 template_args: vec![point],

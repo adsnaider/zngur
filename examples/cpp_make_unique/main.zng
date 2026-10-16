@@ -1,3 +1,6 @@
+// `Draw` takes a `const Point&` that it doesn't keep.
+#allow(elided_lifetimes)
+
 #cpp_additional_includes "
 #include <memory>
 #include <shapes.h>
@@ -14,15 +17,15 @@ type c++::shapes::Point {
 
 // No layout: Rust only refers to it.
 type c++::shapes::Canvas {
-    safe fn Draw(const c++::shapes::Point&);
-    safe fn Points() const -> i32;
+    safe fn Draw(&mut self, &c++::shapes::Point);
+    safe fn Points(&self) -> i32;
 }
 
 type<T> c++::std::unique_ptr<T> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
 
-    safe fn get() const -> T*;
+    safe fn get(&self) -> T*;
 }
 
 type c++::std::unique_ptr<c++::shapes::Point> {}

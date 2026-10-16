@@ -43,6 +43,8 @@ impl BridgeRenderer<'_> {
         for ty in inputs {
             let n = params.len();
             params.push(format!("uint8_t* i{n}"));
+            // Rust references are C++ references, which cross as pointers.
+            let ty = &ty.cpp_bridge_type();
             args.push(match ty {
                 RustType::CppPtr(CppIndirection::Pointer, _) => self.move_from_rust(ty, n),
                 RustType::CppPtr(CppIndirection::Reference, _) => {
@@ -119,6 +121,8 @@ impl BridgeRenderer<'_> {
         callee: &str,
     ) -> String {
         let namespace = self.namespace;
+        // Rust references are C++ references, which cross as pointers.
+        let output = &output.cpp_bridge_type();
         let move_to_rust = |init: String| {
             format!(
                 "{} __zngur_o = {init};\n  ::{namespace}::__zngur_internal_move_to_rust(o, __zngur_o);",
@@ -184,7 +188,7 @@ impl BridgeRenderer<'_> {
         let namespace = self.namespace;
         let this_ty = RustType::cpp_ptr(field.mutability, CppIndirection::Reference, owner.clone());
         let this = self.move_from_rust(&this_ty, 0);
-        let output = field.as_cpp_method().output;
+        let output = field.as_cpp_method().output.cpp_bridge_type();
         let name = &field.name;
         let field_ty = self.cpp(&field.ty);
         format!(

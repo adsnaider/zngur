@@ -19,15 +19,15 @@ type c++::geo::Point {
 - There's no offset to declare, since C++ knows it. That's also what distinguishes these from the
   fields of Rust types, which have an `offset`.
 
-In Rust, each accessor is a safe associated function, which takes `this` as a
-[`CppRef`](./cpp_pointers.md) and returns a `CppRef` to the field: a `CppRef<Const<Self>>` and a
-`CppRef<Const<T>>` for `const` accessors, and a `CppRef<Self>` and a `CppRef<T>` otherwise.
+In Rust, each accessor is a safe method that returns a reference to the field:
+`fn x(&self) -> &i32` for `const` accessors, which `const` objects (`Point<Const>`) have too, and
+`fn x_mut(&mut self) -> &mut i32` for the others (see [`const`](./cpp_pointers.md)). A field of
+class type is a `&T<Const>` from a `const` accessor.
 
 ```rust
 let mut p = Point::build((1, 2));
-let x = Point::x_mut(p.as_mut());
-x.write(x.read() + 10);
-let x: i32 = Point::x(p.as_ref()).read();
+*p.x_mut() += 10;
+let x: i32 = *p.x();
 ```
 
 zngur generates the C++ function that takes the field's address, `&this->x`, so C++ checks that the

@@ -56,7 +56,19 @@ and `&'a str` is `rust::Ref<rust::Str>`. Using references correctly in C++ is up
 [Safety](./safety.md#lifetimes)).
 
 C++ functions that Rust calls directly ([member functions](./call_cpp_from_rust/cpp_methods.md),
-[free functions](./call_cpp_from_rust/cpp_functions.md), ...) can't have lifetimes yet: they take and
-return [`CppRef`s and `CppPtr`s](./call_cpp_from_rust/cpp_pointers.md), which don't have one.
+[free functions](./call_cpp_from_rust/cpp_functions.md), constructors) take and return
+[Rust references](./call_cpp_from_rust/cpp_pointers.md) too: `&'a T` for a C++ `const T&`, and
+`&'a mut T` for a `T&`. Their lifetimes can't be checked against C++, so zngur warns about elided
+ones (`elided_lifetimes`, silenced with `#allow(elided_lifetimes)` at the top of the file):
+
+```zng
+type c++::std::vector<i32> {
+    #layout(size = 24, align = 8);
+    #trivially_relocatable;
+
+    unsafe fn at<'a>(&'a self, usize) -> &'a i32;   // borrows from the vector...
+    safe fn push_back(&mut self, i32);              // ...so this can't be called meanwhile
+}
+```
 
 See `examples/lifetimes` for a complete example.

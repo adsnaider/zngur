@@ -1,15 +1,17 @@
 //! The Rust side of C++ class templates. Each C++ class template has a home module, which defines
 //! a Rust alias for its instantiations, and a trait through which each instantiation names its
-//! Rust struct:
+//! Rust struct (generic over its constness, like every C++ type's struct):
 //!
 //! ```ignore
 //! // In the home (e.g. `generated::std`):
-//! pub trait __ZngurCppTemplate_unique_ptr { type Type; }
-//! pub type unique_ptr<T0> = <T0 as __ZngurCppTemplate_unique_ptr>::Type;
+//! pub trait __ZngurCppTemplate_unique_ptr<C = NonConst> { type Type; }
+//! pub type unique_ptr<T0, C = NonConst> = <T0 as __ZngurCppTemplate_unique_ptr<C>>::Type;
 //!
 //! // In the module that declares `c++::std::unique_ptr<c++::a::B>`:
-//! pub struct __zngur_cpp_std__unique_ptr__a__B { ... }
-//! impl std::__ZngurCppTemplate_unique_ptr for a::B { type Type = __zngur_cpp_std__unique_ptr__a__B; }
+//! pub struct __zngur_cpp_std__unique_ptr__a__B<C: Constness = NonConst> { ... }
+//! impl<C: Constness> std::__ZngurCppTemplate_unique_ptr<C> for a::B {
+//!     type Type = __zngur_cpp_std__unique_ptr__a__B<C>;
+//! }
 //! ```
 //!
 //! So Rust code names instantiations the way C++ code does (`unique_ptr<a::B>`), while each
@@ -17,7 +19,8 @@
 //! impls. The orphan rule allows implementing the home's trait for the template arguments when
 //! one of them is declared in that crate, which is where the parser allows instantiations outside
 //! the home. Templates with more arguments pass the others to the trait:
-//! `pub type map<T0, T1> = <T0 as __ZngurCppTemplate_map<T1>>::Type;`.
+//! `pub type map<T0, T1, C = NonConst> = <T0 as __ZngurCppTemplate_map<T1, C>>::Type;`. The last
+//! parameter is the constness: `unique_ptr<a::B, Const>` is a `const std::unique_ptr<a::B>`.
 
 use std::collections::HashMap;
 
@@ -81,24 +84,23 @@ impl CppTemplates {
             let (name, module_path) = path.split_last().expect("C++ template paths aren't empty");
             let trait_name = trait_name(path);
             let params = (0..*arity).map(|n| format!("T{n}")).collect::<Vec<_>>();
-            let trait_params = match &params[1..] {
-                [] => String::new(),
-                rest => format!("<{}>", rest.join(", ")),
-            };
+            let other_params: String = params[1..].iter().map(|p| format!("{p}, ")).collect();
             cpp_tree.insert(
                 module_path,
                 &format!(
                     r#"
-    /// Names the Rust struct of each instantiation of the C++ class template `{name}`.
+    /// Names the Rust struct of each instantiation of the C++ class template `{name}`, with
+    /// constness `C`.
     #[doc(hidden)]
     #[allow(non_camel_case_types)]
-    pub trait {trait_name}{trait_params} {{
+    pub trait {trait_name}<{other_params}C = ::zngur_lib::NonConst> {{
         type Type;
     }}
 
-    /// The instantiations of the C++ class template `{name}`.
+    /// The instantiations of the C++ class template `{name}`. The last parameter is the constness
+    /// (see `zngur_lib::Constness`).
     #[allow(non_camel_case_types)]
-    pub type {name}<{}> = <T0 as {trait_name}{trait_params}>::Type;
+    pub type {name}<{}, C = ::zngur_lib::NonConst> = <T0 as {trait_name}<{other_params}C>>::Type;
 "#,
                     params.join(", ")
                 ),
@@ -157,19 +159,11 @@ impl CppTemplates {
             .generics
             .split_first()
             .expect("instantiations have template arguments");
-        let trait_args = match rest {
-            [] => String::new(),
-            rest => format!(
-                "<{}>",
-                rest.iter()
-                    .map(|t| t.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        };
+        let other_args: String = rest.iter().map(|t| format!("{t}, ")).collect();
         let struct_name = struct_name(ty);
         rust_file.text.push_str(&format!(
-            "\nimpl {trait_path}{trait_args} for {first} {{\n    type Type = {struct_name};\n}}\n"
+            "\nimpl<C: ::zngur_lib::Constness> {trait_path}<{other_args}C> for {first} {{\n    type \
+             Type = {struct_name}<C>;\n}}\n"
         ));
     }
 }

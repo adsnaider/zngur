@@ -314,6 +314,8 @@ enum ParsedItem<'a> {
     CrateName(&'a str, Span),
     CppAdditionalInclude(&'a str),
     UnstableFeature(&'a str),
+    /// `#allow(lint)`: silences a warning for the whole file.
+    Allow(&'a str, Span),
     Mod {
         path: ParsedPath<'a>,
         items: Vec<ParsedItem<'a>>,
@@ -378,6 +380,7 @@ enum ProcessedItem<'a> {
 struct ParsedCppFn<'a> {
     is_safe: bool,
     name: &'a str,
+    lifetimes: Vec<&'a str>,
     template_args: Vec<ParsedRustType<'a>>,
     inputs: Vec<ParsedRustType<'a>>,
     output: ParsedRustType<'a>,
@@ -437,21 +440,26 @@ enum ParsedTypeItem<'a> {
         deref: Option<ParsedRustType<'a>>,
         cpp_name: Option<&'a str>,
     },
-    /// A C++ member function, declared C++-style:
-    /// `(safe | unsafe) [static] fn name[<types...>](types...) [const] [-> type] [as rust_name];`
+    /// A C++ member function:
+    /// `(safe | unsafe) [static] fn name[<lifetimes..., types...>](receiver, types...) [-> type]
+    /// [as rust_name];`, where the receiver is `&self`, `&mut self` (with optional lifetimes),
+    /// `const self&`, `self&`, `const self*` or `self*`. `is_const` is a (no longer valid)
+    /// trailing `const`.
     CppMethod {
         is_safe: bool,
         is_static: bool,
         name: &'a str,
+        lifetimes: Vec<&'a str>,
         template_args: Vec<ParsedRustType<'a>>,
         inputs: Vec<ParsedRustType<'a>>,
         is_const: bool,
         output: ParsedRustType<'a>,
         rust_name: Option<&'a str>,
     },
-    /// A C++ constructor: `(safe | unsafe) constructor(types...);`
+    /// A C++ constructor: `(safe | unsafe) constructor[<lifetimes...>](types...);`
     CppConstructor {
         is_safe: bool,
+        lifetimes: Vec<&'a str>,
         inputs: Vec<ParsedRustType<'a>>,
     },
     /// An accessor for a field of a C++ type: `field [const] name (type = T) [as rust_name];`
@@ -581,6 +589,95 @@ fn check_method_lifetimes(
     )
 }
 
+/// The receiver of a C++ member function: `&'a self` / `&'a mut self`, or a raw one
+/// (`const self&`, `self*`, ...), with whether the member function is `const` (`Not`).
+enum ParsedReceiver<'a> {
+    Ref(Mutability, Option<&'a str>),
+    Raw(Mutability, CppIndirection),
+}
+
+fn as_receiver<'a>(ty: &ParsedRustType<'a>) -> Option<ParsedReceiver<'a>> {
+    let is_self = |ty: &ParsedRustType<'_>| {
+        matches!(ty, ParsedRustType::Adt(pg)
+            if pg.path.start == ParsedPathStart::Relative
+                && pg.path.segments == ["self"]
+                && pg.generics.is_empty()
+                && pg.lifetimes.is_empty())
+    };
+    match ty {
+        ParsedRustType::Ref(m, l, inner) if is_self(inner) => Some(ParsedReceiver::Ref(*m, *l)),
+        ParsedRustType::CppPtr(k, inner) => match &**inner {
+            ParsedRustType::CppConst(inner) if is_self(inner) => {
+                Some(ParsedReceiver::Raw(Mutability::Not, *k))
+            }
+            inner if is_self(inner) => Some(ParsedReceiver::Raw(Mutability::Mut, *k)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether `ty` has a Rust reference without a lifetime.
+fn has_elided_ref(ty: &RustType) -> bool {
+    match ty {
+        RustType::Ref(_, None, _) => true,
+        RustType::Ref(_, Some(_), t)
+        | RustType::Raw(_, t)
+        | RustType::Boxed(t)
+        | RustType::Slice(t)
+        | RustType::CppPtr(_, t)
+        | RustType::CppConst(t) => has_elided_ref(t),
+        RustType::Tuple(tys) => tys.iter().any(has_elided_ref),
+        RustType::Adt(pg) => pg
+            .generics
+            .iter()
+            .chain(pg.named_generics.iter().map(|(_, t)| t))
+            .any(has_elided_ref),
+        RustType::Cpp(path) => path.generics.iter().any(has_elided_ref),
+        _ => false,
+    }
+}
+
+/// The opt-out warnings for the signature of a C++ function: `elided_lifetimes` (a Rust reference
+/// without a lifetime, which can't be checked against C++) and `safe_raw_pointer` (a `safe`
+/// function that takes a raw pointer, which may be null or invalid).
+#[allow(clippy::too_many_arguments)]
+fn check_cpp_signature_lints(
+    ctx: &mut ParseContext,
+    span: Span,
+    what: &str,
+    is_safe: bool,
+    elided_receiver: bool,
+    raw_receiver: bool,
+    inputs: &[RustType],
+    output: &RustType,
+) {
+    if !ctx.allows("elided_lifetimes")
+        && (elided_receiver || inputs.iter().chain([output]).any(has_elided_ref))
+    {
+        ctx.add_warning_str(
+            &format!(
+                "this C++ {what} has a reference without a lifetime, which can't be checked \
+                 against C++; name the lifetimes (e.g. `fn f<'a>(&'a self) -> &'a T`), or silence \
+                 this with `#allow(elided_lifetimes)`"
+            ),
+            span,
+        );
+    }
+    if !ctx.allows("safe_raw_pointer")
+        && is_safe
+        && (raw_receiver || inputs.iter().any(contains_raw_ptr))
+    {
+        ctx.add_warning_str(
+            &format!(
+                "this C++ {what} is `safe` but takes a raw pointer, which may be null or invalid; \
+                 it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)"
+            ),
+            span,
+        );
+    }
+}
+
 /// Reports named lifetimes in the signature of a C++ function (member function, constructor,
 /// field accessor or free function), which aren't supported yet.
 fn reject_lifetimes<'t>(
@@ -606,24 +703,22 @@ struct MergeContext {
     variant: Option<String>,
 }
 
-/// Whether `ty` is or contains a C++ pointer (which may be null or invalid, unlike a C++
-/// reference).
-fn contains_cpp_ptr(ty: &RustType) -> bool {
+/// Whether `ty` is or contains a raw pointer (a C++-style `T&` / `T*`, or `*const T` / `*mut T`),
+/// which may be null or invalid.
+fn contains_raw_ptr(ty: &RustType) -> bool {
     match ty {
-        RustType::CppPtr(CppIndirection::Pointer, _) => true,
-        RustType::CppPtr(CppIndirection::Reference, t)
-        | RustType::CppConst(t)
+        RustType::CppPtr(..) | RustType::Raw(..) => true,
+        RustType::CppConst(t)
         | RustType::Ref(_, _, t)
-        | RustType::Raw(_, t)
         | RustType::Boxed(t)
-        | RustType::Slice(t) => contains_cpp_ptr(t),
-        RustType::Tuple(tys) => tys.iter().any(contains_cpp_ptr),
+        | RustType::Slice(t) => contains_raw_ptr(t),
+        RustType::Tuple(tys) => tys.iter().any(contains_raw_ptr),
         RustType::Adt(pg) => pg
             .generics
             .iter()
             .chain(pg.named_generics.iter().map(|(_, t)| t))
-            .any(contains_cpp_ptr),
-        RustType::Cpp(path) => path.generics.iter().any(contains_cpp_ptr),
+            .any(contains_raw_ptr),
+        RustType::Cpp(path) => path.generics.iter().any(contains_raw_ptr),
         _ => false,
     }
 }
@@ -1094,78 +1189,124 @@ impl ProcessedItem<'_> {
                             is_safe,
                             is_static,
                             name,
+                            lifetimes: method_lifetimes,
                             template_args,
-                            inputs,
+                            mut inputs,
                             is_const,
                             output,
                             rust_name,
                         } => {
-                            let receiver = match (is_static, is_const) {
-                                (true, true) => {
-                                    ctx.add_error_str(
-                                        "a static member function can't be `const`",
-                                        item_span,
-                                    );
-                                    continue;
-                                }
-                                (true, false) => ZngurMethodReceiver::Static,
-                                (false, true) => ZngurMethodReceiver::Ref(Mutability::Not),
-                                (false, false) => ZngurMethodReceiver::Ref(Mutability::Mut),
-                            };
-                            let inputs: Vec<RustType> =
-                                inputs.into_iter().map(|x| x.to_zngur(scope)).collect();
-                            if is_safe && inputs.iter().any(contains_cpp_ptr) {
+                            if is_const {
                                 ctx.add_error_str(
-                                    "this C++ member function must be `unsafe`, because it takes a \
-                                     C++ pointer, which may be null or invalid",
+                                    "C++ member functions take an explicit receiver instead of a \
+                                     trailing `const`: `&self` for `const` member functions, and \
+                                     `&mut self` for the others",
                                     item_span,
                                 );
                                 continue;
                             }
+                            let parsed_receiver = inputs.first().and_then(as_receiver);
+                            if parsed_receiver.is_some() {
+                                inputs.remove(0);
+                            }
+                            let (receiver, receiver_lifetime, raw_receiver) =
+                                match (is_static, parsed_receiver) {
+                                    (true, None) => (ZngurMethodReceiver::Static, None, None),
+                                    (true, Some(_)) => {
+                                        ctx.add_error_str(
+                                            "static member functions don't take `self`",
+                                            item_span,
+                                        );
+                                        continue;
+                                    }
+                                    (false, None) => {
+                                        ctx.add_error_str(
+                                            "C++ member functions need a receiver: `&self` \
+                                             (`const` member functions), `&mut self` (the others) \
+                                             or a raw one (`const self&`, `self&`, `const self*`, \
+                                             `self*`); static member functions are `static fn`",
+                                            item_span,
+                                        );
+                                        continue;
+                                    }
+                                    (false, Some(ParsedReceiver::Ref(m, l))) => {
+                                        (ZngurMethodReceiver::Ref(m), l.map(lifetime), None)
+                                    }
+                                    (false, Some(ParsedReceiver::Raw(m, indirection))) => {
+                                        (ZngurMethodReceiver::Ref(m), None, Some(indirection))
+                                    }
+                                };
+                            let inputs: Vec<RustType> =
+                                inputs.into_iter().map(|x| x.to_zngur(scope)).collect();
                             let method = ZngurCppMethod {
                                 cpp_name: name.to_owned(),
+                                lifetimes: lifetimes(&method_lifetimes),
                                 template_args: template_args
                                     .into_iter()
                                     .map(|x| x.to_zngur(scope))
                                     .collect(),
                                 rust_name: rust_name.map(|n| n.to_owned()),
                                 receiver,
+                                receiver_lifetime,
+                                raw_receiver,
                                 inputs,
                                 output: output.to_zngur(scope),
                                 is_safe,
                             };
-                            if !reject_lifetimes(
+                            if !check_lifetimes(
                                 ctx,
                                 item_span,
-                                "C++ member functions",
+                                &method.lifetimes,
                                 method
                                     .inputs
                                     .iter()
                                     .chain([&method.output])
                                     .chain(&method.template_args),
+                                method.receiver_lifetime.as_ref(),
                             ) {
                                 continue;
                             }
+                            let elided_receiver = method.receiver_lifetime.is_none()
+                                && method.raw_receiver.is_none()
+                                && method.receiver != ZngurMethodReceiver::Static;
+                            check_cpp_signature_lints(
+                                ctx,
+                                item_span,
+                                "member function",
+                                is_safe,
+                                elided_receiver,
+                                method.raw_receiver.is_some(),
+                                &method.inputs,
+                                &method.output,
+                            );
                             ctx.record_span(
                                 &method.as_rust_method().into_span_key_with(rust_ty.clone()),
                                 item_span.into_range(),
                             );
                             cpp_methods.push(method);
                         }
-                        ParsedTypeItem::CppConstructor { is_safe, inputs } => {
+                        ParsedTypeItem::CppConstructor {
+                            is_safe,
+                            lifetimes: constructor_lifetimes,
+                            inputs,
+                        } => {
                             let inputs: Vec<RustType> =
                                 inputs.into_iter().map(|x| x.to_zngur(scope)).collect();
-                            if !reject_lifetimes(ctx, item_span, "C++ constructors", &inputs) {
+                            let constructor_lifetimes = lifetimes(&constructor_lifetimes);
+                            if !check_lifetimes(ctx, item_span, &constructor_lifetimes, &inputs, [])
+                            {
                                 continue;
                             }
-                            if is_safe && inputs.iter().any(contains_cpp_ptr) {
-                                ctx.add_error_str(
-                                    "this C++ constructor must be `unsafe`, because it takes a C++ \
-                                     pointer, which may be null or invalid",
-                                    item_span,
-                                );
-                                continue;
-                            }
+                            check_cpp_signature_lints(
+                                ctx,
+                                item_span,
+                                "constructor",
+                                is_safe,
+                                false,
+                                false,
+                                &inputs,
+                                &RustType::UNIT,
+                            );
                             // They'd implement the same `ZngCppConstruct<Args>`.
                             if cpp_constructors
                                 .iter()
@@ -1177,7 +1318,11 @@ impl ProcessedItem<'_> {
                                 );
                                 continue;
                             }
-                            let constructor = ZngurCppConstructor { inputs, is_safe };
+                            let constructor = ZngurCppConstructor {
+                                lifetimes: constructor_lifetimes,
+                                inputs,
+                                is_safe,
+                            };
                             ctx.record_span(
                                 &PartialSpanKey::CppConstructor(
                                     rust_ty.clone(),
@@ -1476,33 +1621,31 @@ impl ProcessedItem<'_> {
                 }
                 let inputs: Vec<RustType> =
                     f.inputs.into_iter().map(|x| x.to_zngur(scope)).collect();
-                if f.is_safe && inputs.iter().any(contains_cpp_ptr) {
-                    ctx.add_error_str(
-                        "this C++ function must be `unsafe`, because it takes a C++ pointer, \
-                         which may be null or invalid",
-                        span,
-                    );
-                    return;
-                }
                 let output = f.output.to_zngur(scope);
                 let template_args: Vec<RustType> = f
                     .template_args
                     .into_iter()
                     .map(|x| x.to_zngur(scope))
                     .collect();
-                if !reject_lifetimes(
+                let fn_lifetimes = lifetimes(&f.lifetimes);
+                if !check_lifetimes(
                     ctx,
                     span,
-                    "C++ functions",
+                    &fn_lifetimes,
                     inputs.iter().chain([&output]).chain(&template_args),
+                    [],
                 ) {
                     return;
                 }
+                check_cpp_signature_lints(
+                    ctx, span, "function", f.is_safe, false, false, &inputs, &output,
+                );
                 let func = ZngurCppFn {
                     namespace,
                     cpp_name: f.name.to_owned(),
                     template_args,
                     rust_name: f.rust_name.map(|n| n.to_owned()),
+                    lifetimes: fn_lifetimes,
                     inputs,
                     output,
                     is_safe: f.is_safe,
@@ -2026,6 +2169,8 @@ struct ParseContext<'this, 'source, 'cfg> {
     depth: usize,
     /// How many levels of `import`ed modules are still parsed (see `MAX_MODULE_IMPORT_DEPTH`).
     module_import_depth: usize,
+    /// The warnings that the current file silences with `#allow(...)`.
+    allowed_lints: Vec<String>,
     cfg_provider: &'cfg dyn RustCfgProvider,
     report_sink: &'cfg mut dyn ReportSink,
     /// All .zng files processed during parsing (main file + imports)
@@ -2054,6 +2199,7 @@ impl<'this, 'source, 'cfg> ParseContext<'this, 'source, 'cfg> {
             source,
             depth: 0,
             module_import_depth: MAX_MODULE_IMPORT_DEPTH,
+            allowed_lints: vec![],
             cfg_provider: cfg,
             report_sink,
             processed_files,
@@ -2081,6 +2227,7 @@ impl<'this, 'source, 'cfg> ParseContext<'this, 'source, 'cfg> {
             source,
             depth: self.depth + 1,
             module_import_depth: self.module_import_depth,
+            allowed_lints: vec![],
             cfg_provider: self.cfg_provider,
             report_sink: self.report_sink,
             processed_files: self.processed_files.into_borrowed(),
@@ -2173,7 +2320,6 @@ impl<'this, 'source, 'cfg> ParseContext<'this, 'source, 'cfg> {
 
     /// Records a non-fatal warning as an ariadne diagnostic pointing at `span`.
     /// Rendering is deferred until dispatch time (see `render_report`).
-    #[allow(dead_code)] // No warnings at the moment.
     fn add_warning_str(&mut self, warning: &str, span: Span) {
         let report = Report::build(
             ReportKind::Warning,
@@ -2190,6 +2336,11 @@ impl<'this, 'source, 'cfg> ParseContext<'this, 'source, 'cfg> {
             fatal: false,
             report,
         });
+    }
+
+    /// Whether the current file silences the warning `lint` with `#allow(lint)`.
+    fn allows(&self, lint: &str) -> bool {
+        self.allowed_lints.iter().any(|l| l == lint)
     }
 
     /// a count of the errors recorded by this parse context and any nested ones
@@ -2477,6 +2628,21 @@ impl<'a> ParsedZngFile<'a> {
             return;
         };
 
+        for item in &ast.0.0 {
+            if let ParsedItem::Allow(lint, span) = item {
+                if KNOWN_LINTS.contains(lint) {
+                    ctx.allowed_lints.push(lint.to_string());
+                } else {
+                    ctx.add_error_str(
+                        &format!(
+                            "unknown warning `{lint}` (known ones: {})",
+                            KNOWN_LINTS.join(", ")
+                        ),
+                        *span,
+                    );
+                }
+            }
+        }
         let (aliases, items) = partition_parsed_items(
             ast.0
                 .0
@@ -2623,8 +2789,8 @@ fn process_parsed_item<'a>(
             Ret::Processed(ProcessedItem::ConvertPanicToException(span))
         }
         ParsedItem::CrateName(name, span) => Ret::Processed(ProcessedItem::CrateName(name, span)),
-        ParsedItem::UnstableFeature(_) => {
-            // ignore
+        ParsedItem::UnstableFeature(_) | ParsedItem::Allow(..) => {
+            // ignore (`#allow` is handled before the items, see `parse_into`)
             Ret::Ignore
         }
         ParsedItem::CppAdditionalInclude(inc) => {
@@ -3891,7 +4057,7 @@ fn inner_type_item<'a>()
             .map(|s| s.is_some())
             .then_ignore(just(Token::KwFn))
             .then(cpp_name())
-            .then(cpp_template_args())
+            .then(cpp_generic_params())
             .then(cpp_params.clone())
             .then(just(Token::KwConst).or_not().map(|c| c.is_some()))
             .then(just(Token::Arrow).ignore_then(rust_type()).or_not())
@@ -3902,13 +4068,14 @@ fn inner_type_item<'a>()
             )
             .map(
                 |(
-                    (((((is_static, name), template_args), inputs), is_const), output),
+                    (((((is_static, name), (lifetimes, template_args)), inputs), is_const), output),
                     rust_name,
                 )| {
                     ParsedTypeItem::CppMethod {
                         is_safe: false, // Set below.
                         is_static,
                         name,
+                        lifetimes,
                         template_args,
                         inputs,
                         is_const,
@@ -3918,9 +4085,11 @@ fn inner_type_item<'a>()
                 },
             );
         let cpp_constructor = just(Token::Ident("constructor"))
-            .ignore_then(cpp_params)
-            .map(|inputs| ParsedTypeItem::CppConstructor {
+            .ignore_then(lifetime_params())
+            .then(cpp_params)
+            .map(|(lifetimes, inputs)| ParsedTypeItem::CppConstructor {
                 is_safe: false, // Set below.
+                lifetimes,
                 inputs,
             });
         let cpp_method = choice((
@@ -4095,16 +4264,39 @@ fn cpp_name<'a>() -> impl Parser<'a, ParserInput<'a>, &'a str, ZngParserExtra<'a
     }
 }
 
-/// Explicit template arguments of a C++ function template: `<types...>`, or nothing.
-fn cpp_template_args<'a>()
--> impl Parser<'a, ParserInput<'a>, Vec<ParsedRustType<'a>>, ZngParserExtra<'a>> + Clone {
-    rust_type()
+/// The lifetimes that a C++ function declares and its explicit template arguments (of a function
+/// template): `<'a, 'b, types...>`, or nothing.
+fn cpp_generic_params<'a>()
+-> impl Parser<'a, ParserInput<'a>, (Vec<&'a str>, Vec<ParsedRustType<'a>>), ZngParserExtra<'a>> + Clone
+{
+    select! { Token::Lifetime(l) => Either::Left(l) }
+        .or(rust_type().map(Either::Right))
         .separated_by(just(Token::Comma))
         .at_least(1)
         .collect::<Vec<_>>()
         .delimited_by(just(Token::AngleOpen), just(Token::AngleClose))
         .or_not()
-        .map(Option::unwrap_or_default)
+        .try_map(|params, span| {
+            let params = params.unwrap_or_default();
+            let lifetimes: Vec<&str> = params
+                .iter()
+                .map_while(|p| p.as_ref().left().copied())
+                .collect();
+            let template_args = params
+                .into_iter()
+                .skip(lifetimes.len())
+                .map(|p| {
+                    p.right().ok_or_else(|| {
+                        Rich::custom(
+                            span,
+                            "lifetime parameters must come before template arguments",
+                        )
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+            Ok((lifetimes, template_args))
+        })
+        .boxed()
 }
 
 fn cpp_fn_item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngParserExtra<'a>> + Clone
@@ -4115,7 +4307,7 @@ fn cpp_fn_item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngPars
     ))
     .then_ignore(just(Token::KwFn))
     .then(cpp_name())
-    .then(cpp_template_args())
+    .then(cpp_generic_params())
     .then(
         rust_type()
             .separated_by(just(Token::Comma))
@@ -4130,13 +4322,16 @@ fn cpp_fn_item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngPars
             .or_not(),
     )
     .map(
-        |(((((is_safe, name), template_args), inputs), output), rust_name)| ParsedCppFn {
-            is_safe,
-            name,
-            template_args,
-            inputs,
-            output: output.unwrap_or(ParsedRustType::Tuple(vec![])),
-            rust_name,
+        |(((((is_safe, name), (lifetimes, template_args)), inputs), output), rust_name)| {
+            ParsedCppFn {
+                is_safe,
+                name,
+                lifetimes,
+                template_args,
+                inputs,
+                output: output.unwrap_or(ParsedRustType::Tuple(vec![])),
+                rust_name,
+            }
         },
     );
     spanned(cpp_fn)
@@ -4218,6 +4413,20 @@ fn extern_cpp_item<'a>()
         .boxed()
 }
 
+/// The warnings that `#allow(...)` can silence.
+const KNOWN_LINTS: &[&str] = &["elided_lifetimes", "safe_raw_pointer"];
+
+fn allow_item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngParserExtra<'a>> + Clone
+{
+    just([Token::Sharp, Token::Ident("allow")])
+        .ignore_then(
+            select! { Token::Ident(lint) => lint }
+                .delimited_by(just(Token::ParenOpen), just(Token::ParenClose)),
+        )
+        .map_with(|lint, extra| ParsedItem::Allow(lint, extra.span()))
+        .boxed()
+}
+
 fn unstable_feature<'a>()
 -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngParserExtra<'a>> + Clone {
     just([Token::Sharp, Token::Ident("unstable")])
@@ -4253,6 +4462,7 @@ fn item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngParserExtra
     recursive(|item| {
         choice((
             unstable_feature(),
+            allow_item(),
             just(Token::KwMod)
                 .ignore_then(path())
                 .then(

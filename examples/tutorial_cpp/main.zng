@@ -33,7 +33,7 @@ type c++::std::unique_ptr<c++::cpp_inventory::Inventory> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
 
-    unsafe fn get() const -> c++::cpp_inventory::Inventory*;
+    unsafe fn get(&self) -> c++::cpp_inventory::Inventory*;
 }
 
 type c++::std::unique_ptr<c++::cpp_inventory::Item> {

@@ -80,7 +80,7 @@ namespace {{ self.cpp_namespace }} {
     static inline size_t size_of() noexcept ;
   };
 
-  // Plain C++ pointers (e.g. `zngur_lib::CppPtr` in Rust) cross the boundary as themselves.
+  // Plain C++ pointers (raw pointers and references in Rust) cross the boundary as themselves.
   template<typename T>
   struct __zngur_internal<T*> {
     static inline uint8_t* data_ptr(T* const& t) noexcept {
