@@ -1,0 +1,6 @@
+C++: longest has 6 bytes
+C++: rest has 3 bytes
+Rust: shortest = hello
+Rust: rest = world
+Rust: chooser picked one
+Rust: chooser fn picked three

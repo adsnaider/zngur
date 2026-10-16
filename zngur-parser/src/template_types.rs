@@ -55,15 +55,22 @@ fn matches_template<'a, 'b>(
             (
                 RustTrait::Fn {
                     name: n1,
+                    lifetimes: l1,
                     inputs: i1,
                     output: o1,
                 },
                 RustTrait::Fn {
                     name: n2,
+                    lifetimes: l2,
                     inputs: i2,
                     output: o2,
                 },
-            ) => n1 == n2 && match_lists(i1, i2, mapping) && matches_template(o1, o2, mapping),
+            ) => {
+                n1 == n2
+                    && l1 == l2
+                    && match_lists(i1, i2, mapping)
+                    && matches_template(o1, o2, mapping)
+            }
             (_, _) => false,
         }
     }
@@ -74,8 +81,10 @@ fn matches_template<'a, 'b>(
             .map(|prev_binding| prev_binding == ty)
             .unwrap_or(true),
         (RustType::Primitive(p1), RustType::Primitive(p2)) => p1 == p2,
-        (RustType::Ref(m1, t1), RustType::Ref(m2, t2))
-        | (RustType::Raw(m1, t1), RustType::Raw(m2, t2)) => {
+        (RustType::Ref(m1, l1, t1), RustType::Ref(m2, l2, t2)) => {
+            m1 == m2 && l1 == l2 && matches_template(t1, t2, mapping)
+        }
+        (RustType::Raw(m1, t1), RustType::Raw(m2, t2)) => {
             m1 == m2 && matches_template(t1, t2, mapping)
         }
         (RustType::Boxed(t1), RustType::Boxed(t2)) | (RustType::Slice(t1), RustType::Slice(t2)) => {
@@ -120,11 +129,13 @@ fn substitute_vars<'a>(
     ) -> Result<RustPathAndGenerics, &'a TypeVar> {
         let RustPathAndGenerics {
             path,
+            lifetimes,
             generics,
             named_generics,
         } = path_and_generics;
         let result = RustPathAndGenerics {
             path: path.clone(),
+            lifetimes: lifetimes.clone(),
             generics: substitute_vec(generics, mapping)?,
             named_generics: named_generics
                 .iter()
@@ -144,10 +155,12 @@ fn substitute_vars<'a>(
             }
             RustTrait::Fn {
                 name,
+                lifetimes,
                 inputs,
                 output,
             } => RustTrait::Fn {
                 name: name.clone(),
+                lifetimes: lifetimes.clone(),
                 inputs: substitute_vec(inputs, mapping)?,
                 output: Box::new(substitute_type(output, mapping)?),
             },
@@ -165,7 +178,9 @@ fn substitute_vars<'a>(
                 None => return Err(v),
             },
             p @ RustType::Primitive(_) => p.clone(),
-            RustType::Ref(m, t) => RustType::Ref(*m, Box::new(substitute_type(t, mapping)?)),
+            RustType::Ref(m, l, t) => {
+                RustType::Ref(*m, l.clone(), Box::new(substitute_type(t, mapping)?))
+            }
             RustType::Raw(m, t) => RustType::Raw(*m, Box::new(substitute_type(t, mapping)?)),
             RustType::Boxed(t) => RustType::Boxed(Box::new(substitute_type(t, mapping)?)),
             RustType::Slice(t) => RustType::Slice(Box::new(substitute_type(t, mapping)?)),
@@ -203,8 +218,10 @@ fn substitute_method_vars<'a>(
         data:
             ZngurMethod {
                 name,
+                lifetimes,
                 generics,
                 receiver,
+                receiver_lifetime,
                 inputs,
                 output,
                 is_safe,
@@ -216,11 +233,13 @@ fn substitute_method_vars<'a>(
     Ok(ZngurMethodDetails {
         data: ZngurMethod {
             name: name.clone(),
+            lifetimes: lifetimes.clone(),
             generics: generics
                 .iter()
                 .map(|ty| substitute_vars(ty, mapping))
                 .collect::<Result<_, _>>()?,
             receiver: *receiver,
+            receiver_lifetime: receiver_lifetime.clone(),
             inputs: inputs
                 .iter()
                 .map(|ty| substitute_vars(ty, mapping))
@@ -244,6 +263,7 @@ pub fn try_match_template(ty: &RustType, template: &ZngurType) -> Option<Templat
     }
     let ZngurType {
         ty: template_ty,
+        lifetimes,
         layout,
         wellknown_traits,
         exhaustive,
@@ -266,6 +286,7 @@ pub fn try_match_template(ty: &RustType, template: &ZngurType) -> Option<Templat
     };
     let new_ty = ZngurType {
         ty: ty.clone(),
+        lifetimes: lifetimes.clone(),
         layout: *layout,
         wellknown_traits: wellknown_traits.clone(),
         exhaustive: *exhaustive,

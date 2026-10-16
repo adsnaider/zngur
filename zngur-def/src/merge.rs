@@ -143,6 +143,12 @@ impl Merge for ZngurType {
             );
         }
 
+        // The type's path names its lifetime parameters, so declarations of the same type declare
+        // the same ones.
+        if into.lifetimes.is_empty() {
+            into.lifetimes = self.lifetimes.clone();
+        }
+
         if let (Some(layout1), Some(layout2)) = &(self.layout, into.layout)
             && layout1 != layout2
         {

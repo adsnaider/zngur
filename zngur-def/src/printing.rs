@@ -146,14 +146,13 @@ impl WriteIDL for crate::RustType {
     fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
         match self {
             Self::Primitive(prim) => write!(p, "{prim}"),
-            Self::Ref(m, ty) => {
-                match m {
-                    crate::Mutability::Not => {
-                        write!(p, "&")?;
-                    }
-                    crate::Mutability::Mut => {
-                        write!(p, "&mut ")?;
-                    }
+            Self::Ref(m, lifetime, ty) => {
+                write!(p, "&")?;
+                if let Some(lifetime) = lifetime {
+                    write!(p, "{lifetime} ")?;
+                }
+                if *m == crate::Mutability::Mut {
+                    write!(p, "mut ")?;
                 }
                 p.write_idl(ty)
             }
@@ -231,9 +230,13 @@ impl WriteIDL for crate::RustTrait {
             Self::Normal(path_and_generics) => p.write_idl(path_and_generics),
             Self::Fn {
                 name,
+                lifetimes,
                 inputs,
                 output,
             } => {
+                if !lifetimes.is_empty() {
+                    write!(p, "for{} ", crate::lifetime_params(lifetimes))?;
+                }
                 write!(p, "{name}(")?;
                 p.write_idl(inputs)?;
                 write!(p, ")")?;
@@ -266,9 +269,16 @@ impl WriteIDL for crate::RustPathAndGenerics {
             write!(p, "::{segment}")?;
         }
 
-        if (self.generics.len() + self.named_generics.len()) > 0 {
+        if (self.lifetimes.len() + self.generics.len() + self.named_generics.len()) > 0 {
             write!(p, "<")?;
             let mut generic_count = 0;
+            for lifetime in &self.lifetimes {
+                if generic_count > 0 {
+                    write!(p, ", ")?;
+                }
+                write!(p, "{lifetime}")?;
+                generic_count += 1;
+            }
             for generic in &self.generics {
                 if generic_count > 0 {
                     write!(p, ", ")?;
@@ -447,8 +457,7 @@ fn write_mod_open<W: Write>(p: &mut IDLPrinter<W>, parent: &[String]) -> std::io
     // An empty `generics` list means just the path is printed.
     p.write_idl(&crate::RustPathAndGenerics {
         path: parent.to_vec(),
-        generics: vec![],
-        named_generics: vec![],
+        ..Default::default()
     })?;
     writeln!(p, " {{")?;
     p.indent();
@@ -465,6 +474,30 @@ fn write_mod_close<W: Write>(p: &mut IDLPrinter<W>, parent: &[String]) -> std::i
     writeln!(p, "}}")
 }
 
+/// Writes `<'a, 'b, T1, T2>`: the lifetimes that an item declares, then its type arguments (or
+/// nothing if there are neither).
+fn write_lifetimes_and_generics<W: Write>(
+    p: &mut IDLPrinter<W>,
+    lifetimes: &[crate::Lifetime],
+    generics: &[crate::RustType],
+) -> std::io::Result<()> {
+    if lifetimes.is_empty() && generics.is_empty() {
+        return Ok(());
+    }
+    write!(p, "<")?;
+    for (i, lifetime) in lifetimes.iter().enumerate() {
+        if i > 0 {
+            write!(p, ", ")?;
+        }
+        write!(p, "{lifetime}")?;
+    }
+    if !lifetimes.is_empty() && !generics.is_empty() {
+        write!(p, ", ")?;
+    }
+    p.write_idl(&generics.to_vec())?;
+    write!(p, ">")
+}
+
 /// Writes `fn <name>(..) -> ..;`, i.e. the part of a free function that goes
 /// inside its `mod` block.
 fn write_fn_decl<W: Write>(
@@ -474,11 +507,7 @@ fn write_fn_decl<W: Write>(
 ) -> std::io::Result<()> {
     p.write_indent()?;
     write!(p, "fn {name}")?;
-    if !func.path.generics.is_empty() {
-        write!(p, "<")?;
-        p.write_idl(&func.path.generics)?;
-        write!(p, ">")?;
-    }
+    write_lifetimes_and_generics(p, &func.lifetimes, &func.path.generics)?;
     write!(p, "(")?;
     p.write_idl(&func.inputs)?;
     write!(p, ")")?;
@@ -551,13 +580,19 @@ impl WriteIDL for crate::ZngurCppFn {
 impl WriteIDL for crate::ZngurType {
     fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
         if p.enabled(&IDLItem::Type) {
-            // Templates (`type<T> c++::std::unique_ptr<T>`) list their type variables.
+            // Templates (`type<T> c++::std::unique_ptr<T>`) list their type variables, after the
+            // type's lifetime parameters (`type<'a> crate::Parser<'a>`).
             let type_vars = self.ty.type_vars();
-            if type_vars.is_empty() {
+            let params: Vec<String> = self
+                .lifetimes
+                .iter()
+                .map(|l| l.to_string())
+                .chain(type_vars.iter().map(|v| v.0.clone()))
+                .collect();
+            if params.is_empty() {
                 write!(p, "type ")?;
             } else {
-                let vars: Vec<_> = type_vars.iter().map(|v| v.0.as_str()).collect();
-                write!(p, "type<{}> ", vars.join(", "))?;
+                write!(p, "type<{}> ", params.join(", "))?;
             }
             p.write_idl(&self.ty)?;
             writeln!(p, " {{")?;
@@ -693,7 +728,9 @@ impl WriteIDL for crate::ZngurExternCppFn {
         if p.enabled(&IDLItem::ExternFn) {
             let safety = if self.is_safe { "safe" } else { "unsafe" };
             let name = &self.name;
-            write!(p, "{safety} fn {name}(")?;
+            write!(p, "{safety} fn {name}")?;
+            write_lifetimes_and_generics(p, &self.lifetimes, &[])?;
+            write!(p, "(")?;
             p.write_idl(&self.inputs)?;
             write!(p, ")")?;
             if self.output != crate::RustType::UNIT {
@@ -709,7 +746,9 @@ impl WriteIDL for crate::ZngurExternCppFn {
 impl WriteIDL for crate::ZngurExternCppImpl {
     fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
         if p.enabled(&IDLItem::ExternImpl) {
-            write!(p, "impl ")?;
+            write!(p, "impl")?;
+            write_lifetimes_and_generics(p, &self.lifetimes, &[])?;
+            write!(p, " ")?;
             if self.tr.is_some() {
                 p.write_idl(&self.tr)?;
                 write!(p, " for ")?;
@@ -867,14 +906,7 @@ impl WriteIDL for crate::ZngurMethodDetails {
 impl WriteIDL for crate::ZngurMethod {
     fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
         let name = &self.name;
-        let receiver = match self.receiver {
-            crate::ZngurMethodReceiver::Static => "",
-            crate::ZngurMethodReceiver::Move => "self",
-            crate::ZngurMethodReceiver::Ref(mu) => match mu {
-                crate::Mutability::Not => "&self",
-                crate::Mutability::Mut => "&mut self",
-            },
-        };
+        let receiver = self.rust_receiver();
         let rec_sep = if self.inputs.len() > 0
             && !matches!(self.receiver, crate::ZngurMethodReceiver::Static)
         {
@@ -883,11 +915,7 @@ impl WriteIDL for crate::ZngurMethod {
             ""
         };
         write!(p, "fn {name}")?;
-        if self.generics.len() > 0 {
-            write!(p, "<")?;
-            p.write_idl(&self.generics)?;
-            write!(p, ">")?;
-        }
+        write_lifetimes_and_generics(p, &self.lifetimes, &self.generics)?;
         write!(p, "({receiver}{rec_sep}")?;
         for (i, input) in self.inputs.iter().enumerate() {
             if i > 0 && i < self.inputs.len() {
@@ -985,7 +1013,9 @@ fn print_spec() {
                 path: vec!["crate".into(), "Example".into()],
                 generics: vec![],
                 named_generics: vec![],
+                lifetimes: vec![],
             }),
+            lifetimes: vec![],
             layout: Some(crate::LayoutPolicy::Conservative { size: 16, align: 8 }),
             wellknown_traits: vec![crate::ZngurWellknownTrait::Debug],
             exhaustive: true,
@@ -1006,8 +1036,10 @@ fn print_spec() {
             methods: vec![crate::ZngurMethodDetails {
                 data: crate::ZngurMethod {
                     name: "foo_bar".into(),
+                    lifetimes: vec![],
                     generics: vec![],
                     receiver: crate::ZngurMethodReceiver::Ref(crate::Mutability::Not),
+                    receiver_lifetime: None,
                     inputs: vec![],
                     output: crate::RustType::UNIT,
                     is_safe: true,
@@ -1025,15 +1057,15 @@ fn print_spec() {
         funcs: vec![crate::ZngurFn {
             path: crate::RustPathAndGenerics {
                 path: vec!["crate".into(), "do_w_example".into()],
-                generics: vec![],
-                named_generics: vec![],
+                ..Default::default()
             },
+            lifetimes: vec![],
             inputs: vec![crate::RustType::Ref(
                 crate::Mutability::Not,
+                None,
                 Box::new(crate::RustType::Adt(crate::RustPathAndGenerics {
                     path: vec!["crate".into(), "Example".into()],
-                    generics: vec![],
-                    named_generics: vec![],
+                    ..Default::default()
                 })),
             )],
             output: crate::RustType::Primitive(crate::PrimitiveRustType::Bool),
@@ -1077,9 +1109,9 @@ fn print_funcs_grouped_by_mod() {
     let func = |path: &[&str]| crate::ZngurFn {
         path: crate::RustPathAndGenerics {
             path: path.iter().map(|s| s.to_string()).collect(),
-            generics: vec![],
-            named_generics: vec![],
+            ..Default::default()
         },
+        lifetimes: vec![],
         inputs: vec![],
         output: crate::RustType::UNIT,
     };

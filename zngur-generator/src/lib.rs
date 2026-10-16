@@ -149,7 +149,11 @@ impl ZngurGenerator {
             &mut rust_file,
             &mut cpp_tree,
         );
-        for ty_def in zng.types {
+        for mut ty_def in zng.types {
+            // The glue names types with lifetime parameters (`type<'a> crate::Parser<'a>`) with
+            // `'_`, since it doesn't declare them. The same goes for the signatures of Rust
+            // methods, which zngur only calls.
+            anonymize_lifetimes(&mut ty_def);
             let ty = &ty_def.ty;
             // What Rust can do with a C++ (`c++::`) type: hold it by value if it has a layout and
             // is trivially relocatable, and otherwise only refer to it.
@@ -282,7 +286,8 @@ impl ZngurGenerator {
                 let destructor_name = format!("_zngur_{sanitized_path}_destructor");
                 let mangled_name = rust_file.add_extern_cpp_function(
                     &destructor_name,
-                    &[RustType::Ref(Mutability::Mut, Box::new(ty.clone()))],
+                    &[],
+                    &[RustType::Ref(Mutability::Mut, None, Box::new(ty.clone()))],
                     &RustType::Tuple(vec![]),
                     true,
                 );
@@ -515,13 +520,14 @@ impl ZngurGenerator {
                     if let RustType::Dyn(tr, _) = b.as_ref() {
                         if let RustTrait::Fn {
                             name,
+                            lifetimes,
                             inputs,
                             output,
                         } = tr
                         {
                             if let Entry::Vacant(e) = cpp_file.trait_defs.entry(tr.clone()) {
-                                let rust_link_name =
-                                    rust_file.add_builder_for_dyn_fn(name, inputs, output);
+                                let rust_link_name = rust_file
+                                    .add_builder_for_dyn_fn(name, lifetimes, inputs, output);
                                 e.insert(CppTraitDefinition::Fn {
                                     sig: CppFnSig {
                                         rust_link_name,
@@ -589,11 +595,17 @@ impl ZngurGenerator {
         }
         rust_file.text.push_str(&cpp_tree.render());
         for func in zng.funcs {
+            // zngur only calls Rust functions, so their lifetimes don't matter here.
+            let inputs: Vec<RustType> = func
+                .inputs
+                .iter()
+                .map(RustType::with_anonymous_lifetimes)
+                .collect();
             let sig = rust_file.add_function(
                 &func.path.to_string(),
                 &func.path.to_string(),
-                &func.inputs,
-                &func.output,
+                &inputs,
+                &func.output.with_anonymous_lifetimes(),
                 None,
                 None,
                 default_ns,
@@ -607,6 +619,7 @@ impl ZngurGenerator {
         for func in zng.extern_cpp_funcs {
             let rust_link_name = rust_file.add_extern_cpp_function(
                 &func.name,
+                &func.lifetimes,
                 &func.inputs,
                 &func.output,
                 func.is_safe,
@@ -626,6 +639,7 @@ impl ZngurGenerator {
         }
         for impl_block in zng.extern_cpp_impls {
             let rust_link_names = rust_file.add_extern_cpp_impl(
+                &impl_block.lifetimes,
                 &impl_block.ty,
                 impl_block.tr.as_ref(),
                 &impl_block.methods,
@@ -678,10 +692,40 @@ impl ZngHeaderGenerator {
     }
 }
 
+/// Replaces the named lifetimes in the glue-only parts of `ty_def` (the type itself, the
+/// signatures of its Rust methods, its fields and constructors) with `'_`.
+fn anonymize_lifetimes(ty_def: &mut ZngurType) {
+    let anon = |t: &mut RustType| *t = t.with_anonymous_lifetimes();
+    anon(&mut ty_def.ty);
+    for method in &mut ty_def.methods {
+        method.data.lifetimes.clear();
+        method.data.receiver_lifetime = None;
+        method.data.inputs.iter_mut().for_each(anon);
+        anon(&mut method.data.output);
+        method.data.generics.iter_mut().for_each(anon);
+        if let Some((deref, _)) = &mut method.deref {
+            anon(deref);
+        }
+    }
+    for field in &mut ty_def.fields {
+        anon(&mut field.ty);
+    }
+    for variant in &mut ty_def.variants {
+        for field in &mut variant.fields {
+            anon(&mut field.ty);
+        }
+    }
+    if let Some(constructor) = &mut ty_def.constructor {
+        for (_, t) in &mut constructor.inputs {
+            anon(t);
+        }
+    }
+}
+
 fn real_inputs_of_method(method: &ZngurMethod, ty: &RustType) -> Vec<RustType> {
     let receiver_type = match method.receiver {
         ZngurMethodReceiver::Static => None,
-        ZngurMethodReceiver::Ref(m) => Some(RustType::Ref(m, Box::new(ty.clone()))),
+        ZngurMethodReceiver::Ref(m) => Some(RustType::Ref(m, None, Box::new(ty.clone()))),
         ZngurMethodReceiver::Move => Some(ty.clone()),
     };
     let rusty_inputs = receiver_type
@@ -701,6 +745,7 @@ mod tests {
     fn minimal_stack_owned_type(ty: RustType, size: usize, align: usize) -> ZngurType {
         ZngurType {
             ty,
+            lifetimes: vec![],
             layout: Some(LayoutPolicy::StackAllocated { size, align }),
             trivially_relocatable: TriviallyRelocatable::Checked,
             wellknown_traits: vec![],
@@ -738,8 +783,7 @@ mod tests {
     fn rust_type_named_unit_is_not_the_unit_type() {
         let ty = RustType::Adt(RustPathAndGenerics {
             path: vec!["a".to_owned(), "Unit".to_owned()],
-            generics: vec![],
-            named_generics: vec![],
+            ..Default::default()
         });
         let spec = ZngurSpec {
             types: vec![ZngurType {

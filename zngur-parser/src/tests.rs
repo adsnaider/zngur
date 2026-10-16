@@ -3055,3 +3055,164 @@ mod c++::std {
         vec![RustType::Primitive(PrimitiveRustType::Int(32))]
     );
 }
+
+#[test]
+fn lifetimes_parse() {
+    use zngur_def::{Lifetime, PrimitiveRustType, RustTrait};
+
+    let parsed = parse_str(
+        r#"
+type<'a> crate::Parser<'a> {
+    #layout(size = 24, align = 8);
+    fn rest(&self) -> &'a str;
+    fn peek<'b>(&'b mut self) -> &'b str;
+}
+
+type Box<dyn for<'a> Fn(&'a i32) -> &'a i32> {
+    #layout(size = 16, align = 8);
+}
+
+extern "C++" {
+    safe fn pick<'a>(&'a i32, &'static i32) -> &'a i32;
+    impl<'a> crate::Parser<'a> {
+        safe fn first(&self) -> &'a str;
+    }
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let a = || Lifetime("a".to_owned());
+    let i32 = || Box::new(RustType::Primitive(PrimitiveRustType::Int(32)));
+    let parser_ty = &parsed.spec.types[0];
+    assert_eq!(parser_ty.lifetimes, vec![a()]);
+    assert_eq!(
+        parser_ty.ty,
+        RustType::Adt(RustPathAndGenerics {
+            path: vec!["crate".to_owned(), "Parser".to_owned()],
+            lifetimes: vec![a()],
+            ..Default::default()
+        })
+    );
+    let peek = &parser_ty.methods[1].data;
+    assert_eq!(peek.lifetimes, vec![Lifetime("b".to_owned())]);
+    assert_eq!(peek.receiver_lifetime, Some(Lifetime("b".to_owned())));
+    let RustType::Boxed(dyn_fn) = &parsed.spec.types[1].ty else {
+        panic!("not a box");
+    };
+    let RustType::Dyn(RustTrait::Fn { lifetimes, .. }, _) = &**dyn_fn else {
+        panic!("not a dyn Fn");
+    };
+    assert_eq!(lifetimes, &vec![a()]);
+    let pick = &parsed.spec.extern_cpp_funcs[0];
+    assert_eq!(pick.lifetimes, vec![a()]);
+    assert_eq!(
+        pick.inputs,
+        vec![
+            RustType::Ref(Mutability::Not, Some(a()), i32()),
+            RustType::Ref(Mutability::Not, Some(Lifetime("static".to_owned())), i32()),
+        ]
+    );
+    assert_eq!(parsed.spec.extern_cpp_impls[0].lifetimes, vec![a()]);
+}
+
+#[test]
+fn undeclared_lifetime_is_rejected() {
+    check_fail(
+        r#"
+extern "C++" {
+    safe fn pick<'a>(&'a i32, &'b i32) -> &'a i32;
+}
+"#,
+        expect![[r#"
+            Error: undeclared lifetime `'b`: declare it on the function, `impl` or `type` (e.g. `fn f<'b>(...)`)
+               ╭─[ test.zng:3:10 ]
+               │
+             3 │     safe fn pick<'a>(&'a i32, &'b i32) -> &'a i32;
+               │          ────────────────────┬───────────────────  
+               │                              ╰───────────────────── undeclared lifetime `'b`: declare it on the function, `impl` or `type` (e.g. `fn f<'b>(...)`)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn undeclared_type_lifetime_is_rejected() {
+    check_fail(
+        r#"
+type crate::Parser<'a> {
+    #layout(size = 24, align = 8);
+}
+"#,
+        expect![[r#"
+            Error: undeclared lifetime `'a`: declare it on the function, `impl` or `type` (e.g. `fn f<'a>(...)`)
+               ╭─[ test.zng:2:6 ]
+               │
+             2 │ type crate::Parser<'a> {
+               │      ────────┬────────  
+               │              ╰────────── undeclared lifetime `'a`: declare it on the function, `impl` or `type` (e.g. `fn f<'a>(...)`)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn duplicate_lifetime_is_rejected() {
+    check_fail(
+        r#"
+type<'a> crate::Parser<'a> {
+    #layout(size = 24, align = 8);
+    fn rest<'a>(&'a self) -> &'a str;
+}
+"#,
+        expect![[r#"
+            Error: lifetime `'a` is declared twice
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     fn rest<'a>(&'a self) -> &'a str;
+               │     ────────────────┬────────────────  
+               │                     ╰────────────────── lifetime `'a` is declared twice
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn lifetimes_in_cpp_member_functions_are_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    unsafe fn name(&'a i32) const -> i32;
+}
+"#,
+        expect![[r#"
+            Error: lifetimes (`'a`) aren't supported in the signatures of C++ member functions yet
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     unsafe fn name(&'a i32) const -> i32;
+               │     ──────────────────┬──────────────────  
+               │                       ╰──────────────────── lifetimes (`'a`) aren't supported in the signatures of C++ member functions yet
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn lifetime_after_type_argument_is_rejected() {
+    check_fail(
+        r#"
+type ::std::slice::Iter<i32, 'static> {
+    #layout(size = 16, align = 8);
+}
+"#,
+        expect![[r#"
+            Error: lifetime arguments must come before type arguments
+               ╭─[ test.zng:2:6 ]
+               │
+             2 │ type ::std::slice::Iter<i32, 'static> {
+               │      ────────────────┬───────────────  
+               │                      ╰───────────────── lifetime arguments must come before type arguments
+            ───╯
+        "#]],
+    );
+}

@@ -1,0 +1,47 @@
+// Lifetimes in a `.zng` file are declared like in Rust (`fn f<'a>`, `impl<'a>`, `type<'a>`,
+// `for<'a>`), and end up in the Rust signatures that zngur generates. C++ doesn't see them.
+
+type str {
+    wellknown_traits(?Sized, Debug);
+
+    fn len(&self) -> usize;
+}
+
+// A Rust type with a lifetime parameter, which its methods can use.
+type<'a> crate::Parser<'a> {
+    #layout(size = 24, align = 8);
+
+    fn new(&'a str) -> crate::Parser<'a>;
+    fn rest(&self) -> &'a str;
+    fn advance(&mut self, usize);
+}
+
+trait crate::Chooser {
+    fn choose<'a>(&self, &'a str, &'a str) -> &'a str;
+}
+
+type Box<dyn crate::Chooser> {
+    #layout(size = 16, align = 8);
+}
+
+type Box<dyn for<'a> Fn(&'a str, &'a str) -> &'a str> {
+    #layout(size = 16, align = 8);
+}
+
+mod crate {
+    // Lifetimes of Rust functions are only documentation: zngur just calls them.
+    fn longest<'a>(&'a str, &'a str) -> &'a str;
+    fn run_demo();
+    fn use_chooser(Box<dyn crate::Chooser>);
+    fn use_chooser_fn(Box<dyn for<'a> Fn(&'a str, &'a str) -> &'a str>);
+}
+
+extern "C++" {
+    // Without the lifetime, Rust couldn't tell which argument the result borrows from.
+    safe fn shortest<'a>(&'a str, &'a str) -> &'a str;
+
+    impl<'a> crate::Parser<'a> {
+        // Borrows from the parser's input, not from the parser.
+        safe fn skip_and_rest(&mut self, usize) -> &'a str;
+    }
+}

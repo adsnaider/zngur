@@ -8,6 +8,9 @@ Ideas and known gaps, mostly in calling C++ from Rust. None of these is designed
   object, but has no lifetime, so keeping the object alive is up to the caller. A lifetime
   (`CppRef<'a, T>`, made from `&'a T`) would let the compiler check that, at least for references
   made from Rust references and for references returned by functions (with Rust's elision rules).
+- **Lifetimes on C++ functions.** [Lifetimes](./lifetimes.md) work for Rust signatures (`extern
+  "C++"` functions, trait methods, ...), but not yet for the C++ functions that Rust calls directly,
+  whose references are `CppRef`s.
 - **Method-call syntax.** C++ member functions are associated functions (`Point::norm(p.as_ref())`).
   With `self: CppRef<Self>` receivers, they could be methods (`p.as_ref().norm()`). That needs the
   `arbitrary_self_types` feature, which is still unstable.

@@ -22,19 +22,70 @@ pub enum ZngurMethodReceiver {
     Move,
 }
 
+/// A Rust lifetime, without the `'`: `Lifetime("a")` is `'a`. `'static` and `'_` are
+/// `Lifetime("static")` and `Lifetime("_")`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Lifetime(pub String);
+
+impl Lifetime {
+    /// Whether it's `'static` or `'_`, which don't need to be declared.
+    pub fn is_builtin(&self) -> bool {
+        self.0 == "static" || self.0 == "_"
+    }
+}
+
+impl Display for Lifetime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "'{}", self.0)
+    }
+}
+
+/// The `<'a, 'b>` that declares `lifetimes` on a Rust item, or `""` if there are none.
+pub fn lifetime_params(lifetimes: &[Lifetime]) -> String {
+    if lifetimes.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", lifetimes.iter().join(", "))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ZngurMethod {
     pub name: String,
+    /// The lifetime parameters that the method declares (`fn get<'a>(...)`).
+    pub lifetimes: Vec<Lifetime>,
     pub generics: Vec<RustType>,
     pub receiver: ZngurMethodReceiver,
+    /// The lifetime of a `&'a self` or `&'a mut self` receiver.
+    pub receiver_lifetime: Option<Lifetime>,
     pub inputs: Vec<RustType>,
     pub output: RustType,
     pub is_safe: bool,
 }
 
+impl ZngurMethod {
+    /// The Rust receiver: `""`, `"&'a self"`, `"&mut self"` or `"self"`.
+    pub fn rust_receiver(&self) -> String {
+        let lifetime = self
+            .receiver_lifetime
+            .as_ref()
+            .map(|l| format!("{l} "))
+            .unwrap_or_default();
+        match self.receiver {
+            ZngurMethodReceiver::Static => String::new(),
+            ZngurMethodReceiver::Ref(Mutability::Not) => format!("&{lifetime}self"),
+            ZngurMethodReceiver::Ref(Mutability::Mut) => format!("&{lifetime}mut self"),
+            ZngurMethodReceiver::Move => "self".to_owned(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ZngurFn {
     pub path: RustPathAndGenerics,
+    /// The lifetime parameters that the function declares. They're only documentation: zngur
+    /// calls the function without naming them.
+    pub lifetimes: Vec<Lifetime>,
     pub inputs: Vec<RustType>,
     pub output: RustType,
 }
@@ -42,6 +93,8 @@ pub struct ZngurFn {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ZngurExternCppFn {
     pub name: String,
+    /// The lifetime parameters of the generated Rust function.
+    pub lifetimes: Vec<Lifetime>,
     pub inputs: Vec<RustType>,
     pub output: RustType,
     pub is_safe: bool,
@@ -49,6 +102,8 @@ pub struct ZngurExternCppFn {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ZngurExternCppImpl {
+    /// The lifetime parameters of the `impl` block (`impl<'a> crate::Parser<'a>`).
+    pub lifetimes: Vec<Lifetime>,
     pub tr: Option<RustTrait>,
     pub ty: RustType,
     pub methods: Vec<ZngurMethod>,
@@ -151,6 +206,9 @@ pub struct ZngurMethodDetails {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ZngurType {
     pub ty: RustType,
+    /// The lifetime parameters of a Rust type (`type<'a> crate::Parser<'a>`), which its methods
+    /// can use. The generated glue names the type with `'_` in their place.
+    pub lifetimes: Vec<Lifetime>,
     /// Required for Rust types. For C++ (`c++::`) types, Rust holds them by value if they have a
     /// `StackAllocated` or `Conservative` layout and are `trivially_relocatable`, and only refers
     /// to them otherwise.
@@ -249,8 +307,10 @@ impl ZngurCppMethod {
     pub fn as_rust_method(&self) -> ZngurMethod {
         ZngurMethod {
             name: self.rust_name().to_owned(),
+            lifetimes: vec![],
             generics: vec![],
             receiver: self.receiver,
+            receiver_lifetime: None,
             inputs: self.inputs.clone(),
             output: self.output.clone(),
             is_safe: self.is_safe,
@@ -438,6 +498,8 @@ pub enum RustTrait {
     Normal(RustPathAndGenerics),
     Fn {
         name: String,
+        /// The lifetimes of a `for<'a>` binder: `for<'a> Fn(&'a i32) -> &'a i32`.
+        lifetimes: Vec<Lifetime>,
         inputs: Vec<RustType>,
         output: Box<RustType>,
     },
@@ -467,9 +529,11 @@ pub enum PrimitiveRustType {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeVar(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct RustPathAndGenerics {
     pub path: Vec<String>,
+    /// Lifetime arguments (`::std::slice::Iter<'a, i32>`), which come first.
+    pub lifetimes: Vec<Lifetime>,
     pub generics: Vec<RustType>,
     pub named_generics: Vec<(String, RustType)>,
 }
@@ -477,7 +541,8 @@ pub struct RustPathAndGenerics {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RustType {
     Primitive(PrimitiveRustType),
-    Ref(Mutability, Box<RustType>),
+    /// `&T`, `&'a T`, `&mut T` or `&'a mut T`.
+    Ref(Mutability, Option<Lifetime>, Box<RustType>),
     Raw(Mutability, Box<RustType>),
     Boxed(Box<RustType>),
     Slice(Box<RustType>),
@@ -574,7 +639,7 @@ impl RustType {
                         out.push(v);
                     }
                 }
-                RustType::Ref(_, t)
+                RustType::Ref(_, _, t)
                 | RustType::Raw(_, t)
                 | RustType::Boxed(t)
                 | RustType::Slice(t)
@@ -592,6 +657,114 @@ impl RustType {
         let mut out = vec![];
         collect(self, &mut out);
         out
+    }
+
+    /// The named lifetimes that `self` uses (not `'static` or `'_`), other than those bound by a
+    /// `for<...>` inside it, in order of appearance (with duplicates).
+    pub fn free_lifetimes(&self) -> Vec<Lifetime> {
+        let mut out = vec![];
+        let _ = self.map_free_lifetimes(&mut |l| {
+            out.push(l.clone());
+            l.clone()
+        });
+        out
+    }
+
+    /// `self`, with each named lifetime that isn't bound by a `for<...>` inside it replaced by
+    /// `'_`. The generated glue uses it for types whose lifetimes aren't declared there.
+    pub fn with_anonymous_lifetimes(&self) -> RustType {
+        self.map_free_lifetimes(&mut |_| Lifetime("_".to_owned()))
+    }
+
+    /// `self`, with `f` applied to each named lifetime that isn't bound by a `for<...>` inside it.
+    pub fn map_free_lifetimes(&self, f: &mut impl FnMut(&Lifetime) -> Lifetime) -> RustType {
+        fn go(
+            ty: &RustType,
+            bound: &[Lifetime],
+            f: &mut dyn FnMut(&Lifetime) -> Lifetime,
+        ) -> RustType {
+            let lt = |l: &Lifetime, f: &mut dyn FnMut(&Lifetime) -> Lifetime| {
+                if l.is_builtin() || bound.contains(l) {
+                    l.clone()
+                } else {
+                    f(l)
+                }
+            };
+            let all = |tys: &[RustType], f: &mut dyn FnMut(&Lifetime) -> Lifetime| {
+                tys.iter().map(|t| go(t, bound, f)).collect::<Vec<_>>()
+            };
+            match ty {
+                RustType::Ref(m, l, t) => {
+                    RustType::Ref(*m, l.as_ref().map(|l| lt(l, f)), Box::new(go(t, bound, f)))
+                }
+                RustType::Raw(m, t) => RustType::Raw(*m, Box::new(go(t, bound, f))),
+                RustType::Boxed(t) => RustType::Boxed(Box::new(go(t, bound, f))),
+                RustType::Slice(t) => RustType::Slice(Box::new(go(t, bound, f))),
+                RustType::CppPtr(k, t) => RustType::CppPtr(*k, Box::new(go(t, bound, f))),
+                RustType::CppConst(t) => RustType::CppConst(Box::new(go(t, bound, f))),
+                RustType::Tuple(tys) => RustType::Tuple(all(tys, f)),
+                RustType::Adt(pg) => RustType::Adt(go_path(pg, bound, f)),
+                RustType::Cpp(path) => RustType::Cpp(CppTypePath {
+                    path: path.path.clone(),
+                    generics: all(&path.generics, f),
+                }),
+                RustType::Dyn(tr, bounds) => RustType::Dyn(go_trait(tr, bound, f), bounds.clone()),
+                RustType::Impl(tr, bounds) => {
+                    RustType::Impl(go_trait(tr, bound, f), bounds.clone())
+                }
+                RustType::Primitive(_) | RustType::TypeVar(_) => ty.clone(),
+            }
+        }
+        fn go_path(
+            pg: &RustPathAndGenerics,
+            bound: &[Lifetime],
+            f: &mut dyn FnMut(&Lifetime) -> Lifetime,
+        ) -> RustPathAndGenerics {
+            RustPathAndGenerics {
+                path: pg.path.clone(),
+                lifetimes: pg
+                    .lifetimes
+                    .iter()
+                    .map(|l| {
+                        if l.is_builtin() || bound.contains(l) {
+                            l.clone()
+                        } else {
+                            f(l)
+                        }
+                    })
+                    .collect(),
+                generics: pg.generics.iter().map(|t| go(t, bound, f)).collect(),
+                named_generics: pg
+                    .named_generics
+                    .iter()
+                    .map(|(n, t)| (n.clone(), go(t, bound, f)))
+                    .collect(),
+            }
+        }
+        fn go_trait(
+            tr: &RustTrait,
+            bound: &[Lifetime],
+            f: &mut dyn FnMut(&Lifetime) -> Lifetime,
+        ) -> RustTrait {
+            match tr {
+                RustTrait::Normal(pg) => RustTrait::Normal(go_path(pg, bound, f)),
+                RustTrait::Fn {
+                    name,
+                    lifetimes,
+                    inputs,
+                    output,
+                } => {
+                    let bound: Vec<Lifetime> = bound.iter().chain(lifetimes).cloned().collect();
+                    RustTrait::Fn {
+                        name: name.clone(),
+                        lifetimes: lifetimes.clone(),
+                        inputs: inputs.iter().map(|t| go(t, &bound, f)).collect(),
+                        output: Box::new(go(output, &bound, f)),
+                    }
+                }
+            }
+        }
+        go(self, &[], f)
     }
 
     /// The C++ spelling of a `c++::` type or of one of its template arguments, e.g. `::a::B`,
@@ -648,6 +821,7 @@ impl Display for RustPathAndGenerics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let RustPathAndGenerics {
             path,
+            lifetimes,
             generics,
             named_generics,
         } = self;
@@ -657,13 +831,14 @@ impl Display for RustPathAndGenerics {
             }
             write!(f, "{p}")?;
         }
-        if !generics.is_empty() || !named_generics.is_empty() {
+        if !lifetimes.is_empty() || !generics.is_empty() || !named_generics.is_empty() {
             write!(
                 f,
                 "::<{}>",
-                generics
+                lifetimes
                     .iter()
                     .map(|x| format!("{x}"))
+                    .chain(generics.iter().map(|x| format!("{x}")))
                     .chain(named_generics.iter().map(|x| format!("{} = {}", x.0, x.1)))
                     .join(", ")
             )?;
@@ -678,9 +853,13 @@ impl Display for RustTrait {
             RustTrait::Normal(tr) => write!(f, "{tr}"),
             RustTrait::Fn {
                 name,
+                lifetimes,
                 inputs,
                 output,
             } => {
+                if !lifetimes.is_empty() {
+                    write!(f, "for{} ", lifetime_params(lifetimes))?;
+                }
                 write!(f, "{name}({})", inputs.iter().join(", "))?;
                 if **output != RustType::UNIT {
                     write!(f, " -> {output}")?;
@@ -709,8 +888,16 @@ impl Display for RustType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RustType::Primitive(s) => write!(f, "{s}"),
-            RustType::Ref(Mutability::Not, ty) => write!(f, "&{ty}"),
-            RustType::Ref(Mutability::Mut, ty) => write!(f, "&mut {ty}"),
+            RustType::Ref(m, lifetime, ty) => {
+                write!(f, "&")?;
+                if let Some(lifetime) = lifetime {
+                    write!(f, "{lifetime} ")?;
+                }
+                if *m == Mutability::Mut {
+                    write!(f, "mut ")?;
+                }
+                write!(f, "{ty}")
+            }
             RustType::Raw(Mutability::Not, ty) => write!(f, "*const {ty}"),
             RustType::Raw(Mutability::Mut, ty) => write!(f, "*mut {ty}"),
             RustType::Boxed(ty) => write!(f, "Box<{ty}>"),

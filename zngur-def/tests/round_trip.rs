@@ -662,3 +662,76 @@ fn reparse_all_examples() {
         failures.join("\n\n========\n\n")
     );
 }
+
+#[test]
+fn reparse_lifetimes() {
+    check_round_trip(
+        r#"
+type<'a> crate::Parser<'a> {
+    #layout(size = 24, align = 8);
+    field input (offset = 0, type = &'a str);
+    fn rest(&self) -> &'a str;
+    fn peek<'b>(&'b self) -> ::std::option::Option<&'b str>;
+}
+
+type ::std::slice::Iter<'static, i32> {
+    #layout(size = 16, align = 8);
+}
+
+type Box<dyn for<'a> Fn(&'a i32, &'a i32) -> &'a i32> {
+    #layout(size = 16, align = 8);
+}
+
+trait crate::Picker {
+    fn pick<'a>(&self, &'a i32, &'a i32) -> &'a i32;
+}
+
+mod crate {
+    fn longest<'a>(&'a str, &'a str) -> &'a str;
+}
+
+extern "C++" {
+    safe fn pick<'a>(&'a crate::Foo, &'a mut crate::Foo) -> &'a i32;
+    impl<'a> crate::Parser<'a> {
+        safe fn first(&'a self) -> &'a str;
+    }
+}
+"#,
+        expect![[r#"
+            type<'a> crate::Parser<'a> {
+                #layout(size = 24, align = 8);
+
+                field input (offset = 0, type = &'a str);
+
+                fn rest(&self) -> &'a str;
+                fn peek<'b>(&'b self) -> ::std::option::Option<&'b str>;
+            }
+
+            type ::std::slice::Iter<'static, i32> {
+                #layout(size = 16, align = 8);
+            }
+
+            type Box<dyn for<'a> Fn(&'a i32, &'a i32) -> &'a i32> {
+                #layout(size = 16, align = 8);
+            }
+
+            mod crate {
+                fn longest<'a>(&'a str, &'a str) -> &'a str;
+            }
+
+            trait crate::Picker {
+                fn pick<'a>(&self, &'a i32, &'a i32) -> &'a i32;
+            }
+
+            extern "C++" {
+
+                safe fn pick<'a>(&'a crate::Foo, &'a mut crate::Foo) -> &'a i32;
+
+                impl<'a> crate::Parser<'a> {
+                    safe fn first(&'a self) -> &'a str;
+                }
+
+            }
+        "#]],
+    );
+}

@@ -16,8 +16,10 @@ pub trait IntoCpp {
 
 impl IntoCpp for RustPathAndGenerics {
     fn into_cpp(&self, namespace: &str, crate_name: &str) -> CppType {
+        // Lifetimes don't exist in C++.
         let RustPathAndGenerics {
             path,
+            lifetimes: _,
             generics,
             named_generics,
         } = self;
@@ -42,6 +44,7 @@ impl IntoCpp for RustTrait {
                 name,
                 inputs,
                 output,
+                ..
             } => CppType {
                 path: CppPath::from(&*format!("{namespace}::{name}")),
                 generic_args: inputs
@@ -100,7 +103,7 @@ impl IntoCpp for RustType {
                 generic_args: vec![t.into_cpp(namespace, crate_name)],
                 tail: None,
             },
-            RustType::Ref(m, t) => CppType {
+            RustType::Ref(m, _, t) => CppType {
                 path: match m {
                     Mutability::Mut => CppPath::from(&*format!("{}::RefMut", namespace)),
                     Mutability::Not => CppPath::from(&*format!("{}::Ref", namespace)),
@@ -129,7 +132,7 @@ impl IntoCpp for RustType {
                     .chain(path.path.iter().cloned())
                     .collect(),
                 generics: path.generics.clone(),
-                named_generics: vec![],
+                ..Default::default()
             }
             .into_cpp(namespace, crate_name),
             // `CppPtr<W>` (from zngur.h) is an alias for `T*`, where `T` is the C++ type that `W`
@@ -457,6 +460,7 @@ fn mangle_name(name: &str, mangling_base: &str) -> String {
         (2, ")", 'q'),
         (2, "@", 'z'),
         (2, "-", 'h'),
+        (2, "'", 'g'),
     ];
     while let Some((pos, which)) = bads.iter().filter_map(|x| Some((name.find(x.1)?, x))).min() {
         name.replace_range(pos..pos + which.1.len(), "_");
@@ -722,15 +726,16 @@ pub extern "C" fn {mangled_name}(
             wln!(self, "        type {name} = {ty};");
         }
         for (method, rust_link_name) in tr.methods.iter().zip(method_mangled_name) {
-            w!(self, "        fn {}(", method.name);
-            match method.receiver {
-                crate::ZngurMethodReceiver::Static => {
-                    panic!("traits with static methods are not object safe");
-                }
-                crate::ZngurMethodReceiver::Ref(Mutability::Not) => w!(self, "&self"),
-                crate::ZngurMethodReceiver::Ref(Mutability::Mut) => w!(self, "&mut self"),
-                crate::ZngurMethodReceiver::Move => w!(self, "self"),
+            if method.receiver == crate::ZngurMethodReceiver::Static {
+                panic!("traits with static methods are not object safe");
             }
+            w!(
+                self,
+                "        fn {}{}({}",
+                method.name,
+                lifetime_params(&method.lifetimes),
+                method.rust_receiver()
+            );
             for (i, ty) in method.inputs.iter().enumerate() {
                 w!(self, ", i{i}: {ty}");
             }
@@ -781,15 +786,16 @@ pub extern "C" fn {mangled_name}(
             wln!(self, "        type {name} = {ty};");
         }
         for (method, rust_link_name) in tr.methods.iter().zip(method_mangled_name) {
-            w!(self, "        fn {}(", method.name);
-            match method.receiver {
-                crate::ZngurMethodReceiver::Static => {
-                    panic!("traits with static methods are not object safe");
-                }
-                crate::ZngurMethodReceiver::Ref(Mutability::Not) => w!(self, "&self"),
-                crate::ZngurMethodReceiver::Ref(Mutability::Mut) => w!(self, "&mut self"),
-                crate::ZngurMethodReceiver::Move => w!(self, "self"),
+            if method.receiver == crate::ZngurMethodReceiver::Static {
+                panic!("traits with static methods are not object safe");
             }
+            w!(
+                self,
+                "        fn {}{}({}",
+                method.name,
+                lifetime_params(&method.lifetimes),
+                method.rust_receiver()
+            );
             for (i, ty) in method.inputs.iter().enumerate() {
                 w!(self, ", i{i}: {ty}");
             }
@@ -815,14 +821,35 @@ pub extern "C" fn {mangled_name}(
         mangled_name
     }
 
+    /// `lifetimes` are those of a `for<'a>` binder (`for<'a> Fn(&'a i32) -> &'a i32`).
     pub fn add_builder_for_dyn_fn(
         &mut self,
         name: &str,
+        lifetimes: &[Lifetime],
         inputs: &[RustType],
         output: &RustType,
     ) -> String {
-        let mangled_name = self.mangle_name(&inputs.iter().chain(Some(output)).join(", "));
-        let trait_str = format!("{name}({}) -> {output}", inputs.iter().join(", "));
+        let binder = if lifetimes.is_empty() {
+            String::new()
+        } else {
+            format!("for{} ", lifetime_params(lifetimes))
+        };
+        let mangled_name = self.mangle_name(&format!(
+            "{binder}{}",
+            inputs.iter().chain(Some(output)).join(", ")
+        ));
+        let trait_str = format!("{binder}{name}({}) -> {output}", inputs.iter().join(", "));
+        // A closure's parameters can't name the binder's lifetimes, so with a binder the closure
+        // gets its signature from a `F: for<'a> Fn(...)` bound instead.
+        let (coerce_fn, coerce_open, coerce_close) = if lifetimes.is_empty() {
+            (String::new(), "", "")
+        } else {
+            (
+                format!("    fn __zngur_coerce<F: {trait_str}>(f: F) -> F {{ f }}\n"),
+                "__zngur_coerce(",
+                ")",
+            )
+        };
         wln!(
             self,
             r#"
@@ -844,7 +871,7 @@ pub extern "C" fn {mangled_name}(
         }}
     }}
     let this = ClosureData {{ data, destructor }};
-    let r: Box<dyn {trait_str}> = Box::new(move |{}| unsafe {{
+{coerce_fn}    let r: Box<dyn {trait_str}> = Box::new({coerce_open}move |{}| unsafe {{
         _ = &this;
         let data = this.data;
 "#,
@@ -856,14 +883,18 @@ pub extern "C" fn {mangled_name}(
             inputs
                 .iter()
                 .enumerate()
-                .map(|(n, ty)| format!("i{n}: {ty}"))
+                .map(|(n, ty)| if lifetimes.is_empty() {
+                    format!("i{n}: {ty}")
+                } else {
+                    format!("i{n}")
+                })
                 .join(", "),
         );
         self.call_cpp_function("call(data, ", inputs.len());
         wln!(
             self,
             r#"
-    }});
+    }}{coerce_close});
     unsafe {{ ::core::ptr::write(o as *mut _, r) }}
 }}"#
         );
@@ -1033,6 +1064,7 @@ pub extern "C" fn {mn}(i: *const u8) -> usize {{ unsafe {{
 
     pub fn add_extern_cpp_impl(
         &mut self,
+        lifetimes: &[Lifetime],
         owner: &RustType,
         tr: Option<&RustTrait>,
         methods: &[ZngurMethod],
@@ -1058,15 +1090,20 @@ pub extern "C" fn {mn}(i: *const u8) -> usize {{ unsafe {{
             mangled_names.push(mn);
         }
         w!(self, r#"}}"#);
+        let impl_lifetimes = lifetime_params(lifetimes);
         match tr {
             Some(tr) => {
                 let (tr, assocs) = tr.clone().take_assocs();
-                w!(self, r#"impl {tr} for {owner} {{"#);
+                w!(self, r#"impl{impl_lifetimes} {tr} for {owner} {{"#);
                 for (name, ty) in assocs {
                     w!(self, r#"type {name} = {ty};"#);
                 }
             }
-            None => w!(self, r#"impl {} {{"#, self.impl_target(owner)),
+            None => w!(
+                self,
+                r#"impl{impl_lifetimes} {} {{"#,
+                self.impl_target(owner)
+            ),
         }
         for (mn, method) in mangled_names.iter().zip(methods) {
             if tr.is_none() {
@@ -1074,15 +1111,13 @@ pub extern "C" fn {mn}(i: *const u8) -> usize {{ unsafe {{
             }
             w!(
                 self,
-                r#"{}fn {}("#,
+                r#"{}fn {}{}("#,
                 if method.is_safe { "" } else { "unsafe " },
-                method.name
+                method.name,
+                lifetime_params(&method.lifetimes)
             );
-            match method.receiver {
-                ZngurMethodReceiver::Static => (),
-                ZngurMethodReceiver::Ref(Mutability::Mut) => w!(self, "&mut self, "),
-                ZngurMethodReceiver::Ref(Mutability::Not) => w!(self, "&self, "),
-                ZngurMethodReceiver::Move => w!(self, "self, "),
+            if method.receiver != ZngurMethodReceiver::Static {
+                w!(self, "{}, ", method.rust_receiver());
             }
             let input_offset = if method.receiver == ZngurMethodReceiver::Static {
                 0
@@ -1106,6 +1141,7 @@ pub extern "C" fn {mn}(i: *const u8) -> usize {{ unsafe {{
     pub fn add_extern_cpp_function(
         &mut self,
         rust_name: &str,
+        lifetimes: &[Lifetime],
         inputs: &[RustType],
         output: &RustType,
         is_safe: bool,
@@ -1124,8 +1160,9 @@ unsafe extern "C" {{ fn {mangled_name}("#
             self,
             r#"
 #[allow(non_snake_case)]
-pub {}fn {rust_name}("#,
-            if is_safe { "" } else { "unsafe " }
+pub {}fn {rust_name}{}("#,
+            if is_safe { "" } else { "unsafe " },
+            lifetime_params(lifetimes)
         );
         for (n, ty) in inputs.iter().enumerate() {
             w!(self, "i{n}: {ty}, ");
