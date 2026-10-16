@@ -359,6 +359,10 @@ pub struct ModuleImport {
     /// than instantiations of C++ class templates. Their Rust wrappers live at
     /// `::<crate_name>::generated::<path>`.
     pub cpp_types: Vec<Vec<String>>,
+    /// The `c++::` types of the imported module that Rust holds by value (including template
+    /// instantiations), with their C++ types: C++ functions of this module that take or return
+    /// them by value move them like this module's own.
+    pub cpp_by_value_types: Vec<(RustType, String)>,
     /// The C++ class templates whose home is the imported module (see
     /// [`ZngurSpec::cpp_template_homes`]).
     pub cpp_template_homes: Vec<CppTemplateHome>,

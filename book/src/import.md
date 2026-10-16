@@ -217,6 +217,9 @@ pub use generated::*;
 (`with_crate_name`) if that's given too. An imported module that declares `c++::` types without a
 `#crate` is an error.
 
+Imported `c++::` types that Rust holds by value (with a layout and `#trivially_relocatable`) can be
+passed to and returned from the importing module's C++ functions by value, like its own.
+
 Instantiations of C++ class templates (`c++::std::unique_ptr<...>`) follow their own rules, so that
 each template has one Rust alias: see
 [C++ class templates across modules](./call_cpp_from_rust/cpp_templates.md#across-modules).

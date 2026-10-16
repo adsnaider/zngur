@@ -755,6 +755,7 @@ impl ProcessedItem<'_> {
                     path: path.clone(),
                     crate_name: None,
                     cpp_types: vec![],
+                    cpp_by_value_types: vec![],
                     cpp_template_homes: vec![],
                 });
                 r.module_import_spans.push(span);
@@ -2205,6 +2206,14 @@ impl<'a> ParsedZngFile<'a> {
                     _ => None,
                 })
                 .collect();
+            let cpp_by_value_types: Vec<(RustType, String)> = imported
+                .types
+                .iter()
+                .filter_map(|ty| {
+                    ty.cpp_by_value_layout()?;
+                    Some((ty.ty.clone(), ty.cpp_name()?))
+                })
+                .collect();
             if (!cpp_types.is_empty() || !imported.cpp_template_homes.is_empty())
                 && imported.crate_name.is_none()
             {
@@ -2227,6 +2236,7 @@ impl<'a> ParsedZngFile<'a> {
             let module_import = &mut zngur.spec.imported_modules[index];
             module_import.crate_name = imported.crate_name;
             module_import.cpp_types = cpp_types;
+            module_import.cpp_by_value_types = cpp_by_value_types;
             module_import.cpp_template_homes = imported.cpp_template_homes;
         }
     }

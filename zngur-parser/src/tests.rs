@@ -2,7 +2,7 @@ use std::panic::catch_unwind;
 
 use expect_test::{Expect, expect};
 use zngur_def::{
-    CppIndirection, CppTemplateHome, LayoutPolicy, Mutability, PrimitiveRustType,
+    CppIndirection, CppTemplateHome, CppTypePath, LayoutPolicy, Mutability, PrimitiveRustType,
     RustPathAndGenerics, RustType, TriviallyRelocatable, ZngurSpec,
 };
 
@@ -1203,6 +1203,17 @@ mod crate {
     assert_eq!(
         module.cpp_types,
         vec![vec!["ns".to_owned(), "Bar".to_owned()]]
+    );
+    // `Bar` is held by value, so C++ functions of this module move it by value.
+    assert_eq!(
+        module.cpp_by_value_types,
+        vec![(
+            RustType::Cpp(CppTypePath {
+                path: vec!["ns".to_owned(), "Bar".to_owned()],
+                generics: vec![],
+            }),
+            "::ns::Bar".to_owned()
+        )]
     );
     // The imported module's types aren't part of this module's spec.
     assert!(parsed.spec.types.is_empty());

@@ -127,13 +127,15 @@ impl ZngurGenerator {
             }));
         let mut cpp_tree = CppModuleTree::default();
         cpp_file.coro_support = coro_support;
+        // C++ types that Rust holds by value, from this module and the ones it imports.
         let stack_owned_types: cpp_method::StackOwnedTypes = zng
-            .types
+            .imported_modules
             .iter()
-            .filter_map(|ty_def| {
+            .flat_map(|module| module.cpp_by_value_types.iter().cloned())
+            .chain(zng.types.iter().filter_map(|ty_def| {
                 ty_def.cpp_by_value_layout()?;
                 Some((ty_def.ty.clone(), ty_def.cpp_name()?))
-            })
+            }))
             .collect();
         let bridges = cpp_method::BridgeRenderer {
             stack_owned: &stack_owned_types,
@@ -833,6 +835,7 @@ mod tests {
                     vec!["ns".to_owned(), "Bar".to_owned()],
                     vec!["Top".to_owned()],
                 ],
+                cpp_by_value_types: vec![],
                 cpp_template_homes: vec![],
             }],
             // A local `c++::` type in the same namespace shares the module.
@@ -1052,6 +1055,7 @@ mod tests {
                 path: "./bar.zng".into(),
                 crate_name: Some("bar".to_owned()),
                 cpp_types: vec![],
+                cpp_by_value_types: vec![],
                 cpp_template_homes: vec![CppTemplateHome {
                     path: unique_ptr_path,
                     arity: 1,
@@ -1187,6 +1191,41 @@ mod tests {
         assert!(
             cpp_code.contains(
                 "new (o) ::a::B(::rust::__zngur_internal_move_from_rust< ::int32_t >(i0), *"
+            ),
+            "{cpp_code}"
+        );
+    }
+
+    #[test]
+    fn cpp_functions_move_imported_by_value_types_like_local_ones() {
+        let point = cpp(&["geo", "Point"]);
+        let spec = ZngurSpec {
+            imported_modules: vec![ModuleImport {
+                path: "./geo.zng".into(),
+                crate_name: Some("geo".to_owned()),
+                cpp_types: vec![vec!["geo".to_owned(), "Point".to_owned()]],
+                cpp_by_value_types: vec![(point.clone(), "::geo::Point".to_owned())],
+                cpp_template_homes: vec![],
+            }],
+            cpp_funcs: vec![ZngurCppFn {
+                namespace: vec!["shapes".to_owned()],
+                cpp_name: "Mirror".to_owned(),
+                rust_name: None,
+                inputs: vec![point.clone()],
+                output: point,
+                is_safe: true,
+            }],
+            ..Default::default()
+        };
+        let (_rust_code, _h, cpp_code) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let cpp_code = cpp_code.expect("C++ functions need a C++ file");
+
+        // Constructed in place in the Rust value, from the argument moved out of its wrapper.
+        assert!(
+            cpp_code.contains(
+                "new (o) ::geo::Point(::shapes::Mirror(::rust::__zngur_internal_move_from_rust< \
+                 ::rust::cpp::geo::Point >(i0).cpp()));"
             ),
             "{cpp_code}"
         );
