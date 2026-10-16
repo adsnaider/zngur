@@ -1361,20 +1361,107 @@ extern "C++" {
         |_| {},
     );
     let f = &parsed.spec.extern_cpp_funcs[0];
-    let b = || Box::new(RustType::Cpp(vec!["a".to_owned(), "B".to_owned()].into()));
-    let i32 = || Box::new(RustType::Primitive(PrimitiveRustType::Int(32)));
+    let b = || RustType::Cpp(vec!["a".to_owned(), "B".to_owned()].into());
+    let i32 = || RustType::Primitive(PrimitiveRustType::Int(32));
     assert_eq!(
         f.inputs,
         vec![
-            RustType::CppPtr(Mutability::Not, CppIndirection::Reference, b()),
-            RustType::CppPtr(Mutability::Mut, CppIndirection::Reference, b()),
-            RustType::CppPtr(Mutability::Not, CppIndirection::Pointer, i32()),
-            RustType::CppPtr(Mutability::Mut, CppIndirection::Pointer, i32()),
+            RustType::cpp_ptr(Mutability::Not, CppIndirection::Reference, b()),
+            RustType::cpp_ptr(Mutability::Mut, CppIndirection::Reference, b()),
+            RustType::cpp_ptr(Mutability::Not, CppIndirection::Pointer, i32()),
+            RustType::cpp_ptr(Mutability::Mut, CppIndirection::Pointer, i32()),
         ]
     );
     assert_eq!(
         f.output,
-        RustType::CppPtr(Mutability::Not, CppIndirection::Pointer, b())
+        RustType::CppPtr(
+            CppIndirection::Pointer,
+            Box::new(RustType::CppConst(Box::new(b())))
+        )
+    );
+}
+
+#[test]
+fn const_cpp_template_arguments_parse() {
+    use zngur_def::PrimitiveRustType;
+
+    let parsed = parse_str(
+        r#"
+type c++::std::span<const i32> {
+    #layout(size = 16, align = 8);
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    assert_eq!(
+        parsed.spec.types[0].ty,
+        RustType::Cpp(CppTypePath {
+            path: vec!["std".to_owned(), "span".to_owned()],
+            generics: vec![RustType::CppConst(Box::new(RustType::Primitive(
+                PrimitiveRustType::Int(32)
+            )))],
+        })
+    );
+}
+
+#[test]
+fn const_type_by_value_is_rejected() {
+    check_fail(
+        r#"
+extern "C++" {
+    safe fn f(const i32);
+}
+"#,
+        expect![[r#"
+            Error: `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`) or a C++ template argument
+               ╭─[ test.zng:3:15 ]
+               │
+             3 │     safe fn f(const i32);
+               │               ────┬────  
+               │                   ╰────── `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`) or a C++ template argument
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn const_rust_generic_argument_is_rejected() {
+    check_fail(
+        r#"
+type ::std::vec::Vec<const i32> {
+    #layout(size = 24, align = 8);
+}
+"#,
+        expect![[r#"
+            Error: `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`) or a C++ template argument
+               ╭─[ test.zng:2:6 ]
+               │
+             2 │ type ::std::vec::Vec<const i32> {
+               │      ─────────────┬────────────  
+               │                   ╰────────────── `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`) or a C++ template argument
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn const_non_cpp_type_is_rejected() {
+    check_fail(
+        r#"
+extern "C++" {
+    safe fn f(const (i32, i32)&);
+}
+"#,
+        expect![[r#"
+            Error: only C++ types and builtins can be `const`
+               ╭─[ test.zng:3:15 ]
+               │
+             3 │     safe fn f(const (i32, i32)&);
+               │               ────────┬────────  
+               │                       ╰────────── only C++ types and builtins can be `const`
+            ───╯
+        "#]],
     );
 }
 
@@ -1840,11 +1927,7 @@ mod c++::a {
         methods[1].inputs,
         vec![
             i32.clone(),
-            RustType::CppPtr(
-                Mutability::Not,
-                CppIndirection::Reference,
-                Box::new(b.clone())
-            ),
+            RustType::cpp_ptr(Mutability::Not, CppIndirection::Reference, b.clone()),
         ]
     );
     assert_eq!(methods[1].output, RustType::UNIT);
@@ -1857,7 +1940,7 @@ mod c++::a {
     assert_eq!(methods[3].rust_name(), "get_const");
     assert_eq!(
         methods[3].output,
-        RustType::CppPtr(Mutability::Not, CppIndirection::Reference, Box::new(i32))
+        RustType::cpp_ptr(Mutability::Not, CppIndirection::Reference, i32)
     );
 }
 
@@ -2068,10 +2151,10 @@ type c++::B {
     assert_eq!(constructors[1].inputs, vec![i32.clone(), i32]);
     assert_eq!(
         constructors[2].inputs,
-        vec![RustType::CppPtr(
+        vec![RustType::cpp_ptr(
             Mutability::Not,
             CppIndirection::Reference,
-            Box::new(b)
+            b
         )]
     );
     assert!(!constructors[2].is_safe);
@@ -2192,10 +2275,10 @@ mod c++::a {
     assert_eq!(funcs[0].rust_name(), "f");
     assert_eq!(
         funcs[0].inputs,
-        vec![RustType::CppPtr(
+        vec![RustType::cpp_ptr(
             Mutability::Not,
             CppIndirection::Reference,
-            Box::new(b.clone())
+            b.clone()
         )]
     );
     assert_eq!(funcs[0].output, i32);
@@ -2339,7 +2422,7 @@ type c++::std::map<i32, const c++::a::B*> {
             path: vec!["std".to_owned(), "map".to_owned()],
             generics: vec![
                 RustType::Primitive(PrimitiveRustType::Int(32)),
-                RustType::CppPtr(Mutability::Not, CppIndirection::Pointer, Box::new(b)),
+                RustType::cpp_ptr(Mutability::Not, CppIndirection::Pointer, b),
             ],
         })
     );
@@ -2376,12 +2459,12 @@ type c++::std::vector<::std::string::String> {
 }
 "#,
         expect![[r#"
-            Error: `::std::string::String` can't be a C++ template argument (only `c++::` types, builtins and C++ pointers and references can)
+            Error: `::std::string::String` can't be a C++ template argument (only `c++::` types, builtins and C++ pointers and references can, `const` or not)
                ╭─[ test.zng:2:6 ]
                │
              2 │ type c++::std::vector<::std::string::String> {
                │      ───────────────────┬───────────────────  
-               │                         ╰───────────────────── `::std::string::String` can't be a C++ template argument (only `c++::` types, builtins and C++ pointers and references can)
+               │                         ╰───────────────────── `::std::string::String` can't be a C++ template argument (only `c++::` types, builtins and C++ pointers and references can, `const` or not)
             ───╯
         "#]],
     );
@@ -2507,10 +2590,10 @@ type c++::std::unique_ptr<i32> {
     assert_eq!(instantiation.cpp_methods.len(), 1);
     assert_eq!(
         instantiation.cpp_methods[0].output,
-        RustType::CppPtr(
+        RustType::cpp_ptr(
             Mutability::Mut,
             CppIndirection::Pointer,
-            Box::new(RustType::Primitive(PrimitiveRustType::Int(32)))
+            RustType::Primitive(PrimitiveRustType::Int(32))
         )
     );
 }
@@ -2566,10 +2649,10 @@ type c++::std::unique_ptr<c++::a::B> {
     assert_eq!(instantiation.cpp_methods.len(), 1);
     assert_eq!(
         instantiation.cpp_methods[0].output,
-        RustType::CppPtr(
+        RustType::cpp_ptr(
             Mutability::Mut,
             CppIndirection::Pointer,
-            Box::new(parsed.spec.types[0].ty.clone())
+            parsed.spec.types[0].ty.clone()
         )
     );
 }

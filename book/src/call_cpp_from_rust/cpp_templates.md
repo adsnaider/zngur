@@ -17,7 +17,8 @@ type c++::std::map<i32, const c++::geo::Point*> {
 
 The C++ type is the path with its template arguments: `::std::unique_ptr< ::geo::Point >` and
 `::std::map< ::int32_t, const ::geo::Point* >` above. Template arguments can be `c++::` types,
-builtins like `i32` or `bool`, and [C++ references and pointers](./cpp_pointers.md). Each
+builtins like `i32` or `bool`, [C++ references and pointers](./cpp_pointers.md), and `const` ones
+(`c++::std::span<const i32>`, which is `std::span<Const<i32>>` in Rust). Each
 instantiation is declared separately, with its own layout, member functions, constructors and so
 on.
 
@@ -107,7 +108,9 @@ See `examples/multiple_modules` for a complete example.
 ## Limitations
 
 - Every instantiation of a template must have the same number of template arguments.
-- Non-type template arguments (`std::array<T, 4>`), `const` arguments (`unique_ptr<const T>`),
+- Instantiations whose arguments are all `const` or builtins (`unique_ptr<const Point>`) can only
+  be declared in the template's home, since `Const<Point>` isn't local to `Point`'s crate.
+- Non-type template arguments (`std::array<T, 4>`),
   function types (`std::function<int(int)>`) and nested types (`std::vector<int>::iterator`) aren't
   supported. Give them a name with a C++ alias instead, and use that. An alias template keeps the
   type parameterized, so zngur sees an ordinary class template:

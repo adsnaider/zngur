@@ -20,8 +20,8 @@ type c++::geo::Point {
   fields of Rust types, which have an `offset`.
 
 In Rust, each accessor is a safe associated function, which takes `this` as a
-[`CppRef`](./cpp_pointers.md) and returns a `CppRef` to the field: a `CppRef<Self, Const>` and a
-`CppRef<T, Const>` for `const` accessors, and `Mut` ones otherwise.
+[`CppRef`](./cpp_pointers.md) and returns a `CppRef` to the field: a `CppRef<Const<Self>>` and a
+`CppRef<Const<T>>` for `const` accessors, and a `CppRef<Self>` and a `CppRef<T>` otherwise.
 
 ```rust
 let mut p = Point::build((1, 2));

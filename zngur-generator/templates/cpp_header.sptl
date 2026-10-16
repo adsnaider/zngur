@@ -138,7 +138,7 @@ namespace {{ self.namespace }} {
   {% endif %}
 {% endfor %}
 
-{# The C++ types behind `CppConstPtr` / `CppMutPtr` of these wrappers. #}
+{# The C++ types behind `CppPtr` / `CppConst` of these wrappers. #}
 {% for td in self.type_defs %}
   {% if let Some(cpp_type) = td.cpp_object_type() %}
     template<>

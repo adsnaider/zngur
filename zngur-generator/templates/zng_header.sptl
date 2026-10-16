@@ -100,18 +100,26 @@ namespace {{ self.cpp_namespace }} {
   struct CppTypeOf;
 
   // C++ pointers stand for themselves, e.g. for fields of pointer type, whose accessors return a
-  // `CppMutPtr<CppMutPtr<T>>` (a pointer to a pointer).
+  // `CppPtr<CppPtr<T>>` (a pointer to a pointer).
   template<typename T>
   struct CppTypeOf<T*> {
     using type = T*;
   };
 
-  // A C++ pointer (`zngur_lib::CppPtr<T, Const>` / `CppPtr<T, Mut>` in Rust) to the C++ type that
-  // `T` stands for, e.g. `CppConstPtr<rust::ns::Bar>` is `const ::ns::Bar*`.
-  template<typename T>
-  using CppConstPtr = const typename CppTypeOf<T>::type*;
-  template<typename T>
-  using CppMutPtr = typename CppTypeOf<T>::type*;
+  // `const T` (`zngur_lib::Const<T>` in Rust), where `T` is the C++ type that `W` stands for.
+  template<typename W>
+  struct CppConst;
+
+  template<typename W>
+  struct CppTypeOf< CppConst<W> > {
+    using type = const typename CppTypeOf<W>::type;
+  };
+
+  // A C++ pointer (`zngur_lib::CppPtr<W>` in Rust) to the C++ type that `W` stands for, e.g.
+  // `CppPtr<rust::cpp::ns::Bar>` is `::ns::Bar*` and `CppPtr<CppConst<rust::cpp::ns::Bar>>` is
+  // `const ::ns::Bar*`.
+  template<typename W>
+  using CppPtr = typename CppTypeOf<W>::type*;
 
   // Whether a C++ function returning `Actual` matches a `.zng` declaration returning `Declared`
   // (both C++ types): the same type, or an arithmetic type of the same size and kind (e.g. `long

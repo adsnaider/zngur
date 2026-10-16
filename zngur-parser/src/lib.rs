@@ -502,8 +502,9 @@ struct MergeContext {
 /// reference).
 fn contains_cpp_ptr(ty: &RustType) -> bool {
     match ty {
-        RustType::CppPtr(_, CppIndirection::Pointer, _) => true,
-        RustType::CppPtr(_, CppIndirection::Reference, t)
+        RustType::CppPtr(CppIndirection::Pointer, _) => true,
+        RustType::CppPtr(CppIndirection::Reference, t)
+        | RustType::CppConst(t)
         | RustType::Ref(_, t)
         | RustType::Raw(_, t)
         | RustType::Boxed(t)
@@ -1419,17 +1420,18 @@ enum ParsedRustType<'a> {
     Impl(ParsedRustTrait<'a>, Vec<&'a str>),
     Tuple(Vec<ParsedRustType<'a>>),
     Adt(ParsedRustPathAndGenerics<'a>),
-    /// `const T*`, `T*`, `const T&` or `T&`.
-    CppPtr(Mutability, CppIndirection, Box<ParsedRustType<'a>>),
+    /// `T*` or `T&`, where `T` may be `const`.
+    CppPtr(CppIndirection, Box<ParsedRustType<'a>>),
+    /// `const T`.
+    CppConst(Box<ParsedRustType<'a>>),
 }
 
 impl ParsedRustType<'_> {
     fn to_zngur(self, scope: &Scope<'_>) -> RustType {
         match self {
             ParsedRustType::Primitive(s) => RustType::Primitive(s),
-            ParsedRustType::CppPtr(m, kind, s) => {
-                RustType::CppPtr(m, kind, Box::new(s.to_zngur(scope)))
-            }
+            ParsedRustType::CppPtr(kind, s) => RustType::CppPtr(kind, Box::new(s.to_zngur(scope))),
+            ParsedRustType::CppConst(s) => RustType::CppConst(Box::new(s.to_zngur(scope))),
             ParsedRustType::Ref(m, s) => RustType::Ref(m, Box::new(s.to_zngur(scope))),
             ParsedRustType::Raw(m, s) => RustType::Raw(m, Box::new(s.to_zngur(scope))),
             ParsedRustType::Boxed(s) => RustType::Boxed(Box::new(s.to_zngur(scope))),
@@ -3184,24 +3186,68 @@ fn rust_type<'a>() -> Boxed<'a, 'a, ParserInput<'a>, ParsedRustType<'a>, ZngPars
             dyn_trait.boxed(),
         ))
         .boxed();
+        // `const T`, which is only valid as the pointee of a C++ pointer or reference, or as a C++
+        // template argument (checked by `check_cpp_const`).
+        let cpp_const = just(Token::KwConst)
+            .ignore_then(non_cpp_ptr.clone())
+            .map(|x| ParsedRustType::CppConst(Box::new(x)));
         // C++ pointers and references: `const T*`, `T*`, `const T&` and `T&`.
-        let cpp_ptr = just(Token::KwConst)
-            .or_not()
-            .then(non_cpp_ptr.clone())
+        let cpp_ptr = choice((cpp_const.clone(), non_cpp_ptr.clone()))
             .then(choice((
                 just(Token::Star).to(CppIndirection::Pointer),
                 just(Token::And).to(CppIndirection::Reference),
             )))
-            .map(|((constness, x), kind)| {
-                let m = match constness {
-                    Some(_) => Mutability::Not,
-                    None => Mutability::Mut,
-                };
-                ParsedRustType::CppPtr(m, kind, Box::new(x))
-            });
-        choice((cpp_ptr.boxed(), non_cpp_ptr))
+            .map(|(x, kind)| ParsedRustType::CppPtr(kind, Box::new(x)));
+        choice((cpp_ptr.boxed(), cpp_const.boxed(), non_cpp_ptr))
+    })
+    .try_map(|ty, span| match check_cpp_const(&ty, false) {
+        Ok(()) => Ok(ty),
+        Err(message) => Err(Rich::custom(span, message)),
     })
     .boxed()
+}
+
+/// Checks that `const T` only appears where it's valid: as the pointee of a C++ pointer or
+/// reference, or as a C++ template argument (`allowed`), with a `T` that is a C++ type or a
+/// builtin.
+fn check_cpp_const(ty: &ParsedRustType<'_>, allowed: bool) -> Result<(), String> {
+    let all = |tys: &[ParsedRustType<'_>]| tys.iter().try_for_each(|t| check_cpp_const(t, false));
+    match ty {
+        ParsedRustType::CppConst(inner) => {
+            if !allowed {
+                return Err(
+                    "`const T` can only be the type of a C++ pointer or reference \
+                            (`const T&`, `const T*`) or a C++ template argument"
+                        .to_owned(),
+                );
+            }
+            match &**inner {
+                ParsedRustType::Primitive(PrimitiveRustType::Str | PrimitiveRustType::Char) => {
+                    Err("only C++ types and builtins can be `const`".to_owned())
+                }
+                ParsedRustType::Primitive(_) => Ok(()),
+                ParsedRustType::Adt(_) => check_cpp_const(inner, false),
+                _ => Err("only C++ types and builtins can be `const`".to_owned()),
+            }
+        }
+        ParsedRustType::CppPtr(_, inner) => check_cpp_const(inner, true),
+        ParsedRustType::Primitive(_) => Ok(()),
+        ParsedRustType::Ref(_, t)
+        | ParsedRustType::Raw(_, t)
+        | ParsedRustType::Boxed(t)
+        | ParsedRustType::Slice(t) => check_cpp_const(t, false),
+        ParsedRustType::Tuple(tys) => all(tys),
+        ParsedRustType::Dyn(..) | ParsedRustType::Impl(..) => Ok(()),
+        ParsedRustType::Adt(pg) => {
+            let is_cpp = pg.path.start == ParsedPathStart::Cpp;
+            pg.generics
+                .iter()
+                .try_for_each(|t| check_cpp_const(t, is_cpp))?;
+            pg.named_generics
+                .iter()
+                .try_for_each(|(_, t)| check_cpp_const(t, false))
+        }
+    }
 }
 
 fn rust_generics<'a>(

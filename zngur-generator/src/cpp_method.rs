@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 
 use zngur_def::{
-    CppIndirection, Mutability, PrimitiveRustType, RustType, ZngurCppConstructor, ZngurCppField,
-    ZngurCppFn, ZngurCppMethod, ZngurMethodReceiver,
+    CppIndirection, PrimitiveRustType, RustType, ZngurCppConstructor, ZngurCppField, ZngurCppFn,
+    ZngurCppMethod, ZngurMethodReceiver,
 };
 
 use crate::rust::IntoCpp;
@@ -44,8 +44,8 @@ impl BridgeRenderer<'_> {
             let n = params.len();
             params.push(format!("uint8_t* i{n}"));
             args.push(match ty {
-                RustType::CppPtr(_, CppIndirection::Pointer, _) => self.move_from_rust(ty, n),
-                RustType::CppPtr(_, CppIndirection::Reference, _) => {
+                RustType::CppPtr(CppIndirection::Pointer, _) => self.move_from_rust(ty, n),
+                RustType::CppPtr(CppIndirection::Reference, _) => {
                     format!("*{}", self.move_from_rust(ty, n))
                 }
                 // Moved out of a temporary wrapper (`cpp() &&`), which then destroys what's left.
@@ -70,7 +70,7 @@ impl BridgeRenderer<'_> {
         let mut params = vec![];
         let this = match method.receiver {
             ZngurMethodReceiver::Ref(m) => {
-                let ptr = RustType::CppPtr(m, CppIndirection::Reference, Box::new(owner.clone()));
+                let ptr = RustType::cpp_ptr(m, CppIndirection::Reference, owner.clone());
                 params.push("uint8_t* i0".to_owned());
                 Some(self.move_from_rust(&ptr, 0))
             }
@@ -129,14 +129,11 @@ impl BridgeRenderer<'_> {
         // (`None` if zngur can't name it, e.g. for Rust types).
         let expected_output = match output {
             output if *output == RustType::UNIT => Some("void".to_owned()),
-            RustType::CppPtr(_, CppIndirection::Pointer, _) => Some(self.cpp(output)),
-            RustType::CppPtr(m, CppIndirection::Reference, inner) => {
-                let constness = if *m == Mutability::Not { "const " } else { "" };
-                Some(format!(
-                    "{constness}::{namespace}::CppTypeOf< {} >::type&",
-                    self.cpp(inner)
-                ))
-            }
+            RustType::CppPtr(CppIndirection::Pointer, _) => Some(self.cpp(output)),
+            RustType::CppPtr(CppIndirection::Reference, pointee) => Some(format!(
+                "::{namespace}::CppTypeOf< {} >::type&",
+                self.cpp(pointee)
+            )),
             output if self.stack_owned.contains_key(output) => {
                 Some(self.stack_owned[output].clone())
             }
@@ -161,8 +158,8 @@ impl BridgeRenderer<'_> {
         };
         let body = match output {
             output if *output == RustType::UNIT => format!("(void)o;\n  {call};"),
-            RustType::CppPtr(_, CppIndirection::Pointer, _) => move_to_rust(call.to_owned()),
-            RustType::CppPtr(_, CppIndirection::Reference, _) => move_to_rust(format!("&({call})")),
+            RustType::CppPtr(CppIndirection::Pointer, _) => move_to_rust(call.to_owned()),
+            RustType::CppPtr(CppIndirection::Reference, _) => move_to_rust(format!("&({call})")),
             // Constructed in place, in the Rust value.
             output if self.stack_owned.contains_key(output) => {
                 format!("new (o) {}({call});", self.stack_owned[output])
@@ -185,11 +182,7 @@ impl BridgeRenderer<'_> {
         field: &ZngurCppField,
     ) -> String {
         let namespace = self.namespace;
-        let this_ty = RustType::CppPtr(
-            field.mutability,
-            CppIndirection::Reference,
-            Box::new(owner.clone()),
-        );
+        let this_ty = RustType::cpp_ptr(field.mutability, CppIndirection::Reference, owner.clone());
         let this = self.move_from_rust(&this_ty, 0);
         let output = field.as_cpp_method().output;
         let name = &field.name;

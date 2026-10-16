@@ -87,6 +87,21 @@ type c++::Node {
     field next (type = c++::Node*) as next_mut;
 }
 
+// `const` is part of the type: `const i32&` is a `CppRef<Const<i32>>` in Rust, and a C++ template
+// can be instantiated with a `const` type.
+type c++::View<const i32> {
+    #layout(size = 16, align = 8);
+    #trivially_relocatable;
+
+    safe fn size() const -> usize;
+    // Out-of-bounds indices are UB, so this is `unsafe`.
+    unsafe fn at(usize) const -> const i32&;
+}
+
+mod c++::views {
+    safe fn squares() -> c++::View<const i32>;
+}
+
 extern "C++" {
     impl c++::MyCppWrapper {
         safe fn new(i32, i32) -> c++::MyCppWrapper;
@@ -98,8 +113,8 @@ extern "C++" {
         safe fn print(&self);
     }
 
-    // C++ references are `zngur_lib::CppRef`s in Rust and C++ pointers `zngur_lib::CppPtr`s. Both
-    // are plain pointers in C++.
+    // C++ references are `zngur_lib::CppRef`s in Rust and C++ pointers `zngur_lib::CppPtr`s, and
+    // `const T` is `zngur_lib::Const<T>`. They're plain pointers in C++.
     unsafe fn sum_into(const c++::MyCppWrapper&, i32*);
     unsafe fn swap_xy(c++::MyCppWrapper*);
     unsafe fn larger_x(const c++::MyCppWrapper&, const c++::MyCppWrapper&) -> const c++::MyCppWrapper*;

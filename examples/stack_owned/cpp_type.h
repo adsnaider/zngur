@@ -99,3 +99,20 @@ struct Node {
 
   explicit Node(int32_t id) : id(id), type(0), next(nullptr) {}
 };
+
+// A view of `T`s, which `View<const int32_t>` can only read: Rust sees it as
+// `View<zngur_lib::Const<i32>>`.
+template <typename T> struct View {
+  T *data;
+  size_t len;
+
+  size_t size() const { return len; }
+  T &at(size_t i) const { return data[i]; }
+};
+
+namespace views {
+inline View<const int32_t> squares() {
+  static const int32_t values[] = {0, 1, 4, 9, 16};
+  return View<const int32_t>{values, 5};
+}
+} // namespace views

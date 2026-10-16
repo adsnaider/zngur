@@ -29,6 +29,11 @@ CppType 101 2
 pairs = 34 3.75
 boxed = 11
 nodes = 1 -> 2, type = 5
+squares = 5 items, squares[3] = 9
+Constructed CppType 2 3
+const sum() = 5
+Constructed CppType 4 5
+frozen sum() = 9
 Constructed CppConservativeType 10 20
 CppConservativeType 10 20
 Constructed CppConservativeType 1 2

@@ -54,7 +54,8 @@ impl CppPath {
         // Top level namespace and type...
         if self.0.len() == 2 {
             let ty = &self.0[1];
-            return ty != "Unit" && ty != "Ref" && ty != "RefMut";
+            // `CppConst` and `CppPtr` are declared in zngur.h.
+            return !["Unit", "Ref", "RefMut", "CppConst", "CppPtr"].contains(&ty.as_str());
         }
         true
     }

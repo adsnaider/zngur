@@ -31,19 +31,20 @@ Impl<rust::cpp::MyConservativeWrapper>::print(
   return {};
 }
 
-// `CppConstPtr<rust::cpp::MyCppWrapper>` is `const CppType*`, and `CppMutPtr<int32_t>` is `int32_t*`.
-rust::Unit exported_functions::sum_into(CppConstPtr<rust::cpp::MyCppWrapper> c,
-                                        CppMutPtr<int32_t> out) {
+// `CppPtr<CppConst<rust::cpp::MyCppWrapper>>` is `const CppType*`, and `CppPtr<int32_t>` is
+// `int32_t*`.
+rust::Unit exported_functions::sum_into(CppPtr<CppConst<rust::cpp::MyCppWrapper>> c,
+                                        CppPtr<int32_t> out) {
   *out = c->x + c->y;
   return {};
 }
 
-rust::Unit exported_functions::swap_xy(CppMutPtr<rust::cpp::MyCppWrapper> c) {
+rust::Unit exported_functions::swap_xy(CppPtr<rust::cpp::MyCppWrapper> c) {
   ::std::swap(c->x, c->y);
   return {};
 }
 
-CppConstPtr<rust::cpp::MyCppWrapper>
+CppPtr<CppConst<rust::cpp::MyCppWrapper>>
 exported_functions::larger_x(const ::CppType *a, const ::CppType *b) {
   return a->x >= b->x ? a : b;
 }

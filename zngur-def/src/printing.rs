@@ -210,15 +210,16 @@ impl WriteIDL for crate::RustType {
                 }
                 Ok(())
             }
-            Self::CppPtr(m, kind, ty) => {
-                if *m == crate::Mutability::Not {
-                    write!(p, "const ")?;
-                }
+            Self::CppPtr(kind, ty) => {
                 p.write_idl(ty)?;
                 match kind {
                     crate::CppIndirection::Pointer => write!(p, "*"),
                     crate::CppIndirection::Reference => write!(p, "&"),
                 }
+            }
+            Self::CppConst(ty) => {
+                write!(p, "const ")?;
+                p.write_idl(ty)
             }
         }
     }

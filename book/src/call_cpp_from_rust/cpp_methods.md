@@ -32,16 +32,19 @@ type c++::geo::Point {
 ## In Rust
 
 Each member function becomes an associated function of the Rust type, which takes `this` as its
-first argument, as a `CppRef<Self, Const>` for `const` member functions and a `CppRef<Self, Mut>`
-otherwise:
+first argument, as a `CppRef<Const<Self>>` for `const` member functions and a `CppRef<Self>`
+otherwise (see [`Const`](./cpp_pointers.md)):
 
 ```rust
 let mut p = Point::origin();
 Point::scale(p.as_mut(), 2);
 let n = Point::norm(p.as_ref());
-let x: CppRef<i32, Mut> = Point::x_mut(p.as_mut());
+let x: CppRef<i32> = Point::x_mut(p.as_mut());
 x.write(x.read() + 1);
 ```
+
+So only `const` member functions can be called on a `const` object (a `Const<Point>`, or a
+`CppRef<Const<Point>>`), like in C++.
 
 They're not Rust methods (`p.norm()`), because Rust methods can't take a `CppRef` as `self` on
 stable Rust yet (see [Future work](../future_work.md)).

@@ -38,11 +38,11 @@ Rust can also call existing C++ functions directly: [member functions](./call_cp
 Declaring one `safe` promises the same as above: that no arguments can cause UB.
 Their C++ references and pointers come with these guarantees:
 
-- A `CppRef<T, Const>` (`const T&`) or `CppRef<T, Mut>` (`T&`) refers to a valid `T`
+- A `CppRef<Const<T>>` (`const T&`) or `CppRef<T>` (`T&`) refers to a valid `T`
   (making one from a raw pointer is `unsafe`, and that's where the promise is made).
   But it has no lifetime, other references may alias it,
   and a `const` one only means that the object isn't modified through it.
-- A `CppPtr<T, Const>` (`const T*`) or `CppPtr<T, Mut>` (`T*`) has no guarantee, like a raw pointer.
+- A `CppPtr<Const<T>>` (`const T*`) or `CppPtr<T>` (`T*`) has no guarantee, like a raw pointer.
   zngur requires functions that take one to be `unsafe`.
 
 Many C++ functions have preconditions beyond that (a valid index, a non-empty container, ...).

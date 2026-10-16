@@ -23,8 +23,10 @@ Ideas and known gaps, mostly in calling C++ from Rust. None of these is designed
   Global ones could be declared in `mod c++ { ... }`, for Rust functions at the root of the
   generated `c++::` tree.
 - **More template arguments.** [Class templates](./call_cpp_from_rust/cpp_templates.md) don't take
-  non-type arguments (`std::array<T, 4>`), `const` arguments (`std::unique_ptr<const T>`), function
-  types or nested types yet. Alias templates cover many of these cases today.
+  non-type arguments (`std::array<T, 4>`), function types or nested types yet. Alias templates
+  cover many of these cases today. (`const` arguments, like `std::span<const i32>`, work.)
+- **Implicit `const` conversions.** Going from a `T` to a `Const<T>` is explicit (`.as_const()`).
+  A conversion trait, used by the generated functions, could make it implicit.
 - **More builtin types.** `char` (whose signedness varies), `void*`, and rvalue references (`T&&`)
   can't be written in a `.zng` file yet.
 

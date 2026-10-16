@@ -4,13 +4,15 @@ mod generated;
 use std::mem::MaybeUninit;
 
 use generated::{MyConservativeWrapper, MyCppWrapper};
-use zngur_lib::{CppPtr, CppRef, ZngCppConstruct};
+use zngur_lib::{Const, CppPtr, CppRef, ZngCppConstruct, ZngCppObject};
 
 fn main() {
     let mut c = MyCppWrapper::new(5, 6);
     c.print();
 
     // C++ functions taking and returning C++ references (`CppRef`) and pointers (`CppPtr`).
+    // `c.as_ref()` is a `CppRef<Const<MyCppWrapper>>` (`const T&`), and `c.as_mut()` a
+    // `CppRef<MyCppWrapper>` (`T&`).
     let mut sum = 0;
     unsafe { generated::sum_into(c.as_ref(), CppPtr::from(CppRef::from(&mut sum))) };
     println!("sum = {sum}");
@@ -93,6 +95,24 @@ fn main() {
 
     assert_eq!(std::mem::size_of::<MyConservativeWrapper>(), 32);
     assert_eq!(std::mem::align_of::<MyConservativeWrapper>(), 16);
+
+    // `const` is part of the type: `Const<T>` is `const T`. Only `const` member functions take a
+    // `CppRef<Const<T>>`, and going from a `T` to a `Const<T>` is explicit.
+    let squares = generated::views::squares();
+    let len = generated::View::<Const<i32>>::size(squares.as_ref());
+    let third: i32 = unsafe { generated::View::<Const<i32>>::at(squares.as_ref(), 3) }.read();
+    println!("squares = {len} items, squares[3] = {third}");
+    let mut point = MyCppWrapper::build((2, 3));
+    let exclusive: &mut Const<MyCppWrapper> = point.as_const_mut();
+    println!(
+        "const sum() = {}",
+        MyCppWrapper::sum(CppRef::from(exclusive))
+    );
+    let frozen = Const::new(MyCppWrapper::build((4, 5)));
+    println!(
+        "frozen sum() = {}",
+        MyCppWrapper::sum(CppRef::from(&frozen))
+    );
 
     let mut vec = Vec::new();
     let cons = MyConservativeWrapper::new(10, 20);

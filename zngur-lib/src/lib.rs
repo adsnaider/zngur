@@ -1,9 +1,69 @@
-/// Marker trait for C++ objects
+/// Marker trait for C++ objects: the Rust wrappers of `c++::` types, and the builtins that are C++
+/// types too (`i32`, `f64`, `bool`, ...). These are the types that can be `const` ([`Const`]).
 ///
 /// # Safety
 ///
-/// Only generated C++ objects by zngur should implement this trait.
-pub unsafe trait ZngCppObject: Sized {}
+/// Only generated C++ objects by zngur (and the builtins in this crate) should implement this
+/// trait.
+pub unsafe trait ZngCppObject: Sized {
+    /// The object, as a `const` object.
+    fn as_const(&self) -> &Const<Self> {
+        // SAFETY: `Const<Self>` is `#[repr(transparent)]` around `Self`.
+        unsafe { &*(self as *const Self as *const Const<Self>) }
+    }
+
+    /// The object, as a `const` object that nothing else can access while the reference lives.
+    fn as_const_mut(&mut self) -> &mut Const<Self> {
+        // SAFETY: `Const<Self>` is `#[repr(transparent)]` around `Self`.
+        unsafe { &mut *(self as *mut Self as *mut Const<Self>) }
+    }
+}
+
+macro_rules! impl_cpp_object_for_builtins {
+    ($($ty:ty),*) => {
+        $(unsafe impl ZngCppObject for $ty {})*
+    };
+}
+
+impl_cpp_object_for_builtins!(i8, i16, i32, i64, u8, u16, u32, u64, usize, f32, f64, bool);
+
+/// A `const` C++ object: `Const<T>` is `const T` in C++, e.g. `CppRef<Const<T>>` is `const T&`,
+/// and `c++::std::span<const i32>` is `std::span<Const<i32>>`.
+///
+/// It has the same layout as `T`, but only the `const` member functions of a C++ type are
+/// available on it (and on `CppRef<Const<T>>`). There's no `Deref` to `T`, which would make the
+/// others available too. Going the other way, from a `T` to a `const T`, is explicit:
+/// [`ZngCppObject::as_const`] or `CppRef::as_const`.
+///
+/// ```compile_fail
+/// # use zngur_lib::*;
+/// let x = 5;
+/// let r: CppRef<Const<i32>> = CppRef::from(&x);
+/// r.write(6); // Error: a reference to `const` can't be written through.
+/// ```
+#[repr(transparent)]
+pub struct Const<T: ZngCppObject>(T);
+
+impl<T: ZngCppObject> Const<T> {
+    /// Makes `value` `const`.
+    pub const fn new(value: T) -> Self {
+        Const(value)
+    }
+}
+
+impl<T: ZngCppObject + Clone> Clone for Const<T> {
+    fn clone(&self) -> Self {
+        Const(self.0.clone())
+    }
+}
+
+impl<T: ZngCppObject + Copy> Copy for Const<T> {}
+
+impl<T: ZngCppObject + core::fmt::Debug> core::fmt::Debug for Const<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "Const({:?})", self.0)
+    }
+}
 // Note on `Sized` bound: For now all C++ objects are Sized. Stack objects are by definition Sized.
 // Heap and Ref objects aren't as clear but they are currently represented as 0-sized types since
 // extern_types don't exist yet. MaybeUninit<T> requires T: Sized for now. Maybe by the time we
@@ -153,21 +213,7 @@ mod sealed {
     pub trait Sealed {}
 }
 
-/// Whether a [`CppRef`] or [`CppPtr`] refers to a `const` object ([`Const`]) or not ([`Mut`]).
-pub trait Constness: sealed::Sealed + 'static {}
-
-/// Marks a [`CppRef`] or [`CppPtr`] to a `const` object, like `const T&` or `const T*` in C++.
-pub enum Const {}
-
-/// Marks a [`CppRef`] or [`CppPtr`] to a non-`const` object, like `T&` or `T*` in C++.
-pub enum Mut {}
-
-impl sealed::Sealed for Const {}
-impl sealed::Sealed for Mut {}
-impl Constness for Const {}
-impl Constness for Mut {}
-
-/// A C++ reference (`const T&` or `T&`) to a `T`.
+/// A C++ reference to a `T`: `CppRef<T>` is `T&`, and `CppRef<Const<T>>` is `const T&`.
 ///
 /// Like a C++ reference, it always refers to a valid object: making one from a Rust reference is
 /// safe, and making one from a raw pointer is `unsafe`. So C++ functions that only take references
@@ -177,55 +223,53 @@ impl Constness for Mut {}
 /// keeps the object alive), other C++ references can alias it, and `const` only means that the
 /// object can't be modified through this particular reference. So getting a Rust reference to the
 /// object from it ([`as_ref`](CppRef::as_ref), [`as_mut`](CppRef::as_mut)) is `unsafe`, but copying
-/// a `Copy` object in or out ([`read`](CppRef::read), [`write`](CppRef::write)) isn't.
+/// a builtin in or out ([`read`](CppRef::read), [`write`](CppRef::write)) isn't.
 ///
-/// A `CppRef<T, Mut>` converts to a `CppRef<T, Const>`, and to a [`CppPtr`], but not the other way
-/// around.
+/// A `CppRef<T>` converts to a `CppRef<Const<T>>` ([`as_const`](CppRef::as_const)), and to a
+/// [`CppPtr`], but not the other way around.
 #[repr(transparent)]
-pub struct CppRef<T, C: Constness = Const> {
+pub struct CppRef<T> {
     ptr: core::ptr::NonNull<T>,
-    _constness: core::marker::PhantomData<C>,
 }
 
-/// A C++ pointer (`const T*` or `T*`) to a `T`.
+/// A C++ pointer to a `T`: `CppPtr<T>` is `T*`, and `CppPtr<Const<T>>` is `const T*`.
 ///
 /// Like a C++ pointer, it can be null or dangling: creating and copying one is safe, but anything
 /// that dereferences it is `unsafe`, including turning it into a [`CppRef`]
 /// ([`as_cpp_ref`](CppPtr::as_cpp_ref)).
 ///
-/// A `CppPtr<T, Mut>` converts to a `CppPtr<T, Const>`, but not the other way around.
+/// A `CppPtr<T>` converts to a `CppPtr<Const<T>>`, but not the other way around.
 #[repr(transparent)]
-pub struct CppPtr<T, C: Constness = Const> {
+pub struct CppPtr<T> {
     ptr: *mut T,
-    _constness: core::marker::PhantomData<C>,
 }
 
 macro_rules! impl_common {
     ($ty:ident) => {
-        impl<T, C: Constness> Clone for $ty<T, C> {
+        impl<T> Clone for $ty<T> {
             fn clone(&self) -> Self {
                 *self
             }
         }
 
-        impl<T, C: Constness> Copy for $ty<T, C> {}
+        impl<T> Copy for $ty<T> {}
 
-        impl<T, C: Constness> PartialEq for $ty<T, C> {
+        impl<T> PartialEq for $ty<T> {
             fn eq(&self, other: &Self) -> bool {
                 core::ptr::eq(self.raw(), other.raw())
             }
         }
 
-        impl<T, C: Constness> Eq for $ty<T, C> {}
+        impl<T> Eq for $ty<T> {}
 
-        impl<T, C: Constness> core::fmt::Debug for $ty<T, C> {
+        impl<T> core::fmt::Debug for $ty<T> {
             fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
                 write!(f, concat!(stringify!($ty), "({:p})"), self.raw())
             }
         }
 
-        impl<T> From<$ty<T, Mut>> for $ty<T, Const> {
-            fn from(p: $ty<T, Mut>) -> Self {
+        impl<T: ZngCppObject> From<$ty<T>> for $ty<Const<T>> {
+            fn from(p: $ty<T>) -> Self {
                 p.as_const()
             }
         }
@@ -235,24 +279,54 @@ macro_rules! impl_common {
 impl_common!(CppRef);
 impl_common!(CppPtr);
 
-impl<T, C: Constness> CppRef<T, C> {
+/// The types that [`CppRef::read`] can copy out of a C++ object: builtins (`i32`, ...), C++
+/// pointers ([`CppPtr`]), and `const` ones, whose value is the non-`const` one.
+///
+/// # Safety
+///
+/// `Self` must have the same layout as `Value`, and copying it must be fine.
+pub unsafe trait CppCopy {
+    /// The value that is copied out.
+    type Value: Copy;
+}
+
+unsafe impl<T: ZngCppObject + Copy> CppCopy for T {
+    type Value = T;
+}
+
+unsafe impl<T: ZngCppObject + Copy> CppCopy for Const<T> {
+    type Value = T;
+}
+
+// C++ pointers are C++ objects too, which can be `const` (`T* const`, e.g. a `const` field of
+// pointer type).
+unsafe impl<T> ZngCppObject for CppPtr<T> {}
+
+impl<T> CppRef<T> {
     fn raw(&self) -> *mut T {
         self.ptr.as_ptr()
     }
 
-    /// Converts to a reference to `const`.
-    pub const fn as_const(self) -> CppRef<T, Const> {
-        CppRef {
-            ptr: self.ptr,
-            _constness: core::marker::PhantomData,
+    /// A reference from a raw pointer.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must point to a valid `T`, for as long as the reference is used.
+    pub const unsafe fn from_raw(ptr: *mut T) -> Self {
+        Self {
+            ptr: unsafe { core::ptr::NonNull::new_unchecked(ptr) },
         }
     }
 
+    /// The raw pointer.
+    pub const fn as_raw(self) -> *mut T {
+        self.ptr.as_ptr()
+    }
+
     /// Converts to a pointer.
-    pub const fn as_ptr(self) -> CppPtr<T, C> {
+    pub const fn as_ptr(self) -> CppPtr<T> {
         CppPtr {
             ptr: self.ptr.as_ptr(),
-            _constness: core::marker::PhantomData,
         }
     }
 
@@ -265,63 +339,9 @@ impl<T, C: Constness> CppRef<T, C> {
     pub unsafe fn as_ref<'a>(self) -> &'a T {
         unsafe { self.ptr.as_ref() }
     }
-}
 
-impl<T: Copy, C: Constness> CppRef<T, C> {
-    /// Copies the object out, e.g. the value of a field of builtin type.
-    pub fn read(self) -> T {
-        // SAFETY: The reference is valid, and `T` is `Copy`.
-        unsafe { self.ptr.read() }
-    }
-}
-
-impl<T: Copy> CppRef<T, Mut> {
-    /// Overwrites the object, e.g. the value of a field of builtin type.
-    pub fn write(self, value: T) {
-        // SAFETY: The reference is valid and refers to a non-`const` object, and `T` is `Copy`, so
-        // the old value doesn't need to be dropped.
-        unsafe { self.ptr.write(value) }
-    }
-}
-
-impl<T> CppRef<T, Const> {
-    /// A reference to `const` from a raw pointer.
-    ///
-    /// # Safety
-    ///
-    /// `ptr` must point to a valid `T`, for as long as the reference is used.
-    pub const unsafe fn from_raw(ptr: *const T) -> Self {
-        Self {
-            ptr: unsafe { core::ptr::NonNull::new_unchecked(ptr as *mut T) },
-            _constness: core::marker::PhantomData,
-        }
-    }
-
-    /// The raw pointer.
-    pub const fn as_raw(self) -> *const T {
-        self.ptr.as_ptr()
-    }
-}
-
-impl<T> CppRef<T, Mut> {
-    /// A reference to non-`const` from a raw pointer.
-    ///
-    /// # Safety
-    ///
-    /// `ptr` must point to a valid `T`, for as long as the reference is used.
-    pub const unsafe fn from_raw(ptr: *mut T) -> Self {
-        Self {
-            ptr: unsafe { core::ptr::NonNull::new_unchecked(ptr) },
-            _constness: core::marker::PhantomData,
-        }
-    }
-
-    /// The raw pointer.
-    pub const fn as_raw(self) -> *mut T {
-        self.ptr.as_ptr()
-    }
-
-    /// Returns a mutable Rust reference to the object.
+    /// Returns a mutable Rust reference to the object. For a `CppRef<Const<T>>`, that's a
+    /// `&mut Const<T>`, which still only gives access to the `const` member functions.
     ///
     /// # Safety
     ///
@@ -332,27 +352,81 @@ impl<T> CppRef<T, Mut> {
     }
 }
 
-impl<T> From<&T> for CppRef<T, Const> {
+impl<T: ZngCppObject> CppRef<T> {
+    /// Converts to a reference to `const`.
+    pub const fn as_const(self) -> CppRef<Const<T>> {
+        CppRef {
+            ptr: self.ptr.cast(),
+        }
+    }
+}
+
+impl<T: ZngCppObject> CppRef<Const<T>> {
+    /// A reference to `const` from a raw pointer.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must point to a valid `T`, for as long as the reference is used.
+    pub const unsafe fn from_const_raw(ptr: *const T) -> Self {
+        unsafe { Self::from_raw(ptr as *mut Const<T>) }
+    }
+
+    /// The raw pointer, to `T`.
+    pub const fn as_const_raw(self) -> *const T {
+        self.ptr.as_ptr() as *const T
+    }
+}
+
+impl<T: CppCopy> CppRef<T> {
+    /// Copies the object out, e.g. the value of a field of builtin type.
+    pub fn read(self) -> T::Value {
+        // SAFETY: The reference is valid, and `T` is a `Value` that can be copied.
+        unsafe { self.ptr.cast::<T::Value>().read() }
+    }
+}
+
+impl<T: CppCopy<Value = T>> CppRef<T> {
+    /// Overwrites the object, e.g. the value of a field of builtin type. References to `const`
+    /// don't have it.
+    pub fn write(self, value: T) {
+        // SAFETY: The reference is valid and refers to a non-`const` object, and `T` is `Copy`, so
+        // the old value doesn't need to be dropped.
+        unsafe { self.ptr.write(value) }
+    }
+}
+
+impl<T: ZngCppObject> From<&T> for CppRef<Const<T>> {
     fn from(r: &T) -> Self {
-        // SAFETY: A Rust reference points to a valid object.
-        unsafe { Self::from_raw(r) }
+        CppRef {
+            ptr: core::ptr::NonNull::from(r).cast(),
+        }
     }
 }
 
-impl<T> From<&mut T> for CppRef<T, Mut> {
+impl<T: ZngCppObject> From<&Const<T>> for CppRef<Const<T>> {
+    fn from(r: &Const<T>) -> Self {
+        CppRef {
+            ptr: core::ptr::NonNull::from(r),
+        }
+    }
+}
+
+/// Also makes a `CppRef<Const<T>>` from a `&mut Const<T>`.
+impl<T> From<&mut T> for CppRef<T> {
     fn from(r: &mut T) -> Self {
-        // SAFETY: A Rust reference points to a valid object.
-        unsafe { Self::from_raw(r) }
+        CppRef {
+            ptr: core::ptr::NonNull::from(r),
+        }
     }
 }
 
-impl<T, C: Constness> From<CppRef<T, C>> for CppPtr<T, C> {
-    fn from(r: CppRef<T, C>) -> Self {
+impl<T> From<CppRef<T>> for CppPtr<T> {
+    fn from(r: CppRef<T>) -> Self {
         r.as_ptr()
     }
 }
 
-impl<T, C: Constness> CppPtr<T, C> {
+impl<T> CppPtr<T> {
     fn raw(&self) -> *mut T {
         self.ptr
     }
@@ -361,7 +435,6 @@ impl<T, C: Constness> CppPtr<T, C> {
     pub const fn null() -> Self {
         Self {
             ptr: core::ptr::null_mut(),
-            _constness: core::marker::PhantomData,
         }
     }
 
@@ -370,12 +443,14 @@ impl<T, C: Constness> CppPtr<T, C> {
         self.ptr.is_null()
     }
 
-    /// Converts to a pointer to `const`.
-    pub const fn as_const(self) -> CppPtr<T, Const> {
-        CppPtr {
-            ptr: self.ptr,
-            _constness: core::marker::PhantomData,
-        }
+    /// A pointer from a raw pointer.
+    pub const fn from_raw(ptr: *mut T) -> Self {
+        Self { ptr }
+    }
+
+    /// The raw pointer.
+    pub const fn as_raw(self) -> *mut T {
+        self.ptr
     }
 
     /// Returns a [`CppRef`] to the object, or `None` if the pointer is null.
@@ -383,10 +458,9 @@ impl<T, C: Constness> CppPtr<T, C> {
     /// # Safety
     ///
     /// The pointer must be null or point to a valid `T`, for as long as the reference is used.
-    pub unsafe fn as_cpp_ref(self) -> Option<CppRef<T, C>> {
+    pub unsafe fn as_cpp_ref(self) -> Option<CppRef<T>> {
         Some(CppRef {
             ptr: core::ptr::NonNull::new(self.ptr)?,
-            _constness: core::marker::PhantomData,
         })
     }
 
@@ -400,36 +474,6 @@ impl<T, C: Constness> CppPtr<T, C> {
     pub unsafe fn as_ref<'a>(self) -> Option<&'a T> {
         unsafe { self.ptr.as_ref() }
     }
-}
-
-impl<T> CppPtr<T, Const> {
-    /// A pointer to `const` from a raw pointer.
-    pub const fn from_raw(ptr: *const T) -> Self {
-        Self {
-            ptr: ptr as *mut T,
-            _constness: core::marker::PhantomData,
-        }
-    }
-
-    /// The raw pointer.
-    pub const fn as_raw(self) -> *const T {
-        self.ptr
-    }
-}
-
-impl<T> CppPtr<T, Mut> {
-    /// A pointer to non-`const` from a raw pointer.
-    pub const fn from_raw(ptr: *mut T) -> Self {
-        Self {
-            ptr,
-            _constness: core::marker::PhantomData,
-        }
-    }
-
-    /// The raw pointer.
-    pub const fn as_raw(self) -> *mut T {
-        self.ptr
-    }
 
     /// Returns a mutable Rust reference to the object, or `None` if the pointer is null.
     ///
@@ -442,27 +486,74 @@ impl<T> CppPtr<T, Mut> {
     }
 }
 
+impl<T: ZngCppObject> CppPtr<T> {
+    /// Converts to a pointer to `const`.
+    pub const fn as_const(self) -> CppPtr<Const<T>> {
+        CppPtr {
+            ptr: self.ptr as *mut Const<T>,
+        }
+    }
+}
+
+impl<T: ZngCppObject> CppPtr<Const<T>> {
+    /// A pointer to `const` from a raw pointer.
+    pub const fn from_const_raw(ptr: *const T) -> Self {
+        Self {
+            ptr: ptr as *mut Const<T>,
+        }
+    }
+
+    /// The raw pointer, to `T`.
+    pub const fn as_const_raw(self) -> *const T {
+        self.ptr as *const T
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn const_basics() {
+        let mut x = 5;
+        assert_eq!(
+            x.as_const() as *const Const<i32> as *const i32,
+            &x as *const i32
+        );
+        let c: &mut Const<i32> = x.as_const_mut();
+        let r: CppRef<Const<i32>> = c.into();
+        assert_eq!(r.read(), 5);
+        let copy = Const::new(7);
+        let copy2 = copy;
+        assert_eq!(CppRef::from(&copy).read() + CppRef::from(&copy2).read(), 14);
+        assert_eq!(
+            core::mem::size_of::<Const<f64>>(),
+            core::mem::size_of::<f64>()
+        );
+    }
+
+    #[test]
     fn cpp_ref_basics() {
         let mut x = 5;
-        let r: CppRef<i32, Mut> = (&mut x).into();
+        let r: CppRef<i32> = (&mut x).into();
         unsafe { *r.as_mut() = 6 };
-        let c: CppRef<i32> = r.into();
-        assert_eq!(unsafe { *c.as_ref() }, 6);
+        let c: CppRef<Const<i32>> = r.into();
+        assert_eq!(c.read(), 6);
         r.write(7);
         assert_eq!(c.read(), 7);
-        assert_eq!(c, unsafe { CppRef::<i32>::from_raw(&x as *const i32) });
+        assert_eq!(c, r.as_const());
+        assert_eq!(c, unsafe { CppRef::from_const_raw(&x as *const i32) });
+        assert_eq!(
+            CppRef::<Const<i32>>::from(&x).as_const_raw(),
+            &x as *const i32
+        );
         // Same size and ABI as a pointer, and `Option<CppRef>` too.
         assert_eq!(
-            core::mem::size_of::<CppRef<i32, Mut>>(),
+            core::mem::size_of::<CppRef<i32>>(),
             core::mem::size_of::<*mut i32>()
         );
         assert_eq!(
-            core::mem::size_of::<Option<CppRef<i32>>>(),
+            core::mem::size_of::<Option<CppRef<Const<i32>>>>(),
             core::mem::size_of::<*mut i32>()
         );
     }
@@ -470,13 +561,13 @@ mod tests {
     #[test]
     fn cpp_ptr_basics() {
         let mut x = 5;
-        let r: CppRef<i32, Mut> = (&mut x).into();
-        let p: CppPtr<i32, Mut> = r.into();
+        let r: CppRef<i32> = (&mut x).into();
+        let p: CppPtr<i32> = r.into();
         assert!(!p.is_null());
         unsafe { *p.as_mut().unwrap() = 6 };
-        let c: CppPtr<i32> = p.into();
-        assert_eq!(unsafe { c.as_ref() }, Some(&6));
-        assert_eq!(c, CppPtr::<i32>::from_raw(&x as *const i32));
+        let c: CppPtr<Const<i32>> = p.into();
+        assert_eq!(unsafe { c.as_cpp_ref() }.map(|r| r.read()), Some(6));
+        assert_eq!(c, CppPtr::from_const_raw(&x as *const i32));
         assert_eq!(
             unsafe { c.as_cpp_ref() }.map(|r| r.as_raw()),
             Some(c.as_raw())
@@ -484,8 +575,13 @@ mod tests {
         assert!(CppPtr::<i32>::null().is_null());
         assert_eq!(unsafe { CppPtr::<i32>::null().as_ref() }, None);
         assert_eq!(unsafe { CppPtr::<i32>::null().as_cpp_ref() }, None);
+        // Pointers to pointers: a field of pointer type.
+        let mut ptr = CppPtr::<i32>::null();
+        let field: CppRef<CppPtr<i32>> = (&mut ptr).into();
+        field.write(p);
+        assert_eq!(field.read(), p);
         assert_eq!(
-            core::mem::size_of::<CppPtr<i32, Mut>>(),
+            core::mem::size_of::<CppPtr<i32>>(),
             core::mem::size_of::<*mut i32>()
         );
     }
