@@ -915,6 +915,7 @@ mod tests {
         ty.cpp_methods = vec![
             ZngurCppMethod {
                 cpp_name: "value".to_owned(),
+                template_args: vec![],
                 rust_name: None,
                 receiver: ZngurMethodReceiver::Ref(Mutability::Not),
                 inputs: vec![],
@@ -923,6 +924,7 @@ mod tests {
             },
             ZngurCppMethod {
                 cpp_name: "set".to_owned(),
+                template_args: vec![],
                 rust_name: Some("set_from".to_owned()),
                 receiver: ZngurMethodReceiver::Ref(Mutability::Mut),
                 inputs: vec![RustType::CppPtr(
@@ -935,6 +937,7 @@ mod tests {
             },
             ZngurCppMethod {
                 cpp_name: "make".to_owned(),
+                template_args: vec![],
                 rust_name: None,
                 receiver: ZngurMethodReceiver::Static,
                 inputs: vec![i32.clone(), b.clone()],
@@ -1130,6 +1133,7 @@ mod tests {
             cpp_funcs: vec![ZngurCppFn {
                 namespace: vec!["a".to_owned(), "b".to_owned()],
                 cpp_name: "f".to_owned(),
+                template_args: vec![],
                 rust_name: Some("g".to_owned()),
                 inputs: vec![i32.clone()],
                 output: i32,
@@ -1211,6 +1215,7 @@ mod tests {
             cpp_funcs: vec![ZngurCppFn {
                 namespace: vec!["shapes".to_owned()],
                 cpp_name: "Mirror".to_owned(),
+                template_args: vec![],
                 rust_name: None,
                 inputs: vec![point.clone()],
                 output: point,
@@ -1227,6 +1232,44 @@ mod tests {
             cpp_code.contains(
                 "new (o) ::geo::Point(::shapes::Mirror(::rust::__zngur_internal_move_from_rust< \
                  ::rust::cpp::geo::Point >(i0).cpp()));"
+            ),
+            "{cpp_code}"
+        );
+    }
+
+    #[test]
+    fn cpp_function_templates_are_called_with_their_template_arguments() {
+        let point = cpp(&["geo", "Point"]);
+        let unique_ptr = RustType::Cpp(CppTypePath {
+            path: vec!["std".to_owned(), "unique_ptr".to_owned()],
+            generics: vec![point.clone()],
+        });
+        let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+        let spec = ZngurSpec {
+            types: vec![
+                minimal_stack_owned_type(point.clone(), 8, 4),
+                minimal_stack_owned_type(unique_ptr.clone(), 8, 8),
+            ],
+            cpp_funcs: vec![ZngurCppFn {
+                namespace: vec!["std".to_owned()],
+                cpp_name: "make_unique".to_owned(),
+                template_args: vec![point],
+                rust_name: Some("make_point".to_owned()),
+                inputs: vec![i32.clone(), i32],
+                output: unique_ptr,
+                is_safe: true,
+            }],
+            ..Default::default()
+        };
+        let (rust_code, _h, cpp_code) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let cpp_code = cpp_code.expect("C++ functions need a C++ file");
+
+        assert!(rust_code.contains("as make_point;"), "{rust_code}");
+        assert!(
+            cpp_code.contains(
+                "new (o) ::std::unique_ptr< ::geo::Point >(::std::make_unique< ::geo::Point \
+                 >(::rust::__zngur_internal_move_from_rust< ::int32_t >(i0), "
             ),
             "{cpp_code}"
         );

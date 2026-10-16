@@ -367,11 +367,12 @@ enum ProcessedItem<'a> {
 }
 
 /// A free C++ function, declared in a `c++::` scope:
-/// `(safe | unsafe) fn name(types...) [-> type] [as rust_name];`
+/// `(safe | unsafe) fn name[<types...>](types...) [-> type] [as rust_name];`
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedCppFn<'a> {
     is_safe: bool,
     name: &'a str,
+    template_args: Vec<ParsedRustType<'a>>,
     inputs: Vec<ParsedRustType<'a>>,
     output: ParsedRustType<'a>,
     rust_name: Option<&'a str>,
@@ -429,11 +430,12 @@ enum ParsedTypeItem<'a> {
         cpp_name: Option<&'a str>,
     },
     /// A C++ member function, declared C++-style:
-    /// `(safe | unsafe) [static] fn name(types...) [const] [-> type] [as rust_name];`
+    /// `(safe | unsafe) [static] fn name[<types...>](types...) [const] [-> type] [as rust_name];`
     CppMethod {
         is_safe: bool,
         is_static: bool,
         name: &'a str,
+        template_args: Vec<ParsedRustType<'a>>,
         inputs: Vec<ParsedRustType<'a>>,
         is_const: bool,
         output: ParsedRustType<'a>,
@@ -963,6 +965,7 @@ impl ProcessedItem<'_> {
                             is_safe,
                             is_static,
                             name,
+                            template_args,
                             inputs,
                             is_const,
                             output,
@@ -992,6 +995,10 @@ impl ProcessedItem<'_> {
                             }
                             let method = ZngurCppMethod {
                                 cpp_name: name.to_owned(),
+                                template_args: template_args
+                                    .into_iter()
+                                    .map(|x| x.to_zngur(scope))
+                                    .collect(),
                                 rust_name: rust_name.map(|n| n.to_owned()),
                                 receiver,
                                 inputs,
@@ -1304,6 +1311,11 @@ impl ProcessedItem<'_> {
                 let func = ZngurCppFn {
                     namespace,
                     cpp_name: f.name.to_owned(),
+                    template_args: f
+                        .template_args
+                        .into_iter()
+                        .map(|x| x.to_zngur(scope))
+                        .collect(),
                     rust_name: f.rust_name.map(|n| n.to_owned()),
                     inputs,
                     output: f.output.to_zngur(scope),
@@ -3535,6 +3547,7 @@ fn inner_type_item<'a>()
             .map(|s| s.is_some())
             .then_ignore(just(Token::KwFn))
             .then(cpp_name())
+            .then(cpp_template_args())
             .then(cpp_params.clone())
             .then(just(Token::KwConst).or_not().map(|c| c.is_some()))
             .then(just(Token::Arrow).ignore_then(rust_type()).or_not())
@@ -3544,11 +3557,15 @@ fn inner_type_item<'a>()
                     .or_not(),
             )
             .map(
-                |(((((is_static, name), inputs), is_const), output), rust_name)| {
+                |(
+                    (((((is_static, name), template_args), inputs), is_const), output),
+                    rust_name,
+                )| {
                     ParsedTypeItem::CppMethod {
                         is_safe: false, // Set below.
                         is_static,
                         name,
+                        template_args,
                         inputs,
                         is_const,
                         output: output.unwrap_or(ParsedRustType::Tuple(vec![])),
@@ -3714,6 +3731,18 @@ fn cpp_name<'a>() -> impl Parser<'a, ParserInput<'a>, &'a str, ZngParserExtra<'a
     }
 }
 
+/// Explicit template arguments of a C++ function template: `<types...>`, or nothing.
+fn cpp_template_args<'a>()
+-> impl Parser<'a, ParserInput<'a>, Vec<ParsedRustType<'a>>, ZngParserExtra<'a>> + Clone {
+    rust_type()
+        .separated_by(just(Token::Comma))
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::AngleOpen), just(Token::AngleClose))
+        .or_not()
+        .map(Option::unwrap_or_default)
+}
+
 fn cpp_fn_item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngParserExtra<'a>> + Clone
 {
     let cpp_fn = choice((
@@ -3722,6 +3751,7 @@ fn cpp_fn_item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngPars
     ))
     .then_ignore(just(Token::KwFn))
     .then(cpp_name())
+    .then(cpp_template_args())
     .then(
         rust_type()
             .separated_by(just(Token::Comma))
@@ -3736,9 +3766,10 @@ fn cpp_fn_item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngPars
             .or_not(),
     )
     .map(
-        |((((is_safe, name), inputs), output), rust_name)| ParsedCppFn {
+        |(((((is_safe, name), template_args), inputs), output), rust_name)| ParsedCppFn {
             is_safe,
             name,
+            template_args,
             inputs,
             output: output.unwrap_or(ParsedRustType::Tuple(vec![])),
             rust_name,

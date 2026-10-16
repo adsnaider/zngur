@@ -109,13 +109,18 @@ See `examples/multiple_modules` for a complete example.
 - Every instantiation of a template must have the same number of template arguments.
 - Non-type template arguments (`std::array<T, 4>`), `const` arguments (`unique_ptr<const T>`),
   function types (`std::function<int(int)>`) and nested types (`std::vector<int>::iterator`) aren't
-  supported. Give them a name with a C++ alias instead, and use that:
+  supported. Give them a name with a C++ alias instead, and use that. An alias template keeps the
+  type parameterized, so zngur sees an ordinary class template:
 
   ```cpp
-  namespace my { using IntFn = std::function<int(int)>; }
+  namespace my {
+  template <typename R, typename A> using Fn = std::function<R(A)>;
+  using IntFn = std::function<int(int)>;
+  }
   ```
 
   ```zng
+  type c++::my::Fn<i32, i32> { ... }
   type c++::my::IntFn { ... }
   ```
 

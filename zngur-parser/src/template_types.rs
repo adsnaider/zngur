@@ -270,6 +270,7 @@ pub fn try_match_template(ty: &RustType, template: &ZngurType) -> Option<Templat
         cpp_methods: cpp_methods
             .iter()
             .map(|m| ZngurCppMethod {
+                template_args: m.template_args.iter().map(substitute).collect(),
                 inputs: m.inputs.iter().map(substitute).collect(),
                 output: substitute(&m.output),
                 ..m.clone()

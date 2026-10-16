@@ -2936,3 +2936,39 @@ mod c++::a {
     assert_eq!(parsed.spec.cpp_funcs[0].cpp_name, "use");
     assert_eq!(parsed.spec.cpp_funcs[0].rust_name(), "use_");
 }
+
+#[test]
+fn cpp_function_template_args_parse() {
+    let parsed = parse_str(
+        r#"
+type c++::geo::Point {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe fn get<i32>() const -> i32 as get_i32;
+}
+
+type c++::std::unique_ptr<c++::geo::Point> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+}
+
+mod c++::std {
+    safe fn make_unique<c++::geo::Point>(i32, i32) -> c++::std::unique_ptr<c++::geo::Point> as make_point;
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let point = RustType::Cpp(vec!["geo".to_owned(), "Point".to_owned()].into());
+    let [func] = parsed.spec.cpp_funcs.as_slice() else {
+        panic!("expected one C++ function");
+    };
+    assert_eq!(func.cpp_name, "make_unique");
+    assert_eq!(func.template_args, vec![point]);
+    assert_eq!(func.cpp_path(), "::std::make_unique< ::geo::Point >");
+    let method = &parsed.spec.types[0].cpp_methods[0];
+    assert_eq!(
+        method.template_args,
+        vec![RustType::Primitive(PrimitiveRustType::Int(32))]
+    );
+}

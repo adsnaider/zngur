@@ -22,6 +22,8 @@ type c++::geo::Point {
 - The parameter and return types are the C++ ones, written as zngur types: builtins like `i32`,
   C++ types that Rust holds by value, and [C++ references and pointers](./cpp_pointers.md).
 - `as` gives the Rust function a different name, e.g. for C++ overloads, which Rust doesn't have.
+- Member function templates take explicit template arguments, like
+  [function templates](./cpp_functions.md#function-templates): `safe fn get<i32>() const -> i32 as get_i32;`.
 - Each member function is `safe` or `unsafe`, like the functions in `extern "C++"` blocks. `this`
   is a [`CppRef`](./cpp_pointers.md), which refers to a valid object, so member functions can be
   `safe`. Those with [C++ pointer](./cpp_pointers.md) parameters, which may be null or invalid,

@@ -505,13 +505,33 @@ impl WriteIDL for crate::ZngurFn {
     }
 }
 
+/// Explicit template arguments of a C++ function (`<c++::a::B, i32>`), if any.
+fn write_template_args<W: Write>(
+    p: &mut IDLPrinter<W>,
+    args: &[crate::RustType],
+) -> std::io::Result<()> {
+    if args.is_empty() {
+        return Ok(());
+    }
+    write!(p, "<")?;
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 {
+            write!(p, ", ")?;
+        }
+        p.write_idl(arg)?;
+    }
+    write!(p, ">")
+}
+
 impl WriteIDL for crate::ZngurCppFn {
     /// Only the declaration inside its `mod c++::<namespace>` block.
     fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
         if p.enabled(&IDLItem::Function) {
             let safety = if self.is_safe { "safe" } else { "unsafe" };
             let name = &self.cpp_name;
-            write!(p, "{safety} fn {name}(")?;
+            write!(p, "{safety} fn {name}")?;
+            write_template_args(p, &self.template_args)?;
+            write!(p, "(")?;
             p.write_idl(&self.inputs)?;
             write!(p, ")")?;
             if self.output != crate::RustType::UNIT {
@@ -927,7 +947,9 @@ impl WriteIDL for crate::ZngurCppMethod {
             let is_static = matches!(self.receiver, crate::ZngurMethodReceiver::Static);
             let static_kw = if is_static { "static " } else { "" };
             let name = &self.cpp_name;
-            write!(p, "{safety} {static_kw}fn {name}(")?;
+            write!(p, "{safety} {static_kw}fn {name}")?;
+            write_template_args(p, &self.template_args)?;
+            write!(p, "(")?;
             for (i, input) in self.inputs.iter().enumerate() {
                 if i > 0 {
                     write!(p, ", ")?;
@@ -1089,6 +1111,39 @@ mod crate::m {
 }
 mod crate {
     fn e();
+}
+",
+        idl
+    );
+}
+
+#[test]
+fn print_cpp_function_template_args() {
+    let point = crate::RustType::Cpp(vec!["geo".to_owned(), "Point".to_owned()].into());
+    let spec = crate::ZngurSpec {
+        cpp_funcs: vec![crate::ZngurCppFn {
+            namespace: vec!["std".to_owned()],
+            cpp_name: "make_unique".to_owned(),
+            template_args: vec![point.clone()],
+            rust_name: Some("make_point".to_owned()),
+            inputs: vec![crate::RustType::Primitive(crate::PrimitiveRustType::Int(
+                32,
+            ))],
+            output: crate::RustType::UNIT,
+            is_safe: true,
+        }],
+        ..Default::default()
+    };
+
+    let mut buf = Vec::new();
+    crate::printing::IDLPrinter::new(&mut buf)
+        .write_idl(&spec)
+        .expect("write error");
+    let idl = String::from_utf8(buf).expect("utf8 error");
+
+    assert_eq!(
+        "mod c++::std {
+    safe fn make_unique<c++::geo::Point>(i32) as make_point;
 }
 ",
         idl

@@ -1,0 +1,35 @@
+#cpp_additional_includes "
+#include <memory>
+#include <shapes.h>
+"
+
+type c++::shapes::Point {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+
+    safe constructor(i32, i32);
+    field const x (type = i32);
+    field const y (type = i32);
+}
+
+// No layout: Rust only refers to it.
+type c++::shapes::Canvas {
+    safe fn Draw(const c++::shapes::Point&);
+    safe fn Points() const -> i32;
+}
+
+type<T> c++::std::unique_ptr<T> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+
+    safe fn get() const -> T*;
+}
+
+type c++::std::unique_ptr<c++::shapes::Point> {}
+type c++::std::unique_ptr<c++::shapes::Canvas> {}
+
+// Instantiations of the function template `std::make_unique`, with explicit template arguments.
+mod c++::std {
+    safe fn make_unique<c++::shapes::Point>(i32, i32) -> c++::std::unique_ptr<c++::shapes::Point> as make_point;
+    safe fn make_unique<c++::shapes::Canvas>(i32, i32) -> c++::std::unique_ptr<c++::shapes::Canvas> as make_canvas;
+}

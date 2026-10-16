@@ -226,6 +226,8 @@ impl TriviallyRelocatable {
 pub struct ZngurCppMethod {
     /// The name of the C++ member function.
     pub cpp_name: String,
+    /// Explicit template arguments of a member function template (`fn get<i32>() -> i32;`).
+    pub template_args: Vec<RustType>,
     /// The name of the Rust function (from `as`), if it isn't `cpp_name`.
     pub rust_name: Option<String>,
     /// `Static` for static member functions, `Ref(Not)` for `const` member functions, and
@@ -290,6 +292,7 @@ impl ZngurCppField {
     pub fn as_cpp_method(&self) -> ZngurCppMethod {
         ZngurCppMethod {
             cpp_name: self.name.clone(),
+            template_args: vec![],
             rust_name: self.rust_name.clone(),
             receiver: ZngurMethodReceiver::Ref(self.mutability),
             inputs: vec![],
@@ -312,6 +315,9 @@ pub struct ZngurCppFn {
     pub namespace: Vec<String>,
     /// The name of the C++ function.
     pub cpp_name: String,
+    /// Explicit template arguments of a function template, e.g. `c++::geo::Point` for
+    /// `std::make_unique<c++::geo::Point>(i32, i32)`.
+    pub template_args: Vec<RustType>,
     /// The name of the Rust function (from `as`), if it isn't `cpp_name`.
     pub rust_name: Option<String>,
     pub inputs: Vec<RustType>,
@@ -325,14 +331,33 @@ impl ZngurCppFn {
         self.rust_name.as_deref().unwrap_or(&self.cpp_name)
     }
 
-    /// The qualified C++ name, e.g. `::ns::f`.
+    /// The qualified C++ name, with the template arguments, e.g. `::ns::f` or
+    /// `::std::make_unique< ::geo::Point >`.
     pub fn cpp_path(&self) -> String {
-        self.namespace
+        let path: String = self
+            .namespace
             .iter()
             .chain([&self.cpp_name])
             .map(|s| format!("::{s}"))
-            .collect()
+            .collect();
+        path + &cpp_template_args(&self.template_args)
     }
+}
+
+/// The C++ spelling of explicit template arguments (`< ::a::B, ::int32_t >`), or `""` if there are
+/// none.
+pub fn cpp_template_args(args: &[RustType]) -> String {
+    if args.is_empty() {
+        return String::new();
+    }
+    let args: Vec<String> = args
+        .iter()
+        .map(|arg| {
+            arg.cpp_spelling()
+                .unwrap_or_else(|_| format!("/* unsupported template argument: {arg} */"))
+        })
+        .collect();
+    format!("< {} >", args.join(", "))
 }
 
 #[derive(Debug, PartialEq)]
