@@ -30,6 +30,24 @@ You can assume these things about your parameters:
 If your function is unsound and requires some specific preconditions to be called,
 consider making it `unsafe` to prevent Rust code from calling it carelessly.
 
+## Existing C++ functions called from Rust
+
+Rust can also call existing C++ functions directly: [member functions](./call_cpp_from_rust/cpp_methods.md),
+[constructors](./call_cpp_from_rust/cpp_constructors.md) and
+[free functions](./call_cpp_from_rust/cpp_functions.md).
+Declaring one `safe` promises the same as above: that no arguments can cause UB.
+Their C++ references and pointers come with these guarantees:
+
+- A `CppRef<T, Const>` (`const T&`) or `CppRef<T, Mut>` (`T&`) refers to a valid `T`
+  (making one from a raw pointer is `unsafe`, and that's where the promise is made).
+  But it has no lifetime, other references may alias it,
+  and a `const` one only means that the object isn't modified through it.
+- A `CppPtr<T, Const>` (`const T*`) or `CppPtr<T, Mut>` (`T*`) has no guarantee, like a raw pointer.
+  zngur requires functions that take one to be `unsafe`.
+
+Many C++ functions have preconditions beyond that (a valid index, a non-empty container, ...).
+Declare those `unsafe`.
+
 ## Lifetimes
 
 In Rust, references have lifetime,

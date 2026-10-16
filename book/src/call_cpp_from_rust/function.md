@@ -1,6 +1,7 @@
-# Calling C++ free functions
+# Writing free functions in C++ for Rust
 
-You can call C++ functions that operate on Rust types.
+You can write C++ functions that operate on Rust types, and call them from Rust. (To call existing
+C++ functions directly, see [Free C++ functions](./cpp_functions.md).)
 First, you need to add that function signature in the `main.zng` file inside an `extern "C++"` block:
 
 ```Rust

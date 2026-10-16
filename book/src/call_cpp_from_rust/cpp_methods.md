@@ -44,7 +44,7 @@ x.write(x.read() + 1);
 ```
 
 They're not Rust methods (`p.norm()`), because Rust methods can't take a `CppRef` as `self` on
-stable Rust yet.
+stable Rust yet (see [Future work](../future_work.md)).
 
 ## In C++
 

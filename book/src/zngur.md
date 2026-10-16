@@ -35,9 +35,11 @@ In all of these differences, C++ has more freedom relative to Rust:
 So, Zngur allows you to use arbitrary Rust types in C++,
 store them by value on the C++ stack,
 and call arbitrary Rust methods and functions on them.
-But it doesn't bridge any C++ types into Rust,
-since it is not possible with the same ergonomics.
-Instead, Zngur allows you to write a rusty wrapper for your C++ library.
+In the other direction, Rust can call C++ functions and member functions directly,
+but it holds C++ objects by value only if they can be moved with `memcpy`,
+and refers to the others through references and smart pointers.
+For more idiomatic APIs, Zngur also allows you to write a rusty wrapper for your C++ library,
+in C++.
 It allows you to implement Rust traits for C++ types and cast them to `Box<dyn Trait>`,
 implement inherent methods on Rust types,
 implement Rust traits for Rust types,
