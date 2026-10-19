@@ -442,10 +442,11 @@ enum ParsedTypeItem<'a> {
         cpp_name: Option<&'a str>,
     },
     /// A C++ member function:
-    /// `(safe | unsafe) [static] fn name[<lifetimes..., types...>](receiver, types...) [-> type]
-    /// [as rust_name];`, where the receiver is `&self`, `&mut self` (with optional lifetimes),
-    /// `const self&`, `self&`, `const self*` or `self*`. `is_const` is a (no longer valid)
-    /// trailing `const`.
+    /// `(safe | unsafe) fn name[<lifetimes..., types...>]([receiver,] types...) [-> type]
+    /// [as rust_name];`, where the receiver is `&'a [unique] (const | var) self`, `const self&`,
+    /// `self&`, `const self*` or `self*`, and a member function without one is static.
+    /// `is_static` is a (no longer valid) `static`, and `is_const` a (no longer valid) trailing
+    /// `const`.
     CppMethod {
         is_safe: bool,
         is_static: bool,
@@ -1372,34 +1373,25 @@ impl ProcessedItem<'_> {
                                 );
                                 continue;
                             }
+                            if is_static {
+                                ctx.add_error_str(
+                                    "C++ static member functions are declared without a `self` \
+                                     receiver; remove `static`",
+                                    item_span,
+                                );
+                                continue;
+                            }
                             let parsed_receiver = inputs.first().and_then(as_receiver);
                             if parsed_receiver.is_some() {
                                 inputs.remove(0);
                             }
+                            // A member function without a `self` receiver is a static one.
                             let (receiver, receiver_constness, receiver_lifetime, raw_receiver) =
-                                match (is_static, parsed_receiver) {
-                                    (true, None) => {
+                                match parsed_receiver {
+                                    None => {
                                         (ZngurMethodReceiver::Static, CppConstness::Var, None, None)
                                     }
-                                    (true, Some(_)) => {
-                                        ctx.add_error_str(
-                                            "static member functions don't take `self`",
-                                            item_span,
-                                        );
-                                        continue;
-                                    }
-                                    (false, None) => {
-                                        ctx.add_error_str(
-                                            "C++ member functions need a receiver: \
-                                             `&'a const self` (`const` member functions), \
-                                             `&'a unique var self` or `&'a var self` (the others), \
-                                             or a raw one (`const self&`, `self&`, `const self*`, \
-                                             `self*`); static member functions are `static fn`",
-                                            item_span,
-                                        );
-                                        continue;
-                                    }
-                                    (false, Some(ParsedReceiver::RustRef(m, l))) => {
+                                    Some(ParsedReceiver::RustRef(m, l)) => {
                                         let l = l.map(|l| format!("'{l} ")).unwrap_or_default();
                                         let suggestion = match m {
                                             Mutability::Not => format!(
@@ -1420,14 +1412,11 @@ impl ProcessedItem<'_> {
                                         );
                                         continue;
                                     }
-                                    (
-                                        false,
-                                        Some(ParsedReceiver::Ref {
-                                            unique,
-                                            constness,
-                                            lifetime: l,
-                                        }),
-                                    ) => {
+                                    Some(ParsedReceiver::Ref {
+                                        unique,
+                                        constness,
+                                        lifetime: l,
+                                    }) => {
                                         let m = if unique {
                                             Mutability::Mut
                                         } else {
@@ -1440,7 +1429,7 @@ impl ProcessedItem<'_> {
                                             None,
                                         )
                                     }
-                                    (false, Some(ParsedReceiver::Raw(constness, indirection))) => {
+                                    Some(ParsedReceiver::Raw(constness, indirection)) => {
                                         // Raw receivers are associated functions; the `Ref`
                                         // only says that there is a `this`.
                                         let m = match constness {

@@ -1902,7 +1902,7 @@ mod c++::a {
 
         unsafe fn value(&const self) -> i32;
         unsafe fn set(&unique var self, i32, const B&);
-        safe static fn make(i32) -> B;
+        safe fn make(i32) -> B;
         unsafe fn get(&const self, i32) -> const i32& as get_const;
     }
 }
@@ -2006,38 +2006,38 @@ fn safe_static_cpp_method_with_cpp_ptr_warns() {
 type c++::B {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
-    safe static fn sum(const c++::B*) -> i32;
+    safe fn sum(const c++::B*) -> i32;
 }
 "#,
         expect![[r#"
             Warning: this C++ member function is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
                ╭─[ test.zng:5:5 ]
                │
-             5 │     safe static fn sum(const c++::B*) -> i32;
-               │     ────────────────────┬────────────────────  
-               │                         ╰────────────────────── this C++ member function is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
+             5 │     safe fn sum(const c++::B*) -> i32;
+               │     ─────────────────┬────────────────  
+               │                      ╰────────────────── this C++ member function is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
             ───╯
         "#]],
     );
 }
 
 #[test]
-fn static_const_cpp_method_is_rejected() {
+fn static_cpp_method_with_trailing_const_is_rejected() {
     check_fail(
         r#"
 type c++::B {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
-    safe static fn make() const -> c++::B;
+    safe fn make() const -> c++::B;
 }
 "#,
         expect![[r#"
             Error: C++ member functions take an explicit receiver instead of a trailing `const`: `&'a const self` for `const` member functions, and `&'a unique var self` (or `&'a var self`) for the others
                ╭─[ test.zng:5:5 ]
                │
-             5 │     safe static fn make() const -> c++::B;
-               │     ───────────────────┬──────────────────  
-               │                        ╰──────────────────── C++ member functions take an explicit receiver instead of a trailing `const`: `&'a const self` for `const` member functions, and `&'a unique var self` (or `&'a var self`) for the others
+             5 │     safe fn make() const -> c++::B;
+               │     ───────────────┬───────────────  
+               │                    ╰───────────────── C++ member functions take an explicit receiver instead of a trailing `const`: `&'a const self` for `const` member functions, and `&'a unique var self` (or `&'a var self`) for the others
             ───╯
         "#]],
     );
@@ -3339,20 +3339,42 @@ type ::std::slice::Iter<i32, 'static> {
 }
 
 #[test]
-fn cpp_member_function_without_receiver_is_rejected() {
-    check_fail(
+fn cpp_member_function_without_receiver_is_static() {
+    use zngur_def::ZngurMethodReceiver;
+
+    let parsed = parse_str(
         r#"
 type c++::B {
     safe fn value() -> i32;
+    safe fn get<'a>(&'a const self) -> i32;
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let methods = &parsed.spec.types[0].cpp_methods;
+    assert_eq!(methods[0].receiver, ZngurMethodReceiver::Static);
+    assert_eq!(
+        methods[1].receiver,
+        ZngurMethodReceiver::Ref(Mutability::Not)
+    );
+}
+
+#[test]
+fn static_keyword_on_cpp_member_function_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    safe static fn make() -> i32;
 }
 "#,
         expect![[r#"
-            Error: C++ member functions need a receiver: `&'a const self` (`const` member functions), `&'a unique var self` or `&'a var self` (the others), or a raw one (`const self&`, `self&`, `const self*`, `self*`); static member functions are `static fn`
+            Error: C++ static member functions are declared without a `self` receiver; remove `static`
                ╭─[ test.zng:3:5 ]
                │
-             3 │     safe fn value() -> i32;
-               │     ───────────┬───────────  
-               │                ╰───────────── C++ member functions need a receiver: `&'a const self` (`const` member functions), `&'a unique var self` or `&'a var self` (the others), or a raw one (`const self&`, `self&`, `const self*`, `self*`); static member functions are `static fn`
+             3 │     safe static fn make() -> i32;
+               │     ──────────────┬──────────────  
+               │                   ╰──────────────── C++ static member functions are declared without a `self` receiver; remove `static`
             ───╯
         "#]],
     );
@@ -3389,7 +3411,7 @@ type c++::B {
     safe fn set(&unique var self, i32);
     unsafe fn raw_get(const self*) -> i32;
     unsafe fn raw_set(self&, i32);
-    safe static fn make() -> c++::B;
+    safe fn make() -> c++::B;
 }
 "#,
         NullCfg,

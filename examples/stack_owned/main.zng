@@ -19,7 +19,7 @@ type c++::MyCppWrapper {
     safe fn add(&unique var self, &const c++::MyCppWrapper);
     safe fn x_ref<'a>(&'a const self) -> &'a const i32;
     safe fn swapped(&const self) -> c++::MyCppWrapper;
-    safe static fn diagonal(i32) -> c++::MyCppWrapper;
+    safe fn diagonal(i32) -> c++::MyCppWrapper;
 
     // C++ constructors, which `zngur_lib::ZngCppConstruct` runs in place. C++-style pointers and
     // references (`const T*`, `T&`, ...) are raw pointers in Rust.

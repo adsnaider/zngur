@@ -16,7 +16,7 @@ type c++::geo::Point {
     safe fn touch<'a>(&'a var self);
     unsafe fn copy_from<'a>(&'a unique var self, const c++::geo::Point*);
     unsafe fn raw_norm(const self*) -> f64;
-    safe static fn origin() -> c++::geo::Point;
+    safe fn origin() -> c++::geo::Point;
 }
 ```
 
@@ -31,10 +31,11 @@ type c++::geo::Point {
   | `&'a unique const self`       | `const`             | method on `Point<C>`, `&'a mut self`                       |
   | `const self&` / `const self*` | `const`             | associated function on `Point<C>`, `this: *const Point<C>` |
   | `self&` / `self*`             | non-`const`         | associated function on `Point`, `this: *mut Point`         |
-  | none, with `static`           | static              | associated function on `Point`                             |
+  | none                          | static              | associated function on `Point`                             |
 
-  A member function that isn't `static` must have a receiver. `&'a self` and `&'a mut self` are
-  errors, which suggest `&'a const self` and `&'a unique var self`.
+  A member function without a receiver is a static member function (`static` isn't written: it's
+  an error). `&'a self` and `&'a mut self` are errors, which suggest `&'a const self` and
+  `&'a unique var self`.
 - `&'a var self` is a non-`const` member function called through a shared reference: the object
   may change while other references to it exist, which is sound because Rust stores C++ objects in
   an `UnsafeCell`. `&'a unique var self` is the usual choice when Rust should have the only access

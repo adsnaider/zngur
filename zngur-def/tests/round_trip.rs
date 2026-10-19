@@ -418,7 +418,7 @@ type c++::a::B {
     #trivially_relocatable;
     unsafe fn value(&const self) -> i32;
     unsafe fn set(&unique var self, i32, const c++::a::B&);
-    safe static fn make(i32) -> c++::a::B;
+    safe fn make(i32) -> c++::a::B;
     unsafe fn get<'a>(&'a const self, i32) -> &'a const i32 as get_const;
     safe constructor();
     safe constructor(i32, i32);
@@ -443,7 +443,7 @@ type c++::a::B {
 
                 unsafe fn value(&const self) -> i32;
                 unsafe fn set(&unique var self, i32, const c++::a::B&);
-                safe static fn make(i32) -> c++::a::B;
+                safe fn make(i32) -> c++::a::B;
                 unsafe fn get<'a>(&'a const self, i32) -> &'a const i32 as get_const;
             }
         "#]],
@@ -784,7 +784,7 @@ type c++::a::B {
     safe fn refs<'a>(&'a const self, &'a const c++::a::B, &'a var c++::a::B, &'a unique var c++::a::B, &'a unique const c++::a::B);
     safe fn builtins<'a>(&'a var self, &'a const i32, &'a var i32, &'a unique var i32, &'a unique const i32, &'a i32, &'a mut i32) -> &'a var bool;
     safe fn peek<'a>(&'a unique const self) -> &'a const c++::a::B*;
-    unsafe static fn raw(c++::a::B*, const i32*);
+    unsafe fn raw(c++::a::B*, const i32*);
     field &const x (type = i32);
     field &var x (type = i32) as x_var;
     field &unique var x (type = i32) as x_mut;
@@ -817,7 +817,7 @@ type crate::Foo {
                 safe fn refs<'a>(&'a const self, &'a const c++::a::B, &'a var c++::a::B, &'a unique var c++::a::B, &'a unique const c++::a::B);
                 safe fn builtins<'a>(&'a var self, &'a const i32, &'a var i32, &'a unique var i32, &'a unique const i32, &'a i32, &'a mut i32) -> &'a var bool;
                 safe fn peek<'a>(&'a unique const self) -> &'a const c++::a::B*;
-                unsafe static fn raw(c++::a::B*, const i32*);
+                unsafe fn raw(c++::a::B*, const i32*);
             }
 
             type crate::Foo {

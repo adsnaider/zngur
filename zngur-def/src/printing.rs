@@ -974,10 +974,9 @@ impl WriteIDL for crate::ZngurCppMethod {
     fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
         if p.enabled(&IDLItem::TypeMethod) {
             let safety = if self.is_safe { "safe" } else { "unsafe" };
-            let is_static = matches!(self.receiver, crate::ZngurMethodReceiver::Static);
-            let static_kw = if is_static { "static " } else { "" };
+            // Static member functions are the ones without a receiver.
             let name = &self.cpp_name;
-            write!(p, "{safety} {static_kw}fn {name}")?;
+            write!(p, "{safety} fn {name}")?;
             write_lifetimes_and_generics(p, &self.lifetimes, &self.template_args)?;
             write!(p, "(")?;
             let receiver = match (self.receiver, self.raw_receiver) {

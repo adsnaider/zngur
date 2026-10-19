@@ -297,7 +297,7 @@ impl TriviallyRelocatable {
 }
 
 /// A C++ member function of a C++ type, declared C++-style in the type's block, e.g.
-/// `unsafe fn value(&'a const self) -> i32;` or `safe static fn make(i32) -> c++::ns::Bar;`. zngur
+/// `unsafe fn value(&'a const self) -> i32;` or `safe fn make(i32) -> c++::ns::Bar;`. zngur
 /// generates a Rust function for it that calls the C++ member function directly.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct ZngurCppMethod {
