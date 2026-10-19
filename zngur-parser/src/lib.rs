@@ -768,6 +768,44 @@ fn zng_spelling(ty: &RustType) -> String {
     }
 }
 
+/// Whether the `ZngCppConstruct` impls of C++ constructors taking `a` and `b` would overlap only
+/// because the inputs that are `const` C++ objects are generic over their constness: in some
+/// position, one takes a `&'a const T` (`&'a T<C1>` in Rust) and the other a `&'a var T`
+/// (`&'a T`), or `unique` ones, and the other inputs are the same. Returns the first such
+/// position, whether the references there are `unique`, and the type (`T`) they refer to.
+fn constness_overlap<'a>(
+    a: &'a [RustType],
+    b: &'a [RustType],
+) -> Option<(usize, bool, &'a RustType)> {
+    if a.len() != b.len() {
+        return None;
+    }
+    let mut first = None;
+    for (n, (a, b)) in a.iter().zip(b).enumerate() {
+        let (a, b) = (a.with_anonymous_lifetimes(), b.with_anonymous_lifetimes());
+        if a == b {
+            continue;
+        }
+        let (RustType::Ref(m1, _, p1), RustType::Ref(m2, _, p2)) = (&a, &b) else {
+            return None;
+        };
+        let (Some((c1, t1)), Some((c2, t2))) = (p1.as_cpp_object(), p2.as_cpp_object()) else {
+            return None;
+        };
+        if m1 != m2 || c1 == c2 || t1 != t2 {
+            return None;
+        }
+        first.get_or_insert(n);
+    }
+    let n = first?;
+    match &a[n] {
+        RustType::Ref(m, _, p) => p
+            .as_cpp_object()
+            .map(|(_, t)| (n, *m == Mutability::Mut, t)),
+        _ => unreachable!("checked above"),
+    }
+}
+
 /// Checks the references to C++ objects in `ty`, once its paths are resolved: a reference to a
 /// C++ class must say whether the object is `const` (`&'a const T`, `&'a unique var T`, ...), and
 /// only C++ objects (C++ classes, builtins and C++ pointers) can be `const` or `var`. Type
@@ -1522,6 +1560,27 @@ impl ProcessedItem<'_> {
                             {
                                 ctx.add_error_str(
                                     "another C++ constructor has the same argument types",
+                                    item_span,
+                                );
+                                continue;
+                            }
+                            // Inputs that are `const` C++ objects are generic over their
+                            // constness, so a `&'a const T` input also accepts a `&'a var T`.
+                            if let Some((n, unique, t)) = cpp_constructors
+                                .iter()
+                                .find_map(|c| constness_overlap(&c.inputs, &inputs))
+                            {
+                                let t = zng_spelling(t);
+                                let unique = if unique { "unique " } else { "" };
+                                ctx.add_error_str(
+                                    &format!(
+                                        "this C++ constructor overlaps with another one in Rust: \
+                                         argument {} is a `&{unique}const {t}` in one and a \
+                                         `&{unique}var {t}` in the other, and a reference to a \
+                                         `const` object accepts a non-`const` one too. Take a \
+                                         raw `const {t}&` in one of them, or remove one",
+                                        n + 1
+                                    ),
                                     item_span,
                                 );
                                 continue;

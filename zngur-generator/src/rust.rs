@@ -1148,12 +1148,20 @@ pub extern "C" fn {mn}(i: *const u8) -> usize {{ unsafe {{
             if tr.is_none() {
                 w!(self, "pub ");
             }
+            // The inputs of inherent methods that are `const` C++ objects are generic over their
+            // constness, like those of other C++ functions. A trait fixes its methods' types.
+            let (params, input_tys) = match tr {
+                None => cpp_fn_inputs(&method.lifetimes, &method.inputs),
+                Some(_) => (
+                    lifetime_params(&method.lifetimes),
+                    method.inputs.iter().map(|ty| ty.to_string()).collect(),
+                ),
+            };
             w!(
                 self,
-                r#"{}fn {}{}("#,
+                r#"{}fn {}{params}("#,
                 if method.is_safe { "" } else { "unsafe " },
                 method.name,
-                lifetime_params(&method.lifetimes)
             );
             if method.receiver != ZngurMethodReceiver::Static {
                 w!(self, "{}, ", method.rust_receiver());
@@ -1163,7 +1171,7 @@ pub extern "C" fn {mn}(i: *const u8) -> usize {{ unsafe {{
             } else {
                 1
             };
-            for (ty, n) in method.inputs.iter().zip(input_offset..) {
+            for (ty, n) in input_tys.iter().zip(input_offset..) {
                 w!(self, "i{n}: {ty}, ");
             }
             wln!(self, ") -> {} {{ unsafe {{", method.output);
@@ -1195,15 +1203,15 @@ unsafe extern "C" {{ fn {mangled_name}("#
             w!(self, "i{n}: *mut u8, ");
         }
         wln!(self, r#"o: *mut u8); }}"#);
+        let (params, input_tys) = cpp_fn_inputs(lifetimes, inputs);
         w!(
             self,
             r#"
 #[allow(non_snake_case)]
-pub {}fn {rust_name}{}("#,
+pub {}fn {rust_name}{params}("#,
             if is_safe { "" } else { "unsafe " },
-            lifetime_params(lifetimes)
         );
-        for (n, ty) in inputs.iter().enumerate() {
+        for (n, ty) in input_tys.iter().enumerate() {
             w!(self, "i{n}: {ty}, ");
         }
         wln!(self, ") -> {output} {{ unsafe {{");
@@ -1246,14 +1254,15 @@ unsafe extern "C" {{ fn {mangled_name}("#
         } else {
             format!("impl {target}")
         };
+        let offset = usize::from(has_this);
+        let (params, input_tys) = cpp_fn_inputs(lifetimes, inputs);
         w!(
             self,
             r#"
 {impl_header} {{
 #[allow(non_snake_case, clippy::too_many_arguments)]
-pub {}fn {rust_name}{}("#,
+pub {}fn {rust_name}{params}("#,
             if is_safe { "" } else { "unsafe " },
-            lifetime_params(lifetimes)
         );
         match &receiver {
             CppRustReceiver::Static => {}
@@ -1281,8 +1290,7 @@ pub {}fn {rust_name}{}("#,
                 w!(self, "i0: {ptr} Self, ");
             }
         }
-        let offset = usize::from(has_this);
-        for (n, ty) in inputs.iter().enumerate() {
+        for (n, ty) in input_tys.iter().enumerate() {
             w!(self, "i{}: {ty}, ", n + offset);
         }
         wln!(self, ") -> {output} {{ unsafe {{");
@@ -1314,16 +1322,16 @@ unsafe extern "C" {{ fn {mangled_name}("#
             w!(self, "i{n}: *mut u8, ");
         }
         wln!(self, r#"o: *mut u8); }}"#);
+        let (params, input_tys) = cpp_fn_inputs(lifetimes, inputs);
         w!(
             self,
             r#"
 #[doc(hidden)]
 #[allow(non_snake_case, clippy::too_many_arguments)]
-pub {}fn {name}{}("#,
+pub {}fn {name}{params}("#,
             if is_safe { "" } else { "unsafe " },
-            lifetime_params(lifetimes)
         );
-        for (n, ty) in inputs.iter().enumerate() {
+        for (n, ty) in input_tys.iter().enumerate() {
             w!(self, "i{n}: {ty}, ");
         }
         wln!(self, ") -> {output} {{ unsafe {{");
@@ -1335,6 +1343,8 @@ pub {}fn {name}{}("#,
     /// Adds the `zngur_lib::ZngCppConstruct` impl for the C++ constructor `constructor` of
     /// `owner` (its `index`th one), which calls the C++ bridge function whose (mangled) name is
     /// returned. Only non-`const` objects are constructed (`into_const()` makes them `const`).
+    /// Like the inputs of other C++ functions, those that are `const` C++ objects are generic
+    /// over their constness.
     pub fn add_cpp_constructor(
         &mut self,
         owner: &RustType,
@@ -1343,14 +1353,14 @@ pub {}fn {name}{}("#,
     ) -> String {
         let mangled_name = self.mangle_name(&format!("{owner}_cpp_constructor_{index}"));
         let inputs = &constructor.inputs;
-        let args_ty: String = inputs.iter().map(|ty| format!("{ty}, ")).collect();
+        let (params, input_tys) = cpp_fn_inputs(&constructor.lifetimes, inputs);
+        let args_ty: String = input_tys.iter().map(|ty| format!("{ty}, ")).collect();
         let args_pattern: String = (0..inputs.len()).map(|n| format!("i{n}, ")).collect();
         let safety = if constructor.is_safe {
             "IsSafe"
         } else {
             "IsUnsafe"
         };
-        let lifetimes = lifetime_params(&constructor.lifetimes);
         w!(
             self,
             r#"
@@ -1363,7 +1373,7 @@ unsafe extern "C" {{ fn {mangled_name}("#
         wln!(
             self,
             r#"
-unsafe impl{lifetimes} ::zngur_lib::ZngCppConstruct<({args_ty})> for {owner} {{
+unsafe impl{params} ::zngur_lib::ZngCppConstruct<({args_ty})> for {owner} {{
     type Safety = ::zngur_lib::{safety};
 
     #[allow(unused_mut)]

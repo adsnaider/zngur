@@ -60,5 +60,5 @@ fn main() {
     generated::objects::reset(&second);
     generated::objects::double_step(&mut second);
     second.bump();
-    println!("peek = {}", generated::objects::peek(second.as_const_mut()));
+    println!("peek = {}", generated::objects::peek(&mut second));
 }

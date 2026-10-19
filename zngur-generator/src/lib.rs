@@ -1104,10 +1104,11 @@ mod tests {
             ),
             "{rust_code}"
         );
+        // Inputs that are `const` C++ objects are generic over their constness.
         assert!(
             rust_code.contains(
                 "impl a::B {\n#[allow(non_snake_case, clippy::too_many_arguments)]\npub unsafe fn \
-                 set_from(&mut self, i1: *const a::B::<::zngur_lib::Const>, ) -> ()"
+                 set_from<__C1: ::zngur_lib::Constness>(&mut self, i1: *const a::B::<__C1>, ) -> ()"
             ),
             "{rust_code}"
         );
@@ -1494,9 +1495,10 @@ mod tests {
 
         assert!(rust_code.contains("unsafe impl ::zngur_lib::ZngCppConstruct<()> for a::B {"));
         assert!(rust_code.contains("type Safety = ::zngur_lib::IsSafe;"));
+        // Inputs that are `const` C++ objects are generic over their constness.
         assert!(rust_code.contains(
-            "unsafe impl ::zngur_lib::ZngCppConstruct<(i32, \
-             *const a::B::<::zngur_lib::Const>, )> for a::B {"
+            "unsafe impl<__C1: ::zngur_lib::Constness> ::zngur_lib::ZngCppConstruct<(i32, \
+             *const a::B::<__C1>, )> for a::B {"
         ));
         assert!(rust_code.contains("type Safety = ::zngur_lib::IsUnsafe;"));
 

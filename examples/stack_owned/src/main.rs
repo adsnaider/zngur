@@ -15,20 +15,21 @@ fn main() {
     // `T&` / `T*`, and `*mut Cpp<i32>` for `int32_t*`. Rust references coerce to them, and
     // `Cpp::from_mut` makes a Rust `i32` a C++ object.
     let mut sum = 0;
-    unsafe { generated::sum_into(c.as_const(), Cpp::from_mut(&mut sum)) };
+    unsafe { generated::sum_into(&c, Cpp::from_mut(&mut sum)) };
     println!("sum = {sum}");
     unsafe { generated::swap_xy(&mut c) };
     c.print();
     let d = MyCppWrapper::new(1, 2);
-    let larger = unsafe { generated::larger_x(c.as_const(), d.as_const()) };
+    let larger = unsafe { generated::larger_x(&c, &d) };
     assert_eq!(larger, c.as_const() as *const _);
 
     // C++ member functions, which are methods: `&self` for `const` member functions and
     // `&mut self` for the others. A C++ `const T&` is a `&T<Const>`, and a `const int32_t&` a
-    // `&Cpp<i32, Const>`, whose value `get()` reads.
+    // `&Cpp<i32, Const>`, whose value `get()` reads. Like in C++, an argument that is a `const`
+    // object takes a non-`const` one too: `c.add(&d)`.
     println!("sum() = {}", c.sum());
     c.scale(10);
-    c.add(d.as_const());
+    c.add(&d);
     c.print();
     let x = c.x_ref().get();
     println!("x_ref() = {x}");
@@ -38,9 +39,9 @@ fn main() {
     // C++ constructors. `build` returns the object, and `construct` constructs it in a slot.
     let built = MyCppWrapper::build((3, 4));
     built.print();
-    let copy = MyCppWrapper::build((built.as_const(),));
+    let copy = MyCppWrapper::build((&built,));
     copy.print();
-    let moved = unsafe { MyCppWrapper::build_unchecked((built.as_const() as *const _, 10)) };
+    let moved = unsafe { MyCppWrapper::build_unchecked((&raw const built, 10)) };
     moved.print();
     let mut slot = MaybeUninit::uninit();
     MyCppWrapper::construct(&mut slot, (8, 9));
@@ -49,7 +50,7 @@ fn main() {
     MyConservativeWrapper::build((30, 40)).print();
 
     // Free C++ functions.
-    let dot = generated::geometry::dot(built.as_const(), constructed.as_const());
+    let dot = generated::geometry::dot(&built, &constructed);
     println!("dot = {dot}");
     generated::geometry::origin().print();
     println!(
@@ -94,7 +95,8 @@ fn main() {
     assert_eq!(std::mem::align_of::<MyConservativeWrapper>(), 16);
 
     // `const` is part of the type: `MyCppWrapper<Const>` is a `const` object, which only has the
-    // `const` member functions. Going from a `T` to a `T<Const>` is explicit.
+    // `const` member functions. Going from a `T` to a `T<Const>` is explicit, apart from passing
+    // it to C++ as a `const` object.
     let squares = generated::views::squares();
     let len = squares.size();
     let third: i32 = unsafe { squares.at(3) }.get();

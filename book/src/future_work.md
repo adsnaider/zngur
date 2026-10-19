@@ -23,8 +23,11 @@ Ideas and known gaps, mostly in calling C++ from Rust. None of these is designed
 - **More template arguments.** [Class templates](./call_cpp_from_rust/cpp_templates.md) don't take
   non-type arguments (`std::array<T, 4>`), function types or nested types yet. Alias templates
   cover many of these cases today. (`const` arguments, like `std::span<const i32>`, work.)
-- **Implicit `const` conversions.** Going from a `T` to a `T<Const>` is explicit (`.as_const()`).
-  A conversion trait, used by the generated functions, could make it implicit.
+- **Named constructors.** [C++ constructors](./call_cpp_from_rust/cpp_constructors.md) implement
+  `ZngCppConstruct<Args>`, so overloads that take a `&'a const T` and a `&'a var T` in the same
+  position would overlap (parameters that are `const` objects are generic over their constness).
+  Constructors could instead be named functions, with `as` for overloads like member functions,
+  which would lift that restriction.
 - **More builtin types.** `char` (whose signedness varies), `void*`, and rvalue references (`T&&`)
   can't be written in a `.zng` file yet.
 

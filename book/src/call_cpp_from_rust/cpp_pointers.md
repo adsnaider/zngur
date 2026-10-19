@@ -46,10 +46,16 @@ Every C++ class gets a constness parameter in Rust, which defaults to non-`const
 - Going from a `Point` to a `Point<Const>` is explicit, and there's no way back: `p.as_const()`
   (`&Point` to `&Point<Const>`), `p.as_const_mut()` (`&mut Point` to `&mut Point<Const>`, unique
   access to a `const` object), and `p.into_const()` (by value).
+- Except for arguments: like C++, which makes a non-`const` object `const` when you pass it, the
+  arguments of C++ functions that are `const` objects take both constnesses. They're generic over
+  it: `&'a const Point` is a `&'a Point<C1>` there (for any `C1: Constness`),
+  `&'a unique const Point` a `&'a mut Point<C1>`, and a raw `const Point&` a `*const Point<C1>`, so
+  `distance(&p, &q)` works whether `p` and `q` are `const` or not. C++ only reads them, so that's
+  sound. Return values, receivers and fields keep their constness.
 - Builtins have the same parameter through `zngur_lib::Cpp<T, C>`: `const int32_t&` is
-  `&'a Cpp<i32, Const>`. A `const` builtin as a C++ template argument is a `Cpp<i32, Const>` too
-  (`c++::std::span<const i32>` is `std::span<Cpp<i32, Const>>`), while a non-`const` one is just
-  `i32` (`std::span<i32>`).
+  `&'a Cpp<i32, Const>` (and `&'a Cpp<i32, C1>` as an argument). A `const` builtin as a C++
+  template argument is a `Cpp<i32, Const>` too (`c++::std::span<const i32>` is
+  `std::span<Cpp<i32, Const>>`), while a non-`const` one is just `i32` (`std::span<i32>`).
 
 ## References and lifetimes
 
@@ -67,7 +73,8 @@ member functions that aren't `const` can still be called (see
 
 C++-style references and pointers, without a lifetime, are raw pointers in Rust. They can be null
 or dangling, so anything that dereferences them is `unsafe`. Rust references coerce to them, so you
-can pass `&x` / `&mut x` / `p.as_const()` directly, and `Cpp::from_mut(&mut n)` for a Rust `i32`.
+can pass `&x` / `&mut x` directly (for a `const T&`, whether `x` is `const` or not), and
+`Cpp::from_mut(&mut n)` for a Rust `i32`.
 
 Whether a function is `safe` is up to the `.zng` file: zngur warns about `safe` functions that take
 raw pointers (`safe_raw_pointer`, silenced with `#allow(safe_raw_pointer)`), since they should
@@ -76,9 +83,9 @@ usually be `unsafe`.
 ```rust
 let mut p: Point = generated::geo::origin();
 generated::geo::normalize(&mut p);
-let d = generated::geo::distance(p.as_const(), p.as_const());
+let d = generated::geo::distance(&p, &p);
 let (mut lo, mut hi) = (0, 0);
-unsafe { generated::geo::bounds(p.as_const(), Cpp::from_mut(&mut lo), Cpp::from_mut(&mut hi)) };
+unsafe { generated::geo::bounds(&p, Cpp::from_mut(&mut lo), Cpp::from_mut(&mut hi)) };
 ```
 
 ## In C++

@@ -27,7 +27,7 @@ In Rust, each one is a function at the same path in the `c++::` tree as its name
 
 ```rust
 let o = generated::geo::origin();
-let d = generated::geo::distance(o.as_const(), p.as_const());
+let d = generated::geo::distance(&o, &p);
 ```
 
 zngur generates the C++ function that calls it, like for

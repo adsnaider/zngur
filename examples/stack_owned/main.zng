@@ -13,7 +13,8 @@ type c++::MyCppWrapper {
     // C++ member functions, which Rust calls as methods. `&const self` is a `const` member function,
     // which `const` objects (`MyCppWrapper<Const>`) have too, and `&unique var self` a non-`const`
     // one (`&mut self` in Rust). A C++ `const T&` is a `&'a const T` in the `.zng` file
-    // (`&'a T<Const>` in Rust, or `&'a Cpp<i32, Const>` for a builtin).
+    // (`&'a T<Const>` in Rust, or `&'a Cpp<i32, Const>` for a builtin). Arguments that are `const`
+    // objects are generic over their constness (`&'a T<C1>`), so they take non-`const` ones too.
     safe fn sum(&const self) -> i32;
     safe fn scale(&unique var self, i32);
     safe fn add(&unique var self, &const c++::MyCppWrapper);

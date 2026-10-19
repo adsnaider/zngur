@@ -76,6 +76,11 @@ c.norm(); // `const` member functions work on `const` objects...
 them, like in C++. Static member functions are in the `impl Point` block too, so `Point::origin()`
 works as usual.
 
+Like in C++, parameters that are `const` objects take non-`const` ones too: `add`'s
+`&'a const c++::geo::Point` parameter is a `&'a Point<C1>`, generic over the constness, so
+`p.add(&q)` works whether `q` is a `Point` or a `Point<Const>` (see
+[C++ references and pointers](./cpp_pointers.md)).
+
 ## In C++
 
 zngur generates a function that calls the member function, so you don't implement anything in

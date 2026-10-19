@@ -58,7 +58,8 @@ shared reference, so Rust copies it out instead of handing out a `&T`.
 
 | Method                                   | Available on     | What it does                                 |
 | ---------------------------------------- | ---------------- | -------------------------------------------- |
-| `Cpp::new(v)`, `v.into()`                | both constnesses | makes one (e.g. to construct a copy)         |
+| `Cpp::new(v)`, `v.into()`                | `Cpp<T>`         | makes one (e.g. to construct a copy)         |
+| `Cpp::new_const(v)`                      | `Cpp<T, Const>`  | makes a `const` one                          |
 | `get(&self) -> T`                        | both constnesses | reads the value                              |
 | `into_inner(self) -> T`, `T::from(c)`    | both constnesses | the value, by value                          |
 | `as_ptr(&self) -> *const T`              | both constnesses | a pointer to the value                       |
@@ -93,7 +94,8 @@ and a `*mut Node` when it's copied. Pointers to pointers are pointers to `Cpp`: 
 
 C++-style references and pointers (`const T&`, `T*`, ...) point to C++ objects as well, so their
 Rust types are the same: `const T*` is `*const T<Const>` (`*const Cpp<i32, Const>` for a builtin),
-and `T*` is `*mut T` (`*mut Cpp<i32>`). See [C++ references and pointers](./cpp_pointers.md).
+and `T*` is `*mut T` (`*mut Cpp<i32>`). As parameters, `const` ones are generic over the constness
+(`*const T<C1>`), like references. See [C++ references and pointers](./cpp_pointers.md).
 
 ## Fields
 

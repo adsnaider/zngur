@@ -44,8 +44,8 @@ use zngur_lib::ZngCppConstruct;
 
 let origin = Point::build(());
 let p = Point::build((3, 4));
-let copy = Point::build((p.as_const(),));
-let shifted = unsafe { Point::build_unchecked((p.as_const() as *const _, 10)) };
+let copy = Point::build((&p,));
+let shifted = unsafe { Point::build_unchecked((&raw const p, 10)) };
 
 let mut slot = MaybeUninit::uninit();
 Point::construct(&mut slot, (5, 6));
@@ -55,6 +55,14 @@ let q = unsafe { slot.assume_init() };
 `build` moves the object out of the slot it was constructed in, which is fine because objects on
 the Rust stack are trivially relocatable. Constructors make non-`const` objects; `into_const()`
 makes one `const`.
+
+Like those of other C++ functions, parameters that are `const` objects take non-`const` ones too
+(see [C++ references and pointers](./cpp_pointers.md)): the impl for `&'a const Point` is generic,
+`impl<'a, C1: Constness> ZngCppConstruct<(&'a Point<C1>,)> for Point`, so `Point::build((&p,))`
+works for a `Point` and a `Point<Const>` alike. As a result, two overloads can't take a
+`&'a const T` and a `&'a var T` (or `&'a unique const T` and `&'a unique var T`) in the same
+position, with the same other parameters: their impls would overlap, which zngur reports as an
+error. Declare one of them with a raw `const T&` instead, or leave one out.
 
 Whether a constructor is safe is the trait's `Safety` associated type: `zngur_lib::IsSafe` or
 `zngur_lib::IsUnsafe`. `construct` and `build` require `Self::Safety: zngur_lib::Safe`, which only

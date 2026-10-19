@@ -16,8 +16,8 @@ fn main() {
     let canvas = make_canvas(640, 480);
     // SAFETY: `canvas` owns a `Canvas`, which lives as long as it does.
     let canvas_ref: &mut Canvas = unsafe { canvas.get().as_mut() }.expect("null");
-    canvas_ref.Draw(point.as_const());
-    canvas_ref.Draw(Point::build((5, 6)).as_const());
+    canvas_ref.Draw(point);
+    canvas_ref.Draw(&Point::build((5, 6)));
     println!("points drawn = {}", canvas_ref.Points());
 
     // Dropping the `std::unique_ptr` destroys the canvas.

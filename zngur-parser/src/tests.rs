@@ -2220,6 +2220,41 @@ type c++::B {
 }
 
 #[test]
+fn cpp_constructors_that_overlap_through_constness_are_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe constructor<'a>(i32, &'a const c++::B);
+    safe constructor<'b>(i32, &'b var c++::B);
+    safe constructor<'a>(&'a unique const i32);
+    safe constructor<'a>(&'a unique var i32);
+    // Not an overlap: a reference and a raw `const` reference, or a shared and a unique one.
+    unsafe constructor(i32, const c++::B&);
+    safe constructor<'a>(i32, &'a unique var c++::B);
+}
+"#,
+        expect![[r#"
+            Error: this C++ constructor overlaps with another one in Rust: argument 2 is a `&const c++::B` in one and a `&var c++::B` in the other, and a reference to a `const` object accepts a non-`const` one too. Take a raw `const c++::B&` in one of them, or remove one
+               ╭─[ test.zng:6:5 ]
+               │
+             6 │     safe constructor<'b>(i32, &'b var c++::B);
+               │     ─────────────────────┬────────────────────  
+               │                          ╰────────────────────── this C++ constructor overlaps with another one in Rust: argument 2 is a `&const c++::B` in one and a `&var c++::B` in the other, and a reference to a `const` object accepts a non-`const` one too. Take a raw `const c++::B&` in one of them, or remove one
+            ───╯
+            Error: this C++ constructor overlaps with another one in Rust: argument 1 is a `&unique const i32` in one and a `&unique var i32` in the other, and a reference to a `const` object accepts a non-`const` one too. Take a raw `const i32&` in one of them, or remove one
+               ╭─[ test.zng:8:5 ]
+               │
+             8 │     safe constructor<'a>(&'a unique var i32);
+               │     ────────────────────┬────────────────────  
+               │                         ╰────────────────────── this C++ constructor overlaps with another one in Rust: argument 1 is a `&unique const i32` in one and a `&unique var i32` in the other, and a reference to a `const` object accepts a non-`const` one too. Take a raw `const i32&` in one of them, or remove one
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
 fn cpp_constructors_taking_a_pointer_or_a_reference_are_different() {
     let parsed = parse_str(
         r#"
