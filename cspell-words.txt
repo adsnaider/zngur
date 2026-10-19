@@ -13,6 +13,7 @@ cloneable
 Conds
 constexpr
 constness
+constnesses
 coro
 cout
 cplusplus
@@ -63,6 +64,7 @@ ntdll
 nullopt
 nullptr
 pmut
+pointee
 primitve
 println
 ptrdiff
@@ -84,6 +86,7 @@ scrutinee
 scrutinees
 segs
 serde
+signedness
 SIGSEGV
 sptl
 sref

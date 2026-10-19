@@ -11,8 +11,10 @@ pub unsafe trait ZngCppObject: Sized {}
 /// and `Foo<Const>` is a `const Foo`.
 ///
 /// `const` member functions are available on both, and the others only on `Foo<NonConst>`. So a
-/// C++ `const Foo&` is a `&Foo<Const>` in Rust, and a `Foo&` a `&mut Foo`. Going from a `Foo` to a
-/// `Foo<Const>` is explicit (`as_const()`), and there's no way back.
+/// C++ `const Foo&` is a `&Foo<Const>` in Rust, and a `Foo&` a `&Foo` (shared, `&'a var Foo` in
+/// the `.zng` file) or a `&mut Foo` (unique, `&'a unique var Foo`). Going from a `Foo` to a
+/// `Foo<Const>` is explicit (`as_const()`), and there's no way back. Builtins have the same
+/// parameter through [`Cpp<T, C>`](Cpp).
 ///
 /// ```compile_fail
 /// # use core::marker::PhantomData;
@@ -36,27 +38,187 @@ impl sealed::Sealed for NonConst {}
 impl Constness for Const {}
 impl Constness for NonConst {}
 
-/// A `const` builtin or pointer, where a C++ type must be named as `const`: a C++ template argument
-/// (`c++::std::span<const i32>` is `std::span<ConstValue<i32>>`). `const` C++ classes have their
-/// own constness parameter instead (`Foo<Const>`).
+/// The Rust builtins that can be C++ objects ([`Cpp<T, C>`](Cpp)): `bool`, the integers (`i8` to
+/// `i64`, `u8` to `u64`, `isize` and `usize`), `f32`, `f64`, and raw pointers (`*const T` and
+/// `*mut T`). Not `char`, since C++ can store any value in a `char32_t`, including invalid code
+/// points.
+///
+/// # Safety
+///
+/// Only zngur implements this trait (it's sealed): every bit pattern that C++ can store in the
+/// corresponding C++ type must be a valid `Self`.
+pub unsafe trait CppRustBuiltin: Copy + Unpin + sealed::SealedBuiltin {}
+
+macro_rules! cpp_rust_builtins {
+    ($($t:ty),*) => {$(
+        impl sealed::SealedBuiltin for $t {}
+        unsafe impl CppRustBuiltin for $t {}
+
+        impl<C: Constness> From<Cpp<$t, C>> for $t {
+            fn from(value: Cpp<$t, C>) -> Self {
+                value.into_inner()
+            }
+        }
+    )*};
+}
+
+cpp_rust_builtins!(
+    bool, i8, i16, i32, i64, isize, u8, u16, u32, u64, usize, f32, f64
+);
+
+impl<T: ?Sized> sealed::SealedBuiltin for *const T {}
+impl<T: ?Sized> sealed::SealedBuiltin for *mut T {}
+unsafe impl<T: ?Sized> CppRustBuiltin for *const T {}
+unsafe impl<T: ?Sized> CppRustBuiltin for *mut T {}
+
+impl<T: ?Sized, C: Constness> From<Cpp<*const T, C>> for *const T {
+    fn from(value: Cpp<*const T, C>) -> Self {
+        value.into_inner()
+    }
+}
+
+impl<T: ?Sized, C: Constness> From<Cpp<*mut T, C>> for *mut T {
+    fn from(value: Cpp<*mut T, C>) -> Self {
+        value.into_inner()
+    }
+}
+
+/// A builtin (`i32`, `bool`, a raw pointer, ...; see [`CppRustBuiltin`]) that is a C++ object:
+/// `Cpp<i32>` is a C++ `int32_t`, and `Cpp<i32, Const>` a `const int32_t` (see [`Constness`]).
+///
+/// References to C++ objects are spelled with `const` or `var` in `.zng` files: `&'a const i32` is
+/// a `&'a Cpp<i32, Const>`, `&'a var i32` a `&'a Cpp<i32>`, and `&'a unique var i32` a
+/// `&'a mut Cpp<i32>`. (A plain `&'a i32` is a Rust value, which C++ must treat with Rust's rules.)
+///
+/// C++ may change a C++ object through other references (or pointers) while Rust has a shared
+/// reference to it, so `Cpp<T, C>` is an [`UnsafeCell`](core::cell::UnsafeCell), like
+/// [`Cell`](core::cell::Cell): its value is read with [`get`](Cpp::get), and a non-`const` one
+/// can be [`set`](Cpp::set) through a shared reference. `&mut Cpp<T, C>` is unique, as always in
+/// Rust: that's what `unique` promises in the `.zng` file. It has the same layout as `T`.
+///
+/// ```
+/// # use zngur_lib::*;
+/// let x: Cpp<i32> = Cpp::new(1);
+/// let shared = &x;
+/// shared.set(shared.get() + 1);
+/// assert_eq!(x, 2);
+///
+/// let mut y = 5;
+/// Cpp::from_mut(&mut y).set(6); // E.g. to pass a Rust `i32` to C++ as an `int32_t*`.
+/// assert_eq!(y, 6);
+/// ```
+///
+/// A `const` one can't be changed:
+///
+/// ```compile_fail
+/// # use zngur_lib::*;
+/// let x: Cpp<i32, Const> = Cpp::new(1);
+/// x.set(2); // Error: `set` only exists for `Cpp<i32, NonConst>`.
+/// ```
 #[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct ConstValue<T>(T);
+pub struct Cpp<T: CppRustBuiltin, C: Constness = NonConst> {
+    value: core::cell::UnsafeCell<T>,
+    _constness: core::marker::PhantomData<C>,
+}
 
-impl<T> ConstValue<T> {
-    /// Makes `value` `const`.
+impl<T: CppRustBuiltin, C: Constness> Cpp<T, C> {
+    /// A C++ object with the value `value`.
     pub const fn new(value: T) -> Self {
-        ConstValue(value)
+        Cpp {
+            value: core::cell::UnsafeCell::new(value),
+            _constness: core::marker::PhantomData,
+        }
     }
 
-    /// The value.
+    /// The value, consuming the object.
     pub fn into_inner(self) -> T {
-        self.0
+        self.value.into_inner()
     }
 
-    /// A reference to the value, which can't be modified through it.
-    pub fn get(&self) -> &T {
-        &self.0
+    /// The current value.
+    pub fn get(&self) -> T {
+        // SAFETY: `Cpp` isn't `Sync`, so nothing else writes to the value during this read on the
+        // Rust side, and C++ keeps its own rules.
+        unsafe { *self.value.get() }
+    }
+
+    /// A pointer to the value. It's only valid to write through it for non-`const` objects (see
+    /// [`set`](Cpp::set)).
+    pub fn as_ptr(&self) -> *const T {
+        self.value.get()
+    }
+}
+
+impl<T: CppRustBuiltin> Cpp<T> {
+    /// Sets the value, through a shared reference (like [`Cell::set`](core::cell::Cell::set)).
+    pub fn set(&self, value: T) {
+        // SAFETY: Like `Cell::set`: `Cpp` isn't `Sync`, and no reference to the value is handed out
+        // from a shared reference.
+        unsafe { *self.value.get() = value }
+    }
+
+    /// A mutable reference to the value, through the unique reference to the object.
+    pub fn get_mut(&mut self) -> &mut T {
+        self.value.get_mut()
+    }
+
+    /// The object as a `const` one, which can't be changed through the returned reference.
+    pub fn as_const(&self) -> &Cpp<T, Const> {
+        // SAFETY: The constness is only a marker: both have the same layout.
+        unsafe { &*(self as *const Self as *const Cpp<T, Const>) }
+    }
+
+    /// The object as a `const` one, which can't be changed through the returned reference.
+    pub fn as_const_mut(&mut self) -> &mut Cpp<T, Const> {
+        // SAFETY: The constness is only a marker: both have the same layout.
+        unsafe { &mut *(self as *mut Self as *mut Cpp<T, Const>) }
+    }
+
+    /// The object as a `const` one.
+    pub fn into_const(self) -> Cpp<T, Const> {
+        Cpp::new(self.into_inner())
+    }
+
+    /// A Rust value as a (non-`const`) C++ object, e.g. to pass it to C++ as a pointer (like
+    /// [`Cell::from_mut`](core::cell::Cell::from_mut)).
+    pub fn from_mut(value: &mut T) -> &mut Cpp<T> {
+        // SAFETY: `Cpp<T>` has the same layout as `T`, and `value` is borrowed uniquely for as
+        // long as the returned reference lives.
+        unsafe { &mut *(value as *mut T as *mut Cpp<T>) }
+    }
+}
+
+impl<T: CppRustBuiltin, C: Constness> From<T> for Cpp<T, C> {
+    fn from(value: T) -> Self {
+        Cpp::new(value)
+    }
+}
+
+impl<T: CppRustBuiltin + core::fmt::Debug, C: Constness> core::fmt::Debug for Cpp<T, C> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.get().fmt(f)
+    }
+}
+
+impl<T: CppRustBuiltin + PartialEq, C: Constness, C2: Constness> PartialEq<Cpp<T, C2>>
+    for Cpp<T, C>
+{
+    fn eq(&self, other: &Cpp<T, C2>) -> bool {
+        self.get() == other.get()
+    }
+}
+
+impl<T: CppRustBuiltin + PartialEq, C: Constness> PartialEq<T> for Cpp<T, C> {
+    fn eq(&self, other: &T) -> bool {
+        self.get() == *other
+    }
+}
+
+impl<T: CppRustBuiltin + PartialOrd, C: Constness, C2: Constness> PartialOrd<Cpp<T, C2>>
+    for Cpp<T, C>
+{
+    fn partial_cmp(&self, other: &Cpp<T, C2>) -> Option<core::cmp::Ordering> {
+        self.get().partial_cmp(&other.get())
     }
 }
 
@@ -207,6 +369,7 @@ pub unsafe trait ZngCppConstruct<Args>: ZngCppObject {
 
 mod sealed {
     pub trait Sealed {}
+    pub trait SealedBuiltin {}
 }
 
 #[cfg(test)]
@@ -214,13 +377,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn const_value_basics() {
-        let c = ConstValue::new(5);
-        let d = c;
-        assert_eq!(*c.get() + d.into_inner(), 10);
+    fn cpp_builtin_layout() {
         assert_eq!(
-            core::mem::size_of::<ConstValue<f64>>(),
+            core::mem::size_of::<Cpp<f64>>(),
             core::mem::size_of::<f64>()
         );
+        assert_eq!(
+            core::mem::align_of::<Cpp<u8, Const>>(),
+            core::mem::align_of::<u8>()
+        );
+        assert_eq!(
+            core::mem::size_of::<Cpp<*const str>>(),
+            core::mem::size_of::<*const str>()
+        );
+    }
+
+    #[test]
+    fn cpp_builtin_get_and_set() {
+        let x: Cpp<i32> = Cpp::new(1);
+        let (a, b) = (&x, &x);
+        a.set(b.get() + 1);
+        assert_eq!(x.get(), 2);
+        assert_eq!(unsafe { *x.as_ptr() }, 2);
+        let mut x = x;
+        *x.get_mut() += 1;
+        assert_eq!(x.into_inner(), 3);
+    }
+
+    #[test]
+    fn cpp_builtin_conversions() {
+        let x: Cpp<u64, Const> = 7.into();
+        let y: u64 = x.into();
+        assert_eq!(y, 7);
+        let c: Cpp<bool> = Cpp::from(true);
+        assert!(bool::from(c));
+        let mut v = 0;
+        let p: Cpp<*mut i32> = Cpp::new(&mut v as *mut i32);
+        let p: *mut i32 = p.into();
+        unsafe { *p = 4 };
+        assert_eq!(v, 4);
+    }
+
+    #[test]
+    fn cpp_builtin_constness() {
+        let mut x: Cpp<i16> = Cpp::new(3);
+        assert_eq!(x.as_const().get(), 3);
+        assert_eq!(x.as_const_mut().get(), 3);
+        let c: Cpp<i16, Const> = x.into_const();
+        assert_eq!(c, 3);
+    }
+
+    #[test]
+    fn cpp_builtin_from_mut() {
+        let mut x = 1.5f32;
+        let c = Cpp::from_mut(&mut x);
+        c.set(c.get() * 2.0);
+        assert_eq!(x, 3.0);
+    }
+
+    #[test]
+    fn cpp_builtin_comparisons() {
+        let a: Cpp<i32> = Cpp::new(1);
+        let b: Cpp<i32, Const> = Cpp::new(2);
+        assert!(a < b);
+        assert!(a != b);
+        assert_eq!(a, 1);
+        assert_eq!(format!("{b:?}"), "2");
     }
 }

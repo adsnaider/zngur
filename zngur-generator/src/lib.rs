@@ -177,27 +177,23 @@ impl ZngurGenerator {
                     let receiver = match (method.receiver, method.raw_receiver) {
                         (ZngurMethodReceiver::Ref(mutability), None) => CppRustReceiver::Ref {
                             mutability,
+                            constness: method.receiver_constness,
                             lifetime: method.receiver_lifetime.clone(),
                         },
-                        (ZngurMethodReceiver::Ref(mutability), Some(_)) => {
-                            CppRustReceiver::Raw { mutability }
-                        }
+                        (ZngurMethodReceiver::Ref(_), Some(_)) => CppRustReceiver::Raw {
+                            constness: method.receiver_constness,
+                        },
                         (ZngurMethodReceiver::Static | ZngurMethodReceiver::Move, _) => {
                             CppRustReceiver::Static
                         }
                     };
-                    let inputs: Vec<RustType> = method
-                        .inputs
-                        .iter()
-                        .map(RustType::in_cpp_signature)
-                        .collect();
                     let mangled_name = rust_file.add_cpp_method(
                         ty,
                         method.rust_name(),
                         &method.lifetimes,
                         receiver,
-                        &inputs,
-                        &method.output.in_cpp_signature(),
+                        &method.inputs,
+                        &method.output,
                         method.is_safe,
                     );
                     cpp_file.cpp_method_bridges.push(bridges.method(
@@ -207,19 +203,24 @@ impl ZngurGenerator {
                         method,
                     ));
                 }
-                // Field accessors: like `const` / non-`const` member functions that return a
-                // reference to the field.
+                // Field accessors: like member functions that return a reference to the field or
+                // a copy of it.
                 for field in &ty_def.cpp_fields {
+                    let method = field.as_cpp_method();
+                    let ZngurMethodReceiver::Ref(mutability) = method.receiver else {
+                        unreachable!("field accessors have a receiver");
+                    };
                     let mangled_name = rust_file.add_cpp_method(
                         ty,
                         field.rust_name(),
                         &[],
                         CppRustReceiver::Ref {
-                            mutability: field.mutability,
+                            mutability,
+                            constness: method.receiver_constness,
                             lifetime: None,
                         },
                         &[],
-                        &field.as_cpp_method().output.in_cpp_signature(),
+                        &method.output,
                         // `this` refers to a valid object, so its field is valid too.
                         true,
                     );
@@ -624,13 +625,11 @@ impl ZngurGenerator {
             let rust_name = func.rust_name();
             // `__` separators, so that `a::b_c` and `a_b::c` don't collide.
             let hidden_name = format!("__zngur_cpp_fn__{}__{rust_name}", func.namespace.join("__"));
-            let inputs: Vec<RustType> =
-                func.inputs.iter().map(RustType::in_cpp_signature).collect();
             let mangled_name = rust_file.add_cpp_function(
                 &hidden_name,
                 &func.lifetimes,
-                &inputs,
-                &func.output.in_cpp_signature(),
+                &func.inputs,
+                &func.output,
                 func.is_safe,
             );
             let supers = "super::".repeat(func.namespace.len());
@@ -1022,6 +1021,7 @@ mod tests {
                 template_args: vec![],
                 rust_name: None,
                 receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+                receiver_constness: CppConstness::Const,
                 receiver_lifetime: None,
                 raw_receiver: None,
                 inputs: vec![],
@@ -1034,6 +1034,7 @@ mod tests {
                 template_args: vec![],
                 rust_name: Some("set_from".to_owned()),
                 receiver: ZngurMethodReceiver::Ref(Mutability::Mut),
+                receiver_constness: CppConstness::Var,
                 receiver_lifetime: None,
                 raw_receiver: None,
                 inputs: vec![RustType::cpp_ptr(
@@ -1044,12 +1045,41 @@ mod tests {
                 output: RustType::UNIT,
                 is_safe: false,
             },
+            // A non-`const` member function called through a shared reference.
+            ZngurCppMethod {
+                cpp_name: "bump".to_owned(),
+                lifetimes: vec![],
+                template_args: vec![],
+                rust_name: None,
+                receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+                receiver_constness: CppConstness::Var,
+                receiver_lifetime: None,
+                raw_receiver: None,
+                inputs: vec![],
+                output: RustType::UNIT,
+                is_safe: true,
+            },
+            // A `const` member function called through a unique reference.
+            ZngurCppMethod {
+                cpp_name: "peek".to_owned(),
+                lifetimes: vec![],
+                template_args: vec![],
+                rust_name: None,
+                receiver: ZngurMethodReceiver::Ref(Mutability::Mut),
+                receiver_constness: CppConstness::Const,
+                receiver_lifetime: None,
+                raw_receiver: None,
+                inputs: vec![],
+                output: i32.clone(),
+                is_safe: true,
+            },
             ZngurCppMethod {
                 cpp_name: "make".to_owned(),
                 lifetimes: vec![],
                 template_args: vec![],
                 rust_name: None,
                 receiver: ZngurMethodReceiver::Static,
+                receiver_constness: CppConstness::Var,
                 receiver_lifetime: None,
                 raw_receiver: None,
                 inputs: vec![i32.clone(), b.clone()],
@@ -1081,11 +1111,43 @@ mod tests {
             ),
             "{rust_code}"
         );
+        assert!(
+            rust_code.contains(
+                "impl a::B {\n#[allow(non_snake_case, clippy::too_many_arguments)]\npub fn \
+                 bump(&self, ) -> ()"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "impl<C: ::zngur_lib::Constness> a::B<C> {\n#[allow(non_snake_case, \
+                 clippy::too_many_arguments)]\npub fn peek(&mut self, ) -> i32"
+            ),
+            "{rust_code}"
+        );
         assert!(rust_code.contains("pub fn make(i0: i32, i1: a::B, ) -> a::B"));
 
-        // C++: bridges calling the member functions directly.
-        assert!(cpp_code.contains("->value()"), "{cpp_code}");
+        // C++: bridges calling the member functions directly, through a `const` `this` for
+        // `const` member functions.
+        assert!(
+            cpp_code.contains(
+                "(::rust::__zngur_internal_move_from_rust< ::rust::CppPtr< ::rust::CppConst< \
+                 ::rust::cpp::a::B > > >(i0))->value()"
+            ),
+            "{cpp_code}"
+        );
         assert!(cpp_code.contains("->set(*"), "{cpp_code}");
+        assert!(
+            cpp_code.contains(
+                "(::rust::__zngur_internal_move_from_rust< ::rust::CppPtr< ::rust::cpp::a::B > \
+                 >(i0))->bump()"
+            ),
+            "{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains("::rust::CppConst< ::rust::cpp::a::B > > >(i0))->peek()"),
+            "{cpp_code}"
+        );
         assert!(
             cpp_code.contains("new (o) ::a::B(::a::B::make("),
             "{cpp_code}"
@@ -1214,13 +1276,46 @@ mod tests {
     #[test]
     fn cpp_fields_get_accessors_and_cpp_bridges() {
         let b = cpp(&["a", "B"]);
-        let mut ty = minimal_stack_owned_type(b, 8, 4);
-        ty.cpp_fields = vec![ZngurCppField {
+        let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+        let mut ty = minimal_stack_owned_type(b.clone(), 8, 4);
+        let field = |rust_name: &str, ty: &RustType, access| ZngurCppField {
             name: "x".to_owned(),
-            rust_name: Some("x_mut".to_owned()),
-            ty: RustType::Primitive(PrimitiveRustType::Int(32)),
-            mutability: Mutability::Mut,
-        }];
+            rust_name: Some(rust_name.to_owned()),
+            ty: ty.clone(),
+            access,
+        };
+        ty.cpp_fields = vec![
+            field(
+                "x_mut",
+                &i32,
+                CppFieldAccess::Ref {
+                    unique: true,
+                    constness: CppConstness::Var,
+                },
+            ),
+            field(
+                "x_var",
+                &i32,
+                CppFieldAccess::Ref {
+                    unique: false,
+                    constness: CppConstness::Var,
+                },
+            ),
+            field(
+                "x_copy",
+                &i32,
+                CppFieldAccess::Copy {
+                    constness: CppConstness::Var,
+                },
+            ),
+            field(
+                "b_copy",
+                &b,
+                CppFieldAccess::Copy {
+                    constness: CppConstness::Const,
+                },
+            ),
+        ];
         let spec = ZngurSpec {
             types: vec![ty],
             ..Default::default()
@@ -1230,7 +1325,28 @@ mod tests {
         let cpp_code = cpp_code.expect("C++ field accessors need a C++ file");
 
         assert!(
-            rust_code.contains("pub fn x_mut(&mut self, ) -> &mut i32"),
+            rust_code.contains(
+                "impl a::B {\n#[allow(non_snake_case, clippy::too_many_arguments)]\npub fn \
+                 x_mut(&mut self, ) -> &mut ::zngur_lib::Cpp<i32>"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "impl a::B {\n#[allow(non_snake_case, clippy::too_many_arguments)]\npub fn \
+                 x_var(&self, ) -> &::zngur_lib::Cpp<i32>"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "impl<C: ::zngur_lib::Constness> a::B<C> {\n#[allow(non_snake_case, \
+                 clippy::too_many_arguments)]\npub fn x_copy(&self, ) -> i32"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains("pub fn b_copy(&self, ) -> a::B::<::zngur_lib::Const>"),
             "{rust_code}"
         );
         assert!(
@@ -1247,6 +1363,21 @@ mod tests {
             ),
             "{cpp_code}"
         );
+        // Copies are constructed in place, through a `const` `this`.
+        assert!(
+            cpp_code.contains(
+                "new (o) ::rust::CppTypeOf< ::int32_t >::type((::rust::__zngur_internal_move_from_rust< \
+                 ::rust::CppPtr< ::rust::CppConst< ::rust::cpp::a::B > > >(i0))->x);"
+            ),
+            "{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains(
+                "new (o) ::a::B((::rust::__zngur_internal_move_from_rust< ::rust::CppPtr< \
+                 ::rust::CppConst< ::rust::cpp::a::B > > >(i0))->x);"
+            ),
+            "{cpp_code}"
+        );
     }
 
     #[test]
@@ -1258,7 +1389,10 @@ mod tests {
             name: "x".to_owned(),
             rust_name: None,
             ty: i32.clone(),
-            mutability: Mutability::Not,
+            access: CppFieldAccess::Ref {
+                unique: false,
+                constness: CppConstness::Const,
+            },
         }];
         let span = RustType::Cpp(CppTypePath {
             path: vec!["std".to_owned(), "span".to_owned()],
@@ -1273,7 +1407,7 @@ mod tests {
         let cpp_code = cpp_code.expect("C++ field accessors need a C++ file");
 
         assert!(
-            rust_code.contains("pub fn x(&self, ) -> &i32"),
+            rust_code.contains("pub fn x(&self, ) -> &::zngur_lib::Cpp<i32, ::zngur_lib::Const>"),
             "{rust_code}"
         );
         assert!(
@@ -1287,7 +1421,7 @@ mod tests {
         assert!(
             rust_code.contains(
                 "impl<C: ::zngur_lib::Constness> std::__ZngurCppTemplate_span<C> for \
-                 ::zngur_lib::ConstValue<i32> {"
+                 ::zngur_lib::Cpp<i32, ::zngur_lib::Const> {"
             ),
             "{rust_code}"
         );

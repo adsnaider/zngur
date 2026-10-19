@@ -4,9 +4,6 @@ Ideas and known gaps, mostly in calling C++ from Rust. None of these is designed
 
 ## Calling C++ from Rust
 
-- **Escape hatches for references.** A C++ `T&` that may alias other references can only be
-  declared as a raw pointer, and so can a `const T&` that needs exclusive access. A syntax for
-  `&'a T<NonConst>` (shared) and `&'a mut T<Const>` would cover them.
 - **References in `extern "C++"` functions.** Functions written in C++ for Rust get Rust references
   as `rust::Ref<W>` / `rust::RefMut<W>`. For `c++::` types, plain C++ references would be nicer.
 - **Checking Rust signatures.** Lifetimes on Rust functions that C++ calls are only documentation;
@@ -26,7 +23,7 @@ Ideas and known gaps, mostly in calling C++ from Rust. None of these is designed
 - **More template arguments.** [Class templates](./call_cpp_from_rust/cpp_templates.md) don't take
   non-type arguments (`std::array<T, 4>`), function types or nested types yet. Alias templates
   cover many of these cases today. (`const` arguments, like `std::span<const i32>`, work.)
-- **Implicit `const` conversions.** Going from a `T` to a `Const<T>` is explicit (`.as_const()`).
+- **Implicit `const` conversions.** Going from a `T` to a `T<Const>` is explicit (`.as_const()`).
   A conversion trait, used by the generated functions, could make it implicit.
 - **More builtin types.** `char` (whose signedness varies), `void*`, and rvalue references (`T&&`)
   can't be written in a `.zng` file yet.

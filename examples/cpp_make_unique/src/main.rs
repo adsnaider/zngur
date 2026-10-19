@@ -10,7 +10,7 @@ fn main() {
     let boxed_point = make_point(3, 4);
     // SAFETY: `boxed_point` owns a `Point`, which lives as long as it does.
     let point = unsafe { boxed_point.get().as_ref() }.expect("null");
-    println!("point = ({}, {})", point.x(), point.y());
+    println!("point = ({}, {})", point.x().get(), point.y().get());
 
     // A type that Rust can only refer to: `std::make_unique` is how Rust constructs one.
     let canvas = make_canvas(640, 480);

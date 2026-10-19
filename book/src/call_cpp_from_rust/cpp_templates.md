@@ -8,7 +8,7 @@ type c++::std::unique_ptr<c++::geo::Point> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
 
-    safe fn get(&self) -> c++::geo::Point*;
+    safe fn get(&const self) -> c++::geo::Point*;
 }
 
 type c++::std::map<i32, const c++::geo::Point*> {
@@ -18,7 +18,7 @@ type c++::std::map<i32, const c++::geo::Point*> {
 The C++ type is the path with its template arguments: `::std::unique_ptr< ::geo::Point >` and
 `::std::map< ::int32_t, const ::geo::Point* >` above. Template arguments can be `c++::` types,
 builtins like `i32` or `bool`, [C++ references and pointers](./cpp_pointers.md), and `const` ones
-(`c++::std::span<const i32>`, which is `std::span<Const<i32>>` in Rust). Each
+(`c++::std::span<const i32>`, which is `std::span<Cpp<i32, Const>>` in Rust). Each
 instantiation is declared separately, with its own layout, member functions, constructors and so
 on.
 
@@ -55,7 +55,7 @@ type<T> c++::std::unique_ptr<T> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
 
-    safe fn get(&self) -> T*;
+    safe fn get(&const self) -> T*;
 }
 
 // Both get the layout, `#trivially_relocatable` and `get()`.
@@ -82,7 +82,7 @@ home.
 type<T> c++::std::unique_ptr<T> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
-    safe fn get(&self) -> T*;
+    safe fn get(&const self) -> T*;
 }
 ```
 

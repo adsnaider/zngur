@@ -1,0 +1,52 @@
+// C++ objects vs Rust values. A reference to a C++ object says whether the object is `const`:
+// `&'a const T` (a `const T&`, `&'a T<Const>` in Rust), `&'a var T` (a shared `T&`, `&'a T`),
+// `&'a unique var T` (a `T&` that Rust uses uniquely, `&'a mut T`) or `&'a unique const T`
+// (`&'a mut T<Const>`). Builtins that are C++ objects are `zngur_lib::Cpp<i32>` in Rust, and
+// `&'a i32` is a Rust value.
+
+#cpp_additional_includes "
+#include <counter.h>
+"
+
+type c++::objects::Point {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+
+    // Copies of the fields.
+    field var x (type = i32);
+    field var y (type = i32);
+}
+
+type c++::objects::Counter {
+    #layout(size = 24, align = 8);
+    #trivially_relocatable;
+
+    safe constructor(i32);
+
+    // A non-`const` member function called through a shared reference: other references may see
+    // the object change, which the Rust wrapper allows.
+    safe fn bump<'a>(&'a var self);
+    // A `const` member function called through a unique reference to a `const` object.
+    safe fn total<'a>(&'a unique const self) -> i32;
+    safe fn count_ref<'a>(&'a var self) -> &'a var i32;
+    safe fn add_to<'a>(&'a const self, &'a unique var i32);
+    safe fn add<'a>(&'a unique var self, &'a i32);
+
+    // Field accessors return references (`&`) or copies, of `const` or non-`const` objects.
+    field &const count (type = i32);
+    field &var count (type = i32) as count_var;
+    field &unique const step (type = i32) as step_unique_const;
+    field var count (type = i32) as count_copy;
+    field const count (type = i32) as count_const_copy;
+    field var origin (type = c++::objects::Point) as origin_copy;
+    field const origin (type = c++::objects::Point) as origin_const_copy;
+    // Pointers are C++ objects too.
+    field &var next (type = c++::objects::Counter*) as next_var;
+    field var next (type = c++::objects::Counter*) as next_copy;
+}
+
+mod c++::objects {
+    safe fn reset<'a>(&'a var c++::objects::Counter);
+    safe fn double_step<'a>(&'a unique var c++::objects::Counter);
+    safe fn peek<'a>(&'a unique const c++::objects::Counter) -> i32;
+}

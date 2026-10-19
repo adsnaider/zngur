@@ -1,0 +1,8 @@
+counts = 2 20
+count = 14
+total = 34
+step = 1
+copies = 14 14 (1, -1) (1, -1)
+sum = 114
+count = 20
+peek = 20

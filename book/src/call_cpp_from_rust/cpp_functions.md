@@ -5,9 +5,9 @@ zngur can call free C++ functions directly, with no C++ code to write. Declare t
 
 ```zng
 mod c++::geo {
-    safe fn distance(&c++::geo::Point, &c++::geo::Point) -> f64;
+    safe fn distance(&const c++::geo::Point, &const c++::geo::Point) -> f64;
     unsafe fn normalize(c++::geo::Point*);
-    safe fn longer<'a>(&'a c++::geo::Line, &'a c++::geo::Line) -> &'a c++::geo::Line;
+    safe fn longer<'a>(&'a const c++::geo::Line, &'a const c++::geo::Line) -> &'a const c++::geo::Line;
     safe fn origin() -> c++::geo::Point;
     safe fn scale(f64) -> f64;
     safe fn scale(i32) -> i32 as scale_i32;

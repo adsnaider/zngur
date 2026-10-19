@@ -103,12 +103,17 @@ impl IntoCpp for RustType {
                 generic_args: vec![t.into_cpp(namespace, crate_name)],
                 tail: None,
             },
+            // References to C++ objects (in Rust-facing items) are C++ references to the wrappers,
+            // `const` or not.
             RustType::Ref(m, _, t) => CppType {
                 path: match m {
                     Mutability::Mut => CppPath::from(&*format!("{}::RefMut", namespace)),
                     Mutability::Not => CppPath::from(&*format!("{}::Ref", namespace)),
                 },
-                generic_args: vec![t.into_cpp(namespace, crate_name)],
+                generic_args: vec![match t.as_cpp_object() {
+                    Some((_, t)) => t.into_cpp(namespace, crate_name),
+                    None => t.into_cpp(namespace, crate_name),
+                }],
                 tail: None,
             },
             RustType::Slice(s) => CppType {
@@ -147,6 +152,9 @@ impl IntoCpp for RustType {
                 generic_args: vec![t.into_cpp(namespace, crate_name)],
                 tail: None,
             },
+            // `zngur_lib::Cpp<T>` has the same layout as `T`, and non-`const` C++ classes are
+            // their wrappers.
+            RustType::CppVar(t) => t.into_cpp(namespace, crate_name),
             RustType::Tuple(v) => {
                 if v.is_empty() {
                     return CppType::from(&*format!("{namespace}::Unit"));
@@ -187,14 +195,16 @@ impl IntoCpp for RustType {
 pub enum CppRustReceiver {
     /// A static member function.
     Static,
-    /// A method: `&'a self` (`const` member functions) or `&'a mut self`.
+    /// A method: `&'a self` (a shared receiver, `&'a const self` / `&'a var self`) or
+    /// `&'a mut self` (a unique one).
     Ref {
         mutability: Mutability,
+        constness: CppConstness,
         lifetime: Option<Lifetime>,
     },
     /// An associated function taking `this: *const Self` (`const` member functions) or
     /// `this: *mut Self`.
-    Raw { mutability: Mutability },
+    Raw { constness: CppConstness },
 }
 
 impl CppRustReceiver {
@@ -203,10 +213,10 @@ impl CppRustReceiver {
         matches!(
             self,
             CppRustReceiver::Ref {
-                mutability: Mutability::Not,
+                constness: CppConstness::Const,
                 ..
             } | CppRustReceiver::Raw {
-                mutability: Mutability::Not
+                constness: CppConstness::Const
             }
         )
     }
@@ -1204,9 +1214,9 @@ pub {}fn {rust_name}{}("#,
 
     /// Adds the Rust function for a C++ member function of `owner`, which calls the C++ bridge
     /// function whose (mangled) name is returned. `const` member functions (including `const`
-    /// field accessors) are in an `impl<C> T<C>` block, so both constnesses have them, and the
-    /// others in an `impl T` (`T<NonConst>`) block. `inputs` and `output` are their Rust types (see
-    /// `RustType::in_cpp_signature`).
+    /// field accessors and copies) are in an `impl<C> T<C>` block, so both constnesses have them,
+    /// and the others in an `impl T` (`T<NonConst>`) block. `inputs` and `output` are their Rust
+    /// types.
     #[allow(clippy::too_many_arguments)]
     pub fn add_cpp_method(
         &mut self,
@@ -1250,6 +1260,7 @@ pub {}fn {rust_name}{}("#,
             CppRustReceiver::Ref {
                 mutability,
                 lifetime,
+                ..
             } => {
                 let lifetime = lifetime
                     .as_ref()
@@ -1262,11 +1273,10 @@ pub {}fn {rust_name}{}("#,
                 };
                 w!(self, "&{lifetime}{m}self, ");
             }
-            CppRustReceiver::Raw { mutability } => {
-                let ptr = if *mutability == Mutability::Mut {
-                    "*mut"
-                } else {
-                    "*const"
+            CppRustReceiver::Raw { constness } => {
+                let ptr = match constness {
+                    CppConstness::Var => "*mut",
+                    CppConstness::Const => "*const",
                 };
                 w!(self, "i0: {ptr} Self, ");
             }
@@ -1332,11 +1342,7 @@ pub {}fn {name}{}("#,
         constructor: &ZngurCppConstructor,
     ) -> String {
         let mangled_name = self.mangle_name(&format!("{owner}_cpp_constructor_{index}"));
-        let inputs: Vec<RustType> = constructor
-            .inputs
-            .iter()
-            .map(RustType::in_cpp_signature)
-            .collect();
+        let inputs = &constructor.inputs;
         let args_ty: String = inputs.iter().map(|ty| format!("{ty}, ")).collect();
         let args_pattern: String = (0..inputs.len()).map(|n| format!("i{n}, ")).collect();
         let safety = if constructor.is_safe {

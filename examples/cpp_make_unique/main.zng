@@ -11,21 +11,21 @@ type c++::shapes::Point {
     #trivially_relocatable;
 
     safe constructor(i32, i32);
-    field const x (type = i32);
-    field const y (type = i32);
+    field &const x (type = i32);
+    field &const y (type = i32);
 }
 
 // No layout: Rust only refers to it.
 type c++::shapes::Canvas {
-    safe fn Draw(&mut self, &c++::shapes::Point);
-    safe fn Points(&self) -> i32;
+    safe fn Draw(&unique var self, &const c++::shapes::Point);
+    safe fn Points(&const self) -> i32;
 }
 
 type<T> c++::std::unique_ptr<T> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
 
-    safe fn get(&self) -> T*;
+    safe fn get(&const self) -> T*;
 }
 
 type c++::std::unique_ptr<c++::shapes::Point> {}

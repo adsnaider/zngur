@@ -10,12 +10,13 @@ use chumsky::{input::MapExtra, prelude::*};
 use itertools::{Either, Itertools};
 
 use zngur_def::{
-    AdditionalIncludes, ConflictSource, ConvertPanicToException, CppIndirection, CppTemplateHome,
-    CppTypePath, Import, LayoutPolicy, Lifetime, Merge, MergeFailure, ModuleImport, Mutability,
-    PrimitiveRustType, RustPathAndGenerics, RustTrait, RustType, TriviallyRelocatable, TypeVar,
-    ZngurConstructor, ZngurCppConstructor, ZngurCppField, ZngurCppFn, ZngurCppMethod,
-    ZngurExternCppFn, ZngurExternCppImpl, ZngurField, ZngurFn, ZngurMethod, ZngurMethodDetails,
-    ZngurMethodReceiver, ZngurSpec, ZngurTrait, ZngurType, ZngurVariant, ZngurWellknownTrait,
+    AdditionalIncludes, ConflictSource, ConvertPanicToException, CppConstness, CppFieldAccess,
+    CppIndirection, CppTemplateHome, CppTypePath, Import, LayoutPolicy, Lifetime, Merge,
+    MergeFailure, ModuleImport, Mutability, PrimitiveRustType, RustPathAndGenerics, RustTrait,
+    RustType, TriviallyRelocatable, TypeVar, ZngurConstructor, ZngurCppConstructor, ZngurCppField,
+    ZngurCppFn, ZngurCppMethod, ZngurExternCppFn, ZngurExternCppImpl, ZngurField, ZngurFn,
+    ZngurMethod, ZngurMethodDetails, ZngurMethodReceiver, ZngurSpec, ZngurTrait, ZngurType,
+    ZngurVariant, ZngurWellknownTrait,
 };
 
 pub type Span = SimpleSpan<usize>;
@@ -462,9 +463,13 @@ enum ParsedTypeItem<'a> {
         lifetimes: Vec<&'a str>,
         inputs: Vec<ParsedRustType<'a>>,
     },
-    /// An accessor for a field of a C++ type: `field [const] name (type = T) [as rust_name];`
+    /// An accessor for a field of a C++ type:
+    /// `field [& [unique]] (const | var) name (type = T) [as rust_name];`. `constness` is `None`
+    /// if it's missing, and `unique` without `&` is an error, both reported when it's processed.
     CppField {
-        is_const: bool,
+        is_ref: bool,
+        unique: bool,
+        constness: Option<CppConstness>,
         name: &'a str,
         ty: ParsedRustType<'a>,
         rust_name: Option<&'a str>,
@@ -523,15 +528,21 @@ fn lifetimes(names: &[&str]) -> Vec<Lifetime> {
     names.iter().map(|n| lifetime(n)).collect()
 }
 
-/// Checks that the lifetimes that `types` (and `extra`, e.g. a receiver's lifetime) use are
-/// declared in `declared` (or are `'static` / `'_`), and that `declared` has no duplicates.
-fn check_lifetimes<'t>(
+/// Checks the types of a declaration: that the references to C++ objects in `types` are spelled
+/// right (see `check_cpp_objects`), and that the lifetimes that `types` (and `extra`, e.g. a
+/// receiver's lifetime) use are declared in `declared` (or are `'static` / `'_`), and that
+/// `declared` has no duplicates.
+fn check_types<'t>(
     ctx: &mut ParseContext,
     span: Span,
     declared: &[Lifetime],
     types: impl IntoIterator<Item = &'t RustType>,
     extra: impl IntoIterator<Item = &'t Lifetime>,
 ) -> bool {
+    let types: Vec<&RustType> = types.into_iter().collect();
+    if !report_cpp_objects(ctx, span, types.iter().copied()) {
+        return false;
+    }
     for (i, l) in declared.iter().enumerate() {
         if l.is_builtin() {
             ctx.add_error_str(&format!("`{l}` can't be declared"), span);
@@ -576,7 +587,7 @@ fn check_method_lifetimes(
         return false;
     }
     let declared: Vec<Lifetime> = outer.iter().chain(&method.lifetimes).cloned().collect();
-    check_lifetimes(
+    check_types(
         ctx,
         span,
         &declared,
@@ -589,11 +600,16 @@ fn check_method_lifetimes(
     )
 }
 
-/// The receiver of a C++ member function: `&'a self` / `&'a mut self`, or a raw one
-/// (`const self&`, `self*`, ...), with whether the member function is `const` (`Not`).
+/// The receiver of a C++ member function: `&'a [unique] (const | var) self`, or a raw one
+/// (`const self&`, `self*`, ...). `RustRef` is a (no longer valid) `&'a self` / `&'a mut self`.
 enum ParsedReceiver<'a> {
-    Ref(Mutability, Option<&'a str>),
-    Raw(Mutability, CppIndirection),
+    Ref {
+        unique: bool,
+        constness: CppConstness,
+        lifetime: Option<&'a str>,
+    },
+    Raw(CppConstness, CppIndirection),
+    RustRef(Mutability, Option<&'a str>),
 }
 
 fn as_receiver<'a>(ty: &ParsedRustType<'a>) -> Option<ParsedReceiver<'a>> {
@@ -605,12 +621,20 @@ fn as_receiver<'a>(ty: &ParsedRustType<'a>) -> Option<ParsedReceiver<'a>> {
                 && pg.lifetimes.is_empty())
     };
     match ty {
-        ParsedRustType::Ref(m, l, inner) if is_self(inner) => Some(ParsedReceiver::Ref(*m, *l)),
+        ParsedRustType::Ref(kind, l, inner) if is_self(inner) => Some(match *kind {
+            ParsedRefKind::Cpp { unique, constness } => ParsedReceiver::Ref {
+                unique,
+                // `&'a unique self` is rejected by `check_cpp_const`.
+                constness: constness.unwrap_or(CppConstness::Var),
+                lifetime: *l,
+            },
+            ParsedRefKind::Rust(m) => ParsedReceiver::RustRef(m, *l),
+        }),
         ParsedRustType::CppPtr(k, inner) => match &**inner {
             ParsedRustType::CppConst(inner) if is_self(inner) => {
-                Some(ParsedReceiver::Raw(Mutability::Not, *k))
+                Some(ParsedReceiver::Raw(CppConstness::Const, *k))
             }
-            inner if is_self(inner) => Some(ParsedReceiver::Raw(Mutability::Mut, *k)),
+            inner if is_self(inner) => Some(ParsedReceiver::Raw(CppConstness::Var, *k)),
             _ => None,
         },
         _ => None,
@@ -626,7 +650,8 @@ fn has_elided_ref(ty: &RustType) -> bool {
         | RustType::Boxed(t)
         | RustType::Slice(t)
         | RustType::CppPtr(_, t)
-        | RustType::CppConst(t) => has_elided_ref(t),
+        | RustType::CppConst(t)
+        | RustType::CppVar(t) => has_elided_ref(t),
         RustType::Tuple(tys) => tys.iter().any(has_elided_ref),
         RustType::Adt(pg) => pg
             .generics
@@ -658,8 +683,8 @@ fn check_cpp_signature_lints(
         ctx.add_warning_str(
             &format!(
                 "this C++ {what} has a reference without a lifetime, which can't be checked \
-                 against C++; name the lifetimes (e.g. `fn f<'a>(&'a self) -> &'a T`), or silence \
-                 this with `#allow(elided_lifetimes)`"
+                 against C++; name the lifetimes (e.g. `fn f<'a>(&'a const self) -> &'a const T`), \
+                 or silence this with `#allow(elided_lifetimes)`"
             ),
             span,
         );
@@ -709,6 +734,7 @@ fn contains_raw_ptr(ty: &RustType) -> bool {
     match ty {
         RustType::CppPtr(..) | RustType::Raw(..) => true,
         RustType::CppConst(t)
+        | RustType::CppVar(t)
         | RustType::Ref(_, _, t)
         | RustType::Boxed(t)
         | RustType::Slice(t) => contains_raw_ptr(t),
@@ -720,6 +746,146 @@ fn contains_raw_ptr(ty: &RustType) -> bool {
             .any(contains_raw_ptr),
         RustType::Cpp(path) => path.generics.iter().any(contains_raw_ptr),
         _ => false,
+    }
+}
+
+/// How `ty` is spelled in a `.zng` file, roughly (for diagnostics): `c++::` types get their
+/// prefix, and the other types are spelled like in Rust.
+fn zng_spelling(ty: &RustType) -> String {
+    match ty {
+        RustType::Cpp(path) if path.generics.is_empty() => format!("c++::{}", path.path.join("::")),
+        RustType::Cpp(path) => format!(
+            "c++::{}<{}>",
+            path.path.join("::"),
+            path.generics.iter().map(zng_spelling).join(", ")
+        ),
+        RustType::CppConst(t) => format!("const {}", zng_spelling(t)),
+        RustType::CppVar(t) => zng_spelling(t),
+        RustType::CppPtr(CppIndirection::Pointer, t) => format!("{}*", zng_spelling(t)),
+        RustType::CppPtr(CppIndirection::Reference, t) => format!("{}&", zng_spelling(t)),
+        ty => ty.to_string(),
+    }
+}
+
+/// Checks the references to C++ objects in `ty`, once its paths are resolved: a reference to a
+/// C++ class must say whether the object is `const` (`&'a const T`, `&'a unique var T`, ...), and
+/// only C++ objects (C++ classes, builtins and C++ pointers) can be `const` or `var`. Type
+/// variables of templates are checked once they're substituted.
+fn check_cpp_objects(ty: &RustType) -> Result<(), String> {
+    let all = |tys: &[RustType]| tys.iter().try_for_each(check_cpp_objects);
+    match ty {
+        RustType::Ref(m, l, inner) => {
+            let l = l.as_ref().map(|l| format!("{l} ")).unwrap_or_default();
+            match &**inner {
+                RustType::Cpp(_) => {
+                    let inner = zng_spelling(inner);
+                    let suggestion = match m {
+                        Mutability::Not => format!(
+                            "`&{l}const {inner}` (a C++ `const T&`, `&T<Const>` in Rust) or \
+                             `&{l}var {inner}` (a shared `T&`, `&T` in Rust)"
+                        ),
+                        Mutability::Mut => format!(
+                            "`&{l}unique var {inner}` (a `T&` that Rust uses uniquely, `&mut T` \
+                             in Rust)"
+                        ),
+                    };
+                    return Err(format!(
+                        "a reference to a C++ class must say whether the object is `const`: \
+                         {suggestion}"
+                    ));
+                }
+                RustType::CppConst(t) | RustType::CppVar(t) => match &**t {
+                    RustType::Cpp(_)
+                    | RustType::CppPtr(..)
+                    | RustType::TypeVar(_)
+                    | RustType::Primitive(
+                        PrimitiveRustType::Int(_)
+                        | PrimitiveRustType::Uint(_)
+                        | PrimitiveRustType::Float(_)
+                        | PrimitiveRustType::Usize
+                        | PrimitiveRustType::Bool,
+                    ) => {}
+                    RustType::Primitive(PrimitiveRustType::Char) => {
+                        let m = if *m == Mutability::Mut { "mut " } else { "" };
+                        return Err(format!(
+                            "`char` can't be a C++ object (C++ can store invalid code points in \
+                             it), so references to it can't be `const` or `var`: use \
+                             `&{l}{m}char` (a Rust value)"
+                        ));
+                    }
+                    t => {
+                        let m = if *m == Mutability::Mut { "mut " } else { "" };
+                        let t = zng_spelling(t);
+                        return Err(format!(
+                            "only C++ objects (`c++::` types, builtins and C++ pointers) can be \
+                             `const` or `var`, and `{t}` is a Rust type: use `&{l}{m}{t}`"
+                        ));
+                    }
+                },
+                _ => {}
+            }
+            check_cpp_objects(inner)
+        }
+        RustType::Raw(_, t)
+        | RustType::Boxed(t)
+        | RustType::Slice(t)
+        | RustType::CppPtr(_, t)
+        | RustType::CppConst(t)
+        | RustType::CppVar(t) => check_cpp_objects(t),
+        RustType::Tuple(tys) => all(tys),
+        RustType::Adt(pg) => {
+            all(&pg.generics)?;
+            pg.named_generics
+                .iter()
+                .try_for_each(|(_, t)| check_cpp_objects(t))
+        }
+        RustType::Cpp(path) => all(&path.generics),
+        RustType::Dyn(tr, _) | RustType::Impl(tr, _) => match tr {
+            RustTrait::Normal(pg) => check_cpp_objects(&RustType::Adt(pg.clone())),
+            RustTrait::Fn { inputs, output, .. } => {
+                all(inputs)?;
+                check_cpp_objects(output)
+            }
+        },
+        RustType::Primitive(_) | RustType::TypeVar(_) => Ok(()),
+    }
+}
+
+/// Reports the first error of [`check_cpp_objects`] in `types`, and returns whether there was none.
+fn report_cpp_objects<'t>(
+    ctx: &mut ParseContext,
+    span: Span,
+    types: impl IntoIterator<Item = &'t RustType>,
+) -> bool {
+    match types.into_iter().try_for_each(check_cpp_objects) {
+        Ok(()) => true,
+        Err(message) => {
+            ctx.add_error_str(&message, span);
+            false
+        }
+    }
+}
+
+/// Checks the type of a C++ field accessor: a C++ object (a `c++::` type, a builtin or a C++
+/// pointer), or a type variable of a template (checked once it's substituted).
+fn check_cpp_field(field: &ZngurCppField) -> Result<(), String> {
+    match &field.ty {
+        RustType::Cpp(_)
+        | RustType::CppPtr(..)
+        | RustType::TypeVar(_)
+        | RustType::Primitive(
+            PrimitiveRustType::Int(_)
+            | PrimitiveRustType::Uint(_)
+            | PrimitiveRustType::Float(_)
+            | PrimitiveRustType::Usize
+            | PrimitiveRustType::Bool,
+        ) => check_cpp_objects(&field.ty),
+        ty => Err(format!(
+            "the field `{}` has the type `{}`, but C++ fields are C++ objects: `c++::` types, \
+             builtins (other than `char` and `str`) or C++ pointers",
+            field.name,
+            zng_spelling(ty)
+        )),
     }
 }
 
@@ -1019,7 +1185,7 @@ impl ProcessedItem<'_> {
                     }
                 };
                 let rust_ty = ty.inner.to_zngur(scope);
-                check_lifetimes(ctx, ty.span, &type_lifetimes, [&rust_ty], []);
+                check_types(ctx, ty.span, &type_lifetimes, [&rust_ty], []);
                 while let Some(item) = to_process.pop() {
                     let item_span = item.span;
                     let item = item.inner;
@@ -1106,7 +1272,7 @@ impl ProcessedItem<'_> {
                                         .collect(),
                                 },
                             };
-                            check_lifetimes(
+                            check_types(
                                 ctx,
                                 item_span,
                                 &type_lifetimes,
@@ -1145,7 +1311,7 @@ impl ProcessedItem<'_> {
                                             ty: ty.to_zngur(scope),
                                             offset,
                                         };
-                                        check_lifetimes(
+                                        check_types(
                                             ctx,
                                             item.span,
                                             &type_lifetimes,
@@ -1176,7 +1342,7 @@ impl ProcessedItem<'_> {
                                 ty: ty.to_zngur(scope),
                                 offset,
                             };
-                            if !check_lifetimes(ctx, item_span, &type_lifetimes, [&field.ty], []) {
+                            if !check_types(ctx, item_span, &type_lifetimes, [&field.ty], []) {
                                 continue;
                             }
                             ctx.record_span(
@@ -1199,8 +1365,9 @@ impl ProcessedItem<'_> {
                             if is_const {
                                 ctx.add_error_str(
                                     "C++ member functions take an explicit receiver instead of a \
-                                     trailing `const`: `&self` for `const` member functions, and \
-                                     `&mut self` for the others",
+                                     trailing `const`: `&'a const self` for `const` member \
+                                     functions, and `&'a unique var self` (or `&'a var self`) for \
+                                     the others",
                                     item_span,
                                 );
                                 continue;
@@ -1209,9 +1376,11 @@ impl ProcessedItem<'_> {
                             if parsed_receiver.is_some() {
                                 inputs.remove(0);
                             }
-                            let (receiver, receiver_lifetime, raw_receiver) =
+                            let (receiver, receiver_constness, receiver_lifetime, raw_receiver) =
                                 match (is_static, parsed_receiver) {
-                                    (true, None) => (ZngurMethodReceiver::Static, None, None),
+                                    (true, None) => {
+                                        (ZngurMethodReceiver::Static, CppConstness::Var, None, None)
+                                    }
                                     (true, Some(_)) => {
                                         ctx.add_error_str(
                                             "static member functions don't take `self`",
@@ -1221,19 +1390,69 @@ impl ProcessedItem<'_> {
                                     }
                                     (false, None) => {
                                         ctx.add_error_str(
-                                            "C++ member functions need a receiver: `&self` \
-                                             (`const` member functions), `&mut self` (the others) \
+                                            "C++ member functions need a receiver: \
+                                             `&'a const self` (`const` member functions), \
+                                             `&'a unique var self` or `&'a var self` (the others), \
                                              or a raw one (`const self&`, `self&`, `const self*`, \
                                              `self*`); static member functions are `static fn`",
                                             item_span,
                                         );
                                         continue;
                                     }
-                                    (false, Some(ParsedReceiver::Ref(m, l))) => {
-                                        (ZngurMethodReceiver::Ref(m), l.map(lifetime), None)
+                                    (false, Some(ParsedReceiver::RustRef(m, l))) => {
+                                        let l = l.map(|l| format!("'{l} ")).unwrap_or_default();
+                                        let suggestion = match m {
+                                            Mutability::Not => format!(
+                                                "`&{l}const self` (a `const` member function)"
+                                            ),
+                                            Mutability::Mut => format!(
+                                                "`&{l}unique var self` (a non-`const` member \
+                                                 function, `&mut self` in Rust)"
+                                            ),
+                                        };
+                                        ctx.add_error_str(
+                                            &format!(
+                                                "the receiver of a C++ member function is a \
+                                                 reference to a C++ object, which says whether \
+                                                 it's `const`: {suggestion}"
+                                            ),
+                                            item_span,
+                                        );
+                                        continue;
                                     }
-                                    (false, Some(ParsedReceiver::Raw(m, indirection))) => {
-                                        (ZngurMethodReceiver::Ref(m), None, Some(indirection))
+                                    (
+                                        false,
+                                        Some(ParsedReceiver::Ref {
+                                            unique,
+                                            constness,
+                                            lifetime: l,
+                                        }),
+                                    ) => {
+                                        let m = if unique {
+                                            Mutability::Mut
+                                        } else {
+                                            Mutability::Not
+                                        };
+                                        (
+                                            ZngurMethodReceiver::Ref(m),
+                                            constness,
+                                            l.map(lifetime),
+                                            None,
+                                        )
+                                    }
+                                    (false, Some(ParsedReceiver::Raw(constness, indirection))) => {
+                                        // Raw receivers are associated functions; the `Ref`
+                                        // only says that there is a `this`.
+                                        let m = match constness {
+                                            CppConstness::Const => Mutability::Not,
+                                            CppConstness::Var => Mutability::Mut,
+                                        };
+                                        (
+                                            ZngurMethodReceiver::Ref(m),
+                                            constness,
+                                            None,
+                                            Some(indirection),
+                                        )
                                     }
                                 };
                             let inputs: Vec<RustType> =
@@ -1247,13 +1466,14 @@ impl ProcessedItem<'_> {
                                     .collect(),
                                 rust_name: rust_name.map(|n| n.to_owned()),
                                 receiver,
+                                receiver_constness,
                                 receiver_lifetime,
                                 raw_receiver,
                                 inputs,
                                 output: output.to_zngur(scope),
                                 is_safe,
                             };
-                            if !check_lifetimes(
+                            if !check_types(
                                 ctx,
                                 item_span,
                                 &method.lifetimes,
@@ -1293,8 +1513,7 @@ impl ProcessedItem<'_> {
                             let inputs: Vec<RustType> =
                                 inputs.into_iter().map(|x| x.to_zngur(scope)).collect();
                             let constructor_lifetimes = lifetimes(&constructor_lifetimes);
-                            if !check_lifetimes(ctx, item_span, &constructor_lifetimes, &inputs, [])
-                            {
+                            if !check_types(ctx, item_span, &constructor_lifetimes, &inputs, []) {
                                 continue;
                             }
                             check_cpp_signature_lints(
@@ -1333,22 +1552,56 @@ impl ProcessedItem<'_> {
                             cpp_constructors.push(constructor);
                         }
                         ParsedTypeItem::CppField {
-                            is_const,
+                            is_ref,
+                            unique,
+                            constness,
                             name,
                             ty,
                             rust_name,
                         } => {
+                            let Some(constness) = constness else {
+                                let unique = if unique { "unique " } else { "" };
+                                ctx.add_error_str(
+                                    &format!(
+                                        "a C++ field accessor says what it returns: \
+                                         `field &{unique}const {name} ...` / \
+                                         `field &{unique}var {name} ...` (a reference to the \
+                                         field, `unique` if Rust uses it uniquely), or \
+                                         `field const {name} ...` / `field var {name} ...` (a \
+                                         copy of it)"
+                                    ),
+                                    item_span,
+                                );
+                                continue;
+                            };
+                            let access = match (is_ref, unique) {
+                                (true, unique) => CppFieldAccess::Ref { unique, constness },
+                                (false, false) => CppFieldAccess::Copy { constness },
+                                (false, true) => {
+                                    let c = constness.keyword();
+                                    ctx.add_error_str(
+                                        &format!(
+                                            "`unique` only applies to references: \
+                                             `field &unique {c} {name} ...` returns a unique \
+                                             reference to the field, and `field {c} {name} ...` \
+                                             a copy of it"
+                                        ),
+                                        item_span,
+                                    );
+                                    continue;
+                                }
+                            };
                             let field = ZngurCppField {
                                 name: name.to_owned(),
                                 rust_name: rust_name.map(|n| n.to_owned()),
                                 ty: ty.to_zngur(scope),
-                                mutability: if is_const {
-                                    Mutability::Not
-                                } else {
-                                    Mutability::Mut
-                                },
+                                access,
                             };
                             if !reject_lifetimes(ctx, item_span, "C++ fields", [&field.ty]) {
+                                continue;
+                            }
+                            if let Err(e) = check_cpp_field(&field) {
+                                ctx.add_error_str(&e, item_span);
                                 continue;
                             }
                             ctx.record_span(
@@ -1404,7 +1657,7 @@ impl ProcessedItem<'_> {
                                 .chain(&method.data.lifetimes)
                                 .cloned()
                                 .collect();
-                            if !check_lifetimes(
+                            if !check_types(
                                 ctx,
                                 item_span,
                                 &declared,
@@ -1628,7 +1881,7 @@ impl ProcessedItem<'_> {
                     .map(|x| x.to_zngur(scope))
                     .collect();
                 let fn_lifetimes = lifetimes(&f.lifetimes);
-                if !check_lifetimes(
+                if !check_types(
                     ctx,
                     span,
                     &fn_lifetimes,
@@ -1695,7 +1948,7 @@ impl ProcessedItem<'_> {
                                     .collect(),
                             };
                             let trait_ty = imp.tr.clone().map(|tr| RustType::Dyn(tr, vec![]));
-                            if !check_lifetimes(
+                            if !check_types(
                                 ctx,
                                 ty.span,
                                 &imp.lifetimes,
@@ -1756,11 +2009,25 @@ impl ProcessedItem<'_> {
     }
 }
 
+/// The kind of a reference in the `.zng` file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParsedRefKind {
+    /// `&'a T` / `&'a mut T`: a reference to a Rust value.
+    Rust(Mutability),
+    /// `&'a [unique] (const | var) T`: a reference to a C++ object. `constness` is `None` for
+    /// `&'a unique T`, which is an error (reported by `check_cpp_const`).
+    Cpp {
+        unique: bool,
+        constness: Option<CppConstness>,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ParsedRustType<'a> {
     Primitive(PrimitiveRustType),
-    /// `&T`, `&'a T`, ... (the lifetime is without the `'`).
-    Ref(Mutability, Option<&'a str>, Box<ParsedRustType<'a>>),
+    /// `&T`, `&'a T`, `&'a mut T`, `&'a const T`, `&'a unique var T`, ... (the lifetime is without
+    /// the `'`, and `T` is without the `const` / `var`).
+    Ref(ParsedRefKind, Option<&'a str>, Box<ParsedRustType<'a>>),
     Raw(Mutability, Box<ParsedRustType<'a>>),
     Boxed(Box<ParsedRustType<'a>>),
     Slice(Box<ParsedRustType<'a>>),
@@ -1778,10 +2045,28 @@ impl ParsedRustType<'_> {
     fn to_zngur(self, scope: &Scope<'_>) -> RustType {
         match self {
             ParsedRustType::Primitive(s) => RustType::Primitive(s),
-            ParsedRustType::CppPtr(kind, s) => RustType::CppPtr(kind, Box::new(s.to_zngur(scope))),
+            // The pointee is a `CppConst` or a `CppVar`.
+            ParsedRustType::CppPtr(kind, s) => RustType::CppPtr(
+                kind,
+                Box::new(RustType::cpp_object(CppConstness::Var, s.to_zngur(scope))),
+            ),
             ParsedRustType::CppConst(s) => RustType::CppConst(Box::new(s.to_zngur(scope))),
-            ParsedRustType::Ref(m, l, s) => {
+            ParsedRustType::Ref(ParsedRefKind::Rust(m), l, s) => {
                 RustType::Ref(m, l.map(lifetime), Box::new(s.to_zngur(scope)))
+            }
+            ParsedRustType::Ref(ParsedRefKind::Cpp { unique, constness }, l, s) => {
+                let m = if unique {
+                    Mutability::Mut
+                } else {
+                    Mutability::Not
+                };
+                // `&'a unique T` is rejected by `check_cpp_const`.
+                let constness = constness.unwrap_or(CppConstness::Var);
+                RustType::Ref(
+                    m,
+                    l.map(lifetime),
+                    Box::new(RustType::cpp_object(constness, s.to_zngur(scope))),
+                )
             }
             ParsedRustType::Raw(m, s) => RustType::Raw(m, Box::new(s.to_zngur(scope))),
             ParsedRustType::Boxed(s) => RustType::Boxed(Box::new(s.to_zngur(scope))),
@@ -2930,6 +3215,7 @@ impl ZngurSpecBuilder {
             }) {
                 ty.wellknown_traits.push(ZngurWellknownTrait::Drop);
             }
+            let from_template = !template_locations.is_empty();
             if ty.layout.is_none() && !matches!(ty.ty, RustType::Cpp(_)) {
                 let spans = ctx.fetch_spans_global(ty);
                 let (first, rest) = {
@@ -3018,6 +3304,81 @@ impl ZngurSpecBuilder {
             }
             if is_cpp && let Err(e) = ty.ty.cpp_spelling() {
                 type_error(ctx, &ty.ty, &e);
+            }
+            // The members of a template are checked once its type variables are substituted (the
+            // other members were checked when they were declared).
+            if from_template {
+                let errors: Vec<String> = ty
+                    .cpp_methods
+                    .iter()
+                    .flat_map(|m| {
+                        m.inputs
+                            .iter()
+                            .chain([&m.output])
+                            .chain(&m.template_args)
+                            .map(move |t| (m.rust_name(), t))
+                    })
+                    .chain(
+                        ty.cpp_constructors
+                            .iter()
+                            .flat_map(|c| c.inputs.iter().map(|t| ("constructor", t))),
+                    )
+                    .filter_map(|(member, t)| {
+                        check_cpp_objects(t)
+                            .err()
+                            .map(|e| format!("in `{member}`: {e}"))
+                    })
+                    .chain(
+                        ty.cpp_fields
+                            .iter()
+                            .filter_map(|f| check_cpp_field(f).err()),
+                    )
+                    .collect();
+                for e in errors {
+                    type_error(
+                        ctx,
+                        &ty.ty,
+                        &format!(
+                            "in the instantiation `{}` of a template, {e}",
+                            zng_spelling(&ty.ty)
+                        ),
+                    );
+                }
+            }
+        }
+        // Copies of fields of C++ class types are constructed in Rust's memory, so Rust must hold
+        // them by value.
+        let by_value: HashSet<RustType> = spec
+            .imported_modules
+            .iter()
+            .flat_map(|m| m.cpp_by_value_types.iter().map(|(t, _)| t.clone()))
+            .chain(
+                spec.types
+                    .iter()
+                    .filter(|t| t.cpp_by_value_layout().is_some())
+                    .map(|t| t.ty.clone()),
+            )
+            .collect();
+        for ty in &spec.types {
+            for field in &ty.cpp_fields {
+                if matches!(field.access, CppFieldAccess::Copy { .. })
+                    && matches!(field.ty, RustType::Cpp(_))
+                    && !by_value.contains(&field.ty)
+                {
+                    type_error(
+                        ctx,
+                        &ty.ty,
+                        &format!(
+                            "the accessor `{}` returns a copy of the field `{}`, but Rust doesn't \
+                             hold `{}` by value (it needs a layout and `#trivially_relocatable`); \
+                             return a reference instead (`field &const {} ...`)",
+                            field.rust_name(),
+                            field.name,
+                            zng_spelling(&field.ty),
+                            field.name,
+                        ),
+                    );
+                }
             }
         }
         let local_cpp_templates: Vec<&TemplateDef> = templates
@@ -3544,15 +3905,59 @@ fn rust_type<'a>() -> Boxed<'a, 'a, ParserInput<'a>, ParsedRustType<'a>, ZngPars
             .clone()
             .map(|x| ParsedRustType::Slice(Box::new(x)))
             .delimited_by(just(Token::BracketOpen), just(Token::BracketClose));
+        // References: `&'a T` / `&'a mut T` (to Rust values), and `&'a [unique] (const | var) T`
+        // (to C++ objects). `unique` and `var` are only keywords right after `&` / `&'a`.
+        let constness = choice((
+            just(Token::KwConst).to(CppConstness::Const),
+            just(Token::Ident("var")).to(CppConstness::Var),
+        ));
+        let unique = just(Token::Ident("unique"));
         let reference = just(Token::And)
             .ignore_then(select! { Token::Lifetime(l) => l }.or_not())
-            .then(
+            .then(choice((
+                unique
+                    .clone()
+                    .ignore_then(constness.clone())
+                    .then(parser.clone())
+                    .map(|(c, x)| {
+                        let kind = ParsedRefKind::Cpp {
+                            unique: true,
+                            constness: Some(c),
+                        };
+                        (kind, x)
+                    })
+                    .boxed(),
+                constness
+                    .then(parser.clone())
+                    .map(|(c, x)| {
+                        let kind = ParsedRefKind::Cpp {
+                            unique: false,
+                            constness: Some(c),
+                        };
+                        (kind, x)
+                    })
+                    .boxed(),
+                // An error (reported by `check_cpp_const`).
+                unique
+                    .ignore_then(parser.clone())
+                    .map(|x| {
+                        let kind = ParsedRefKind::Cpp {
+                            unique: true,
+                            constness: None,
+                        };
+                        (kind, x)
+                    })
+                    .boxed(),
                 just(Token::KwMut)
-                    .to(Mutability::Mut)
-                    .or(empty().to(Mutability::Not)),
-            )
-            .then(parser.clone())
-            .map(|((l, m), x)| ParsedRustType::Ref(m, l, Box::new(x)));
+                    .ignore_then(parser.clone())
+                    .map(|x| (ParsedRefKind::Rust(Mutability::Mut), x))
+                    .boxed(),
+                parser
+                    .clone()
+                    .map(|x| (ParsedRefKind::Rust(Mutability::Not), x))
+                    .boxed(),
+            )))
+            .map(|(l, (kind, x))| ParsedRustType::Ref(kind, l, Box::new(x)));
         let raw_ptr = just(Token::Star)
             .ignore_then(
                 just(Token::KwMut)
@@ -3596,7 +4001,9 @@ fn rust_type<'a>() -> Boxed<'a, 'a, ParserInput<'a>, ParsedRustType<'a>, ZngPars
 
 /// Checks that `const T` only appears where it's valid: as the pointee of a C++ pointer or
 /// reference, or as a C++ template argument (`allowed`), with a `T` that is a C++ type or a
-/// builtin.
+/// builtin. Also checks the spelling of references to C++ objects (`&'a unique T` needs `const` or
+/// `var`, and `&'a mut const T` is `&'a unique const T`). Whether `T` is a C++ object at all is
+/// checked once the paths are resolved (see `check_cpp_objects`).
 fn check_cpp_const(ty: &ParsedRustType<'_>, allowed: bool) -> Result<(), String> {
     let all = |tys: &[ParsedRustType<'_>]| tys.iter().try_for_each(|t| check_cpp_const(t, false));
     match ty {
@@ -3604,7 +4011,7 @@ fn check_cpp_const(ty: &ParsedRustType<'_>, allowed: bool) -> Result<(), String>
             if !allowed {
                 return Err(
                     "`const T` can only be the type of a C++ pointer or reference \
-                            (`const T&`, `const T*`) or a C++ template argument"
+                            (`const T&`, `const T*`, `&'a const T`) or a C++ template argument"
                         .to_owned(),
                 );
             }
@@ -3619,6 +4026,30 @@ fn check_cpp_const(ty: &ParsedRustType<'_>, allowed: bool) -> Result<(), String>
         }
         ParsedRustType::CppPtr(_, inner) => check_cpp_const(inner, true),
         ParsedRustType::Primitive(_) => Ok(()),
+        ParsedRustType::Ref(
+            ParsedRefKind::Cpp {
+                unique: true,
+                constness: None,
+            },
+            l,
+            _,
+        ) => {
+            let l = l.map(|l| format!("'{l} ")).unwrap_or_default();
+            Err(format!(
+                "a `unique` reference is a reference to a C++ object, which says whether it's \
+                 `const`: `&{l}unique var T` (a C++ `T&` that Rust uses uniquely, `&mut T` in \
+                 Rust) or `&{l}unique const T`; a reference to a Rust value is `&{l}mut T`"
+            ))
+        }
+        ParsedRustType::Ref(ParsedRefKind::Rust(Mutability::Mut), l, t)
+            if matches!(**t, ParsedRustType::CppConst(_)) =>
+        {
+            let l = l.map(|l| format!("'{l} ")).unwrap_or_default();
+            Err(format!(
+                "references to C++ objects say `unique` rather than `mut`: write \
+                 `&{l}unique const T` (or `&{l}const T` for a shared reference)"
+            ))
+        }
         ParsedRustType::Ref(_, _, t)
         | ParsedRustType::Raw(_, t)
         | ParsedRustType::Boxed(t)
@@ -3829,7 +4260,7 @@ fn method<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedMethod<'a>, ZngParserE
                 .boxed(),
         )
         .then(fn_args(rust_type()))
-        .map(|(((opt_async, name), (lifetimes, generics)), args)| {
+        .try_map(|(((opt_async, name), (lifetimes, generics)), args), span| {
             let is_self = |c: &ParsedRustType<'_>| {
                 if let ParsedRustType::Adt(c) = c {
                     c.path.start == ParsedPathStart::Relative
@@ -3841,8 +4272,16 @@ fn method<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedMethod<'a>, ZngParserE
             };
             let (inputs, receiver, receiver_lifetime) = match args.0.get(0) {
                 Some(x) if is_self(&x) => (args.0[1..].to_vec(), ZngurMethodReceiver::Move, None),
-                Some(ParsedRustType::Ref(m, l, x)) if is_self(&x) => {
+                Some(ParsedRustType::Ref(ParsedRefKind::Rust(m), l, x)) if is_self(&x) => {
                     (args.0[1..].to_vec(), ZngurMethodReceiver::Ref(*m), *l)
+                }
+                Some(ParsedRustType::Ref(ParsedRefKind::Cpp { .. }, _, x)) if is_self(&x) => {
+                    return Err(Rich::custom(
+                        span,
+                        "`const self` / `var self` receivers are for C++ member functions (which \
+                         start with `safe` or `unsafe`); methods of Rust types and `extern \"C++\"` \
+                         impls take `&self` or `&mut self`",
+                    ));
                 }
                 _ => (args.0, ZngurMethodReceiver::Static, None),
             };
@@ -3862,7 +4301,7 @@ fn method<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedMethod<'a>, ZngParserE
                     vec![],
                 )
             }
-            ParsedMethod {
+            Ok(ParsedMethod {
                 name,
                 lifetimes,
                 receiver,
@@ -3870,7 +4309,7 @@ fn method<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedMethod<'a>, ZngParserE
                 generics,
                 inputs,
                 output,
-            }
+            })
         })
         .boxed()
 }
@@ -3974,7 +4413,15 @@ fn inner_type_item<'a>()
     // Unlike fields of Rust types, accessors for fields of C++ types have no offset (C++ knows
     // it), so they're told apart by `(type = ...)`.
     let cpp_field = just(Token::Ident("field"))
-        .ignore_then(just(Token::KwConst).or_not().map(|c| c.is_some()))
+        .ignore_then(just(Token::And).or_not().map(|a| a.is_some()))
+        .then(just(Token::Ident("unique")).or_not().map(|u| u.is_some()))
+        .then(
+            choice((
+                just(Token::KwConst).to(CppConstness::Const),
+                just(Token::Ident("var")).to(CppConstness::Var),
+            ))
+            .or_not(),
+        )
         .then(cpp_name())
         .then(
             just(Token::KwType)
@@ -3988,8 +4435,10 @@ fn inner_type_item<'a>()
                 .or_not(),
         )
         .map(
-            |(((is_const, name), ty), rust_name)| ParsedTypeItem::CppField {
-                is_const,
+            |(((((is_ref, unique), constness), name), ty), rust_name)| ParsedTypeItem::CppField {
+                is_ref,
+                unique,
+                constness,
                 name,
                 ty,
                 rust_name,

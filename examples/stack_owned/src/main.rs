@@ -4,7 +4,7 @@ mod generated;
 use std::mem::MaybeUninit;
 
 use generated::{MyConservativeWrapper, MyCppWrapper};
-use zngur_lib::{Const, ConstValue, ZngCppConstruct};
+use zngur_lib::{Const, Cpp, ZngCppConstruct};
 
 fn main() {
     let mut c = MyCppWrapper::new(5, 6);
@@ -12,9 +12,10 @@ fn main() {
 
     // C++ functions taking and returning C++-style pointers and references, which are raw
     // pointers in Rust: `*const MyCppWrapper<Const>` for `const T&` / `const T*`, `*mut T` for
-    // `T&` / `T*`. Rust references coerce to them.
+    // `T&` / `T*`, and `*mut Cpp<i32>` for `int32_t*`. Rust references coerce to them, and
+    // `Cpp::from_mut` makes a Rust `i32` a C++ object.
     let mut sum = 0;
-    unsafe { generated::sum_into(c.as_const(), &mut sum) };
+    unsafe { generated::sum_into(c.as_const(), Cpp::from_mut(&mut sum)) };
     println!("sum = {sum}");
     unsafe { generated::swap_xy(&mut c) };
     c.print();
@@ -23,12 +24,13 @@ fn main() {
     assert_eq!(larger, c.as_const() as *const _);
 
     // C++ member functions, which are methods: `&self` for `const` member functions and
-    // `&mut self` for the others. A C++ `const T&` is a `&T<Const>`.
+    // `&mut self` for the others. A C++ `const T&` is a `&T<Const>`, and a `const int32_t&` a
+    // `&Cpp<i32, Const>`, whose value `get()` reads.
     println!("sum() = {}", c.sum());
     c.scale(10);
     c.add(d.as_const());
     c.print();
-    let x = *c.x_ref();
+    let x = c.x_ref().get();
     println!("x_ref() = {x}");
     c.swapped().print();
     MyCppWrapper::diagonal(7).print();
@@ -58,16 +60,16 @@ fn main() {
 
     // C++ field accessors, which return a reference to the field.
     let mut point = MyCppWrapper::build((1, 2));
-    *point.x_mut() += 100;
-    let x = *point.x();
-    let y = *point.y();
+    *point.x_mut().get_mut() += 100;
+    let x = point.x().get();
+    let y = point.y().get();
     println!("fields = {x} {y}");
     point.print();
 
     // Instantiations of C++ class templates.
     let mut ints = generated::Pair::<i32>::build((3, 4));
     let doubles = generated::Pair::<f64>::build((1.5, 2.25));
-    *ints.first_mut() = 30;
+    ints.first_mut().set(30);
     println!("pairs = {} {}", ints.sum(), doubles.sum());
     let boxed: generated::std::unique_ptr<generated::Pair<i32>> = generated::pairs::boxed(5, 6);
     // `get()` returns a C++ pointer, which may be null: dereferencing it is `unsafe`.
@@ -77,14 +79,14 @@ fn main() {
     // Fields of pointer type.
     let mut first = generated::Node::build((1,));
     let mut second = generated::Node::build((2,));
-    *first.next_mut() = &mut second;
-    *second.type_mut() = 5;
-    let next = unsafe { first.next().as_mut() }.expect("null");
-    let next_type = *next.type_mut();
+    first.next_mut().set(&mut second);
+    second.type_mut().set(5);
+    let next = unsafe { first.next().get().as_mut() }.expect("null");
+    let next_type = next.type_mut().get();
     println!(
         "nodes = {} -> {}, type = {}",
-        first.id(),
-        next.id(),
+        first.id().get(),
+        next.id().get(),
         next_type
     );
 
@@ -95,9 +97,9 @@ fn main() {
     // `const` member functions. Going from a `T` to a `T<Const>` is explicit.
     let squares = generated::views::squares();
     let len = squares.size();
-    let third: i32 = *unsafe { squares.at(3) };
+    let third: i32 = unsafe { squares.at(3) }.get();
     println!("squares = {len} items, squares[3] = {third}");
-    let _: &generated::View<ConstValue<i32>> = &squares;
+    let _: &generated::View<Cpp<i32, Const>> = &squares;
     let mut point = MyCppWrapper::build((2, 3));
     let exclusive: &mut MyCppWrapper<Const> = point.as_const_mut();
     println!("const sum() = {}", exclusive.sum());

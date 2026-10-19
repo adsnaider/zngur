@@ -4,11 +4,11 @@ C++ types are declared with a `c++::` path, which is also their C++ name: `type 
 is the C++ type `::osmium::Way`. What Rust can do with such a type follows from what the `.zng` file
 says about it:
 
-| Declaration                                | Rust can                                          |
-| ------------------------------------------ | ------------------------------------------------- |
+| Declaration                                | Rust can                                              |
+| ------------------------------------------ | ----------------------------------------------------- |
 | no layout                                  | only refer to it (`&T`, raw pointers, smart pointers) |
-| a layout, without `#trivially_relocatable` | only refer to it (the layout is checked in C++)   |
-| a layout and `#trivially_relocatable`      | hold it by value, like a Rust value               |
+| a layout, without `#trivially_relocatable` | only refer to it (the layout is checked in C++)       |
+| a layout and `#trivially_relocatable`      | hold it by value, like a Rust value                   |
 
 To own a C++ object that isn't trivially relocatable, hold it through a C++ smart pointer, like
 `std::unique_ptr` (see [C++ class templates](./cpp_templates.md)).

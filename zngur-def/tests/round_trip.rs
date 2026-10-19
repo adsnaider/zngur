@@ -416,37 +416,37 @@ fn reparse_cpp_methods() {
 type c++::a::B {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
-    unsafe fn value(&self) -> i32;
-    unsafe fn set(&mut self, i32, const c++::a::B&);
+    unsafe fn value(&const self) -> i32;
+    unsafe fn set(&unique var self, i32, const c++::a::B&);
     safe static fn make(i32) -> c++::a::B;
-    unsafe fn get<'a>(&'a self, i32) -> &'a i32 as get_const;
+    unsafe fn get<'a>(&'a const self, i32) -> &'a const i32 as get_const;
     safe constructor();
     safe constructor(i32, i32);
     unsafe constructor(const c++::a::B&);
-    field const x (type = i32);
-    field x (type = i32) as x_mut;
+    field &const x (type = i32);
+    field &unique var x (type = i32) as x_mut;
 }
         "#,
-        expect![[r##"
+        expect![[r#"
             #crate my_crate
 
             type c++::a::B {
                 #layout(size = 8, align = 4);
                 #trivially_relocatable;
 
-                field const x (type = i32);
-                field x (type = i32) as x_mut;
+                field &const x (type = i32);
+                field &unique var x (type = i32) as x_mut;
 
                 safe constructor();
                 safe constructor(i32, i32);
                 unsafe constructor(const c++::a::B&);
 
-                unsafe fn value(&self) -> i32;
-                unsafe fn set(&mut self, i32, const c++::a::B&);
+                unsafe fn value(&const self) -> i32;
+                unsafe fn set(&unique var self, i32, const c++::a::B&);
                 safe static fn make(i32) -> c++::a::B;
-                unsafe fn get<'a>(&'a self, i32) -> &'a i32 as get_const;
+                unsafe fn get<'a>(&'a const self, i32) -> &'a const i32 as get_const;
             }
-        "##]],
+        "#]],
     );
 }
 
@@ -458,24 +458,24 @@ fn reparse_cpp_templates() {
 type c++::std::unique_ptr<c++::a::B> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
-    unsafe fn get(&self) -> c++::a::B*;
+    unsafe fn get(&const self) -> c++::a::B*;
 }
 type c++::std::map<i32, const c++::a::B*> {
 }
         "#,
-        expect![[r##"
+        expect![[r#"
             #crate my_crate
 
             type c++::std::unique_ptr<c++::a::B> {
                 #layout(size = 8, align = 8);
                 #trivially_relocatable;
 
-                unsafe fn get(&self) -> c++::a::B*;
+                unsafe fn get(&const self) -> c++::a::B*;
             }
 
             type c++::std::map<i32, const c++::a::B*> {
             }
-        "##]],
+        "#]],
     );
 }
 
@@ -486,7 +486,7 @@ fn reparse_cpp_template_home() {
 type<T> c++::std::unique_ptr<T> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
-    unsafe fn get(&self) -> T*;
+    unsafe fn get(&const self) -> T*;
 }
 type c++::std::unique_ptr<i32> {
 }
@@ -496,14 +496,14 @@ type c++::std::unique_ptr<i32> {
                 #layout(size = 8, align = 8);
                 #trivially_relocatable;
 
-                unsafe fn get(&self) -> T*;
+                unsafe fn get(&const self) -> T*;
             }
 
             type c++::std::unique_ptr<i32> {
                 #layout(size = 8, align = 8);
                 #trivially_relocatable;
 
-                unsafe fn get(&self) -> i32*;
+                unsafe fn get(&const self) -> i32*;
             }
         "#]],
     );
@@ -743,15 +743,15 @@ fn reparse_cpp_receivers() {
 type c++::a::B {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
-    safe fn get<'a>(&'a self) -> &'a i32;
-    safe fn set<'a>(&'a mut self, &'a c++::a::B);
+    safe fn get<'a>(&'a const self) -> &'a const i32;
+    safe fn set<'a>(&'a unique var self, &'a const c++::a::B);
     unsafe fn raw_get(const self*) -> i32;
     unsafe fn raw_set(self&, i32);
-    safe constructor<'a>(&'a c++::a::B);
+    safe constructor<'a>(&'a const c++::a::B);
 }
 
 mod c++::a {
-    safe fn pick<'a>(&'a c++::a::B, &'a c++::a::B) -> &'a c++::a::B;
+    safe fn pick<'a>(&'a const c++::a::B, &'a const c++::a::B) -> &'a const c++::a::B;
 }
 "#,
         expect![[r#"
@@ -759,16 +759,75 @@ mod c++::a {
                 #layout(size = 8, align = 4);
                 #trivially_relocatable;
 
-                safe constructor<'a>(&'a c++::a::B);
+                safe constructor<'a>(&'a const c++::a::B);
 
-                safe fn get<'a>(&'a self) -> &'a i32;
-                safe fn set<'a>(&'a mut self, &'a c++::a::B);
+                safe fn get<'a>(&'a const self) -> &'a const i32;
+                safe fn set<'a>(&'a unique var self, &'a const c++::a::B);
                 unsafe fn raw_get(const self*) -> i32;
                 unsafe fn raw_set(self&, i32);
             }
 
             mod c++::a {
-                safe fn pick<'a>(&'a c++::a::B, &'a c++::a::B) -> &'a c++::a::B;
+                safe fn pick<'a>(&'a const c++::a::B, &'a const c++::a::B) -> &'a const c++::a::B;
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn reparse_cpp_objects() {
+    check_round_trip(
+        r#"
+type c++::a::B {
+    #layout(size = 16, align = 8);
+    #trivially_relocatable;
+    safe fn refs<'a>(&'a const self, &'a const c++::a::B, &'a var c++::a::B, &'a unique var c++::a::B, &'a unique const c++::a::B);
+    safe fn builtins<'a>(&'a var self, &'a const i32, &'a var i32, &'a unique var i32, &'a unique const i32, &'a i32, &'a mut i32) -> &'a var bool;
+    safe fn peek<'a>(&'a unique const self) -> &'a const c++::a::B*;
+    unsafe static fn raw(c++::a::B*, const i32*);
+    field &const x (type = i32);
+    field &var x (type = i32) as x_var;
+    field &unique var x (type = i32) as x_mut;
+    field &unique const x (type = i32) as x_unique_const;
+    field const x (type = i32) as x_const_copy;
+    field var next (type = c++::a::B*) as next_copy;
+}
+
+mod c++::a {
+    safe fn pick<'a>(&'a const c++::a::B, &'a var c++::a::B) -> &'a unique var c++::a::B;
+}
+
+type crate::Foo {
+    #layout(size = 0, align = 1);
+    fn f(&self, &const c++::a::B, &unique var c++::a::B, &i32);
+}
+"#,
+        expect![[r#"
+            type c++::a::B {
+                #layout(size = 16, align = 8);
+                #trivially_relocatable;
+
+                field &const x (type = i32);
+                field &var x (type = i32) as x_var;
+                field &unique var x (type = i32) as x_mut;
+                field &unique const x (type = i32) as x_unique_const;
+                field const x (type = i32) as x_const_copy;
+                field var next (type = c++::a::B*) as next_copy;
+
+                safe fn refs<'a>(&'a const self, &'a const c++::a::B, &'a var c++::a::B, &'a unique var c++::a::B, &'a unique const c++::a::B);
+                safe fn builtins<'a>(&'a var self, &'a const i32, &'a var i32, &'a unique var i32, &'a unique const i32, &'a i32, &'a mut i32) -> &'a var bool;
+                safe fn peek<'a>(&'a unique const self) -> &'a const c++::a::B*;
+                unsafe static fn raw(c++::a::B*, const i32*);
+            }
+
+            type crate::Foo {
+                #layout(size = 0, align = 1);
+
+                fn f(&self, &const c++::a::B, &unique var c++::a::B, &i32);
+            }
+
+            mod c++::a {
+                safe fn pick<'a>(&'a const c++::a::B, &'a var c++::a::B) -> &'a unique var c++::a::B;
             }
         "#]],
     );

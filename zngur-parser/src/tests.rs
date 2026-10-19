@@ -1195,7 +1195,7 @@ type crate::RustOnly {
 import "./bar.zng";
 
 mod crate {
-    fn use_bar(&c++::ns::Bar);
+    fn use_bar(&const c++::ns::Bar);
 }
 "#,
         NullCfg,
@@ -1421,12 +1421,12 @@ extern "C++" {
 }
 "#,
         expect![[r#"
-            Error: `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`) or a C++ template argument
+            Error: `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`, `&'a const T`) or a C++ template argument
                ╭─[ test.zng:3:15 ]
                │
              3 │     safe fn f(const i32);
                │               ────┬────  
-               │                   ╰────── `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`) or a C++ template argument
+               │                   ╰────── `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`, `&'a const T`) or a C++ template argument
             ───╯
         "#]],
     );
@@ -1441,12 +1441,12 @@ type ::std::vec::Vec<const i32> {
 }
 "#,
         expect![[r#"
-            Error: `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`) or a C++ template argument
+            Error: `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`, `&'a const T`) or a C++ template argument
                ╭─[ test.zng:2:6 ]
                │
              2 │ type ::std::vec::Vec<const i32> {
                │      ─────────────┬────────────  
-               │                   ╰────────────── `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`) or a C++ template argument
+               │                   ╰────────────── `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`, `&'a const T`) or a C++ template argument
             ───╯
         "#]],
     );
@@ -1900,10 +1900,10 @@ mod c++::a {
         #layout(size = 8, align = 4);
         #trivially_relocatable;
 
-        unsafe fn value(&self) -> i32;
-        unsafe fn set(&mut self, i32, const B&);
+        unsafe fn value(&const self) -> i32;
+        unsafe fn set(&unique var self, i32, const B&);
         safe static fn make(i32) -> B;
-        unsafe fn get(&self, i32) -> const i32& as get_const;
+        unsafe fn get(&const self, i32) -> const i32& as get_const;
     }
 }
 "#,
@@ -1959,8 +1959,8 @@ fn safe_cpp_methods_taking_references_are_accepted() {
 type c++::B {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
-    safe fn value(&self) -> i32;
-    safe fn set(&mut self, const c++::B&);
+    safe fn value(&const self) -> i32;
+    safe fn set(&unique var self, const c++::B&);
 }
 "#,
         NullCfg,
@@ -1977,23 +1977,23 @@ fn safe_cpp_method_with_cpp_ptr_warns() {
 type c++::B {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
-    safe fn set(&mut self, const c++::B*);
+    safe fn set(&unique var self, const c++::B*);
 }
 "#,
         expect![[r#"
-            Warning: this C++ member function has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `fn f<'a>(&'a self) -> &'a T`), or silence this with `#allow(elided_lifetimes)`
+            Warning: this C++ member function has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `fn f<'a>(&'a const self) -> &'a const T`), or silence this with `#allow(elided_lifetimes)`
                ╭─[ test.zng:5:5 ]
                │
-             5 │     safe fn set(&mut self, const c++::B*);
-               │     ───────────────────┬──────────────────  
-               │                        ╰──────────────────── this C++ member function has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `fn f<'a>(&'a self) -> &'a T`), or silence this with `#allow(elided_lifetimes)`
+             5 │     safe fn set(&unique var self, const c++::B*);
+               │     ──────────────────────┬──────────────────────  
+               │                           ╰──────────────────────── this C++ member function has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `fn f<'a>(&'a const self) -> &'a const T`), or silence this with `#allow(elided_lifetimes)`
             ───╯
             Warning: this C++ member function is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
                ╭─[ test.zng:5:5 ]
                │
-             5 │     safe fn set(&mut self, const c++::B*);
-               │     ───────────────────┬──────────────────  
-               │                        ╰──────────────────── this C++ member function is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
+             5 │     safe fn set(&unique var self, const c++::B*);
+               │     ──────────────────────┬──────────────────────  
+               │                           ╰──────────────────────── this C++ member function is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
             ───╯
         "#]],
     );
@@ -2032,12 +2032,12 @@ type c++::B {
 }
 "#,
         expect![[r#"
-            Error: C++ member functions take an explicit receiver instead of a trailing `const`: `&self` for `const` member functions, and `&mut self` for the others
+            Error: C++ member functions take an explicit receiver instead of a trailing `const`: `&'a const self` for `const` member functions, and `&'a unique var self` (or `&'a var self`) for the others
                ╭─[ test.zng:5:5 ]
                │
              5 │     safe static fn make() const -> c++::B;
                │     ───────────────────┬──────────────────  
-               │                        ╰──────────────────── C++ member functions take an explicit receiver instead of a trailing `const`: `&self` for `const` member functions, and `&mut self` for the others
+               │                        ╰──────────────────── C++ member functions take an explicit receiver instead of a trailing `const`: `&'a const self` for `const` member functions, and `&'a unique var self` (or `&'a var self`) for the others
             ───╯
         "#]],
     );
@@ -2053,12 +2053,12 @@ type crate::Foo {
 }
 "#,
         expect![[r#"
-            Error: C++ member functions take an explicit receiver instead of a trailing `const`: `&self` for `const` member functions, and `&mut self` for the others
+            Error: C++ member functions take an explicit receiver instead of a trailing `const`: `&'a const self` for `const` member functions, and `&'a unique var self` (or `&'a var self`) for the others
                ╭─[ test.zng:4:5 ]
                │
              4 │     unsafe fn value() const -> i32;
                │     ───────────────┬───────────────  
-               │                    ╰───────────────── C++ member functions take an explicit receiver instead of a trailing `const`: `&self` for `const` member functions, and `&mut self` for the others
+               │                    ╰───────────────── C++ member functions take an explicit receiver instead of a trailing `const`: `&'a const self` for `const` member functions, and `&'a unique var self` (or `&'a var self`) for the others
             ───╯
         "#]],
     );
@@ -2072,7 +2072,7 @@ fn conflicting_cpp_methods_across_files() {
 type c++::B {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
-    unsafe fn value(&self) -> i32;
+    unsafe fn value(&const self) -> i32;
 }
 "#,
     )]);
@@ -2081,7 +2081,7 @@ type c++::B {
         r#"
 merge "./a.zng";
 type c++::B {
-    unsafe fn value(&self) -> i64;
+    unsafe fn value(&const self) -> i64;
 }
 "#,
         expect![[r#"
@@ -2092,15 +2092,15 @@ type c++::B {
                │      ───┬──  
                │         ╰──── C++ method mismatch
                │ 
-             5 │     unsafe fn value(&self) -> i32;
-               │     ───────────────┬──────────────  
-               │                    ╰──────────────── declaration here ...
+             5 │     unsafe fn value(&const self) -> i32;
+               │     ──────────────────┬─────────────────  
+               │                       ╰─────────────────── declaration here ...
                │
                ├─[ test.zng:4:5 ]
                │
-             4 │     unsafe fn value(&self) -> i64;
-               │     ───────────────┬──────────────  
-               │                    ╰──────────────── conflicts with the declaration here.
+             4 │     unsafe fn value(&const self) -> i64;
+               │     ──────────────────┬─────────────────  
+               │                       ╰─────────────────── conflicts with the declaration here.
             ───╯
         "#]],
         &resolver,
@@ -2116,7 +2116,7 @@ fn cpp_methods_can_be_declared_in_another_file() {
 type c++::B {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
-    unsafe fn value(&self) -> i32;
+    unsafe fn value(&const self) -> i32;
 }
 "#,
     )]);
@@ -2124,7 +2124,7 @@ type c++::B {
         r#"
 merge "./a.zng";
 type c++::B {
-    unsafe fn set(&mut self, i32);
+    unsafe fn set(&unique var self, i32);
 }
 "#,
         NullCfg,
@@ -2348,7 +2348,7 @@ mod c++::a {
 
 #[test]
 fn cpp_fields_parse() {
-    use zngur_def::{Mutability, PrimitiveRustType};
+    use zngur_def::{CppConstness, CppFieldAccess, PrimitiveRustType};
 
     let parsed = parse_str(
         r#"
@@ -2356,8 +2356,12 @@ type c++::B {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
 
-    field const x (type = i32);
-    field x (type = i32) as x_mut;
+    field &const x (type = i32);
+    field &unique var x (type = i32) as x_mut;
+    field &var x (type = i32) as x_var;
+    field &unique const x (type = i32) as x_unique_const;
+    field const x (type = i32) as x_const_copy;
+    field var x (type = i32) as x_copy;
 }
 "#,
         NullCfg,
@@ -2366,16 +2370,113 @@ type c++::B {
     let ty = parsed.spec.types.first().expect("no type parsed");
     let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
     let fields = &ty.cpp_fields;
-    assert_eq!(fields.len(), 2);
+    assert_eq!(fields.len(), 6);
     assert_eq!(fields[0].name, "x");
     assert_eq!(fields[0].rust_name(), "x");
     assert_eq!(fields[0].ty, i32);
-    assert_eq!(fields[0].mutability, Mutability::Not);
+    let reference = |unique, constness| CppFieldAccess::Ref { unique, constness };
+    assert_eq!(fields[0].access, reference(false, CppConstness::Const));
     assert_eq!(fields[1].name, "x");
     assert_eq!(fields[1].rust_name(), "x_mut");
-    assert_eq!(fields[1].mutability, Mutability::Mut);
+    assert_eq!(fields[1].access, reference(true, CppConstness::Var));
+    assert_eq!(fields[2].access, reference(false, CppConstness::Var));
+    assert_eq!(fields[3].access, reference(true, CppConstness::Const));
+    assert_eq!(
+        fields[4].access,
+        CppFieldAccess::Copy {
+            constness: CppConstness::Const
+        }
+    );
+    assert_eq!(
+        fields[5].access,
+        CppFieldAccess::Copy {
+            constness: CppConstness::Var
+        }
+    );
     // Fields of Rust types are unaffected.
     assert!(ty.fields.is_empty());
+}
+
+#[test]
+fn cpp_field_without_constness_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    field x (type = i32);
+}
+"#,
+        expect![[r#"
+            Error: a C++ field accessor says what it returns: `field &const x ...` / `field &var x ...` (a reference to the field, `unique` if Rust uses it uniquely), or `field const x ...` / `field var x ...` (a copy of it)
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     field x (type = i32);
+               │     ──────────┬──────────  
+               │               ╰──────────── a C++ field accessor says what it returns: `field &const x ...` / `field &var x ...` (a reference to the field, `unique` if Rust uses it uniquely), or `field const x ...` / `field var x ...` (a copy of it)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_field_unique_without_reference_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    field unique var x (type = i32);
+}
+"#,
+        expect![[r#"
+            Error: `unique` only applies to references: `field &unique var x ...` returns a unique reference to the field, and `field var x ...` a copy of it
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     field unique var x (type = i32);
+               │     ────────────────┬───────────────  
+               │                     ╰───────────────── `unique` only applies to references: `field &unique var x ...` returns a unique reference to the field, and `field var x ...` a copy of it
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_field_copy_of_a_class_needs_a_by_value_type() {
+    check_fail(
+        r#"
+type c++::A {}
+
+type c++::B {
+    field var a (type = c++::A);
+}
+"#,
+        expect![[r#"
+            Error: the accessor `a` returns a copy of the field `a`, but Rust doesn't hold `c++::A` by value (it needs a layout and `#trivially_relocatable`); return a reference instead (`field &const a ...`)
+               ╭─[ test.zng:4:6 ]
+               │
+             4 │ type c++::B {
+               │      ───┬──  
+               │         ╰──── the accessor `a` returns a copy of the field `a`, but Rust doesn't hold `c++::A` by value (it needs a layout and `#trivially_relocatable`); return a reference instead (`field &const a ...`)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_field_of_a_rust_type_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    field &const s (type = ::std::string::String);
+}
+"#,
+        expect![[r#"
+            Error: the field `s` has the type `::std::string::String`, but C++ fields are C++ objects: `c++::` types, builtins (other than `char` and `str`) or C++ pointers
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     field &const s (type = ::std::string::String);
+               │     ───────────────────────┬──────────────────────  
+               │                            ╰──────────────────────── the field `s` has the type `::std::string::String`, but C++ fields are C++ objects: `c++::` types, builtins (other than `char` and `str`) or C++ pointers
+            ───╯
+        "#]],
+    );
 }
 
 #[test]
@@ -2578,7 +2679,7 @@ const BAR_UNIQUE_PTR_HOME: &str = r#"
 type<T> c++::std::unique_ptr<T> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
-    unsafe fn get(&self) -> T*;
+    unsafe fn get(&const self) -> T*;
 }
 "#;
 
@@ -2589,7 +2690,7 @@ fn cpp_template_declares_a_local_home_with_defaults() {
 type<T> c++::std::unique_ptr<T> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
-    unsafe fn get(&self) -> T*;
+    unsafe fn get(&const self) -> T*;
 }
 
 type c++::std::unique_ptr<i32> {
@@ -3020,8 +3121,8 @@ fn cpp_names_can_be_zngur_keywords() {
     let parsed = parse_str(
         r#"
 type c++::a::B {
-    field const type (type = i32) as type_;
-    unsafe fn match(&self, i32) -> i32 as match_;
+    field &const type (type = i32) as type_;
+    unsafe fn match(&const self, i32) -> i32 as match_;
 }
 
 mod c++::a {
@@ -3047,7 +3148,7 @@ fn cpp_function_template_args_parse() {
 type c++::geo::Point {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
-    safe fn get<i32>(&self) -> i32 as get_i32;
+    safe fn get<i32>(&const self) -> i32 as get_i32;
 }
 
 type c++::std::unique_ptr<c++::geo::Point> {
@@ -3202,16 +3303,16 @@ fn lifetimes_in_cpp_member_functions_are_rejected() {
     check_fail(
         r#"
 type c++::B {
-    unsafe fn name(&self, &'a i32) -> i32;
+    unsafe fn name(&const self, &'a const i32) -> i32;
 }
 "#,
         expect![[r#"
             Error: undeclared lifetime `'a`: declare it on the function, `impl` or `type` (e.g. `fn f<'a>(...)`)
                ╭─[ test.zng:3:5 ]
                │
-             3 │     unsafe fn name(&self, &'a i32) -> i32;
-               │     ───────────────────┬──────────────────  
-               │                        ╰──────────────────── undeclared lifetime `'a`: declare it on the function, `impl` or `type` (e.g. `fn f<'a>(...)`)
+             3 │     unsafe fn name(&const self, &'a const i32) -> i32;
+               │     ─────────────────────────┬────────────────────────  
+               │                              ╰────────────────────────── undeclared lifetime `'a`: declare it on the function, `impl` or `type` (e.g. `fn f<'a>(...)`)
             ───╯
         "#]],
     );
@@ -3246,12 +3347,12 @@ type c++::B {
 }
 "#,
         expect![[r#"
-            Error: C++ member functions need a receiver: `&self` (`const` member functions), `&mut self` (the others) or a raw one (`const self&`, `self&`, `const self*`, `self*`); static member functions are `static fn`
+            Error: C++ member functions need a receiver: `&'a const self` (`const` member functions), `&'a unique var self` or `&'a var self` (the others), or a raw one (`const self&`, `self&`, `const self*`, `self*`); static member functions are `static fn`
                ╭─[ test.zng:3:5 ]
                │
              3 │     safe fn value() -> i32;
                │     ───────────┬───────────  
-               │                ╰───────────── C++ member functions need a receiver: `&self` (`const` member functions), `&mut self` (the others) or a raw one (`const self&`, `self&`, `const self*`, `self*`); static member functions are `static fn`
+               │                ╰───────────── C++ member functions need a receiver: `&'a const self` (`const` member functions), `&'a unique var self` or `&'a var self` (the others), or a raw one (`const self&`, `self&`, `const self*`, `self*`); static member functions are `static fn`
             ───╯
         "#]],
     );
@@ -3266,12 +3367,12 @@ type c++::B {
 }
 "#,
         expect![[r#"
-            Error: C++ member functions take an explicit receiver instead of a trailing `const`: `&self` for `const` member functions, and `&mut self` for the others
+            Error: C++ member functions take an explicit receiver instead of a trailing `const`: `&'a const self` for `const` member functions, and `&'a unique var self` (or `&'a var self`) for the others
                ╭─[ test.zng:3:5 ]
                │
              3 │     safe fn value() const -> i32;
                │     ──────────────┬──────────────  
-               │                   ╰──────────────── C++ member functions take an explicit receiver instead of a trailing `const`: `&self` for `const` member functions, and `&mut self` for the others
+               │                   ╰──────────────── C++ member functions take an explicit receiver instead of a trailing `const`: `&'a const self` for `const` member functions, and `&'a unique var self` (or `&'a var self`) for the others
             ───╯
         "#]],
     );
@@ -3284,8 +3385,8 @@ fn cpp_receivers_parse() {
     let parsed = parse_str(
         r#"
 type c++::B {
-    safe fn get<'a>(&'a self) -> &'a i32;
-    safe fn set(&mut self, i32);
+    safe fn get<'a>(&'a const self) -> &'a const i32;
+    safe fn set(&unique var self, i32);
     unsafe fn raw_get(const self*) -> i32;
     unsafe fn raw_set(self&, i32);
     safe static fn make() -> c++::B;
@@ -3318,6 +3419,398 @@ type c++::B {
     );
     assert_eq!(methods[3].raw_receiver, Some(CppIndirection::Reference));
     assert_eq!(methods[4].receiver, ZngurMethodReceiver::Static);
+    use zngur_def::CppConstness;
+    let constnesses: Vec<CppConstness> = methods.iter().map(|m| m.receiver_constness).collect();
+    assert_eq!(
+        constnesses,
+        [
+            CppConstness::Const,
+            CppConstness::Var,
+            CppConstness::Const,
+            CppConstness::Var,
+            CppConstness::Var
+        ]
+    );
+}
+
+#[test]
+fn shared_var_and_unique_const_receivers_parse() {
+    use zngur_def::{CppConstness, ZngurMethodReceiver};
+
+    let parsed = parse_str(
+        r#"
+type c++::B {
+    safe fn bump<'a>(&'a var self);
+    safe fn peek<'a>(&'a unique const self) -> i32;
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let methods = &parsed.spec.types[0].cpp_methods;
+    assert_eq!(
+        methods[0].receiver,
+        ZngurMethodReceiver::Ref(Mutability::Not)
+    );
+    assert_eq!(methods[0].receiver_constness, CppConstness::Var);
+    assert_eq!(
+        methods[1].receiver,
+        ZngurMethodReceiver::Ref(Mutability::Mut)
+    );
+    assert_eq!(methods[1].receiver_constness, CppConstness::Const);
+}
+
+#[test]
+fn references_to_cpp_objects_parse() {
+    use zngur_def::{CppConstness, PrimitiveRustType};
+
+    let parsed = parse_str(
+        r#"
+type c++::B {
+    safe fn f<'a>(&'a const self, &'a const c++::B, &'a var c++::B, &'a unique var c++::B, &'a unique const c++::B);
+    safe fn g<'a>(&'a const self, &'a const i32, &'a var i32, &'a unique var i32, &'a i32, &'a mut i32) -> &'a var bool;
+    unsafe fn h<'a>(&'a const self, &'a const c++::B*, c++::B*, const i32*);
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let methods = &parsed.spec.types[0].cpp_methods;
+    let b = RustType::Cpp(vec!["B".to_owned()].into());
+    let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+    let reference = |m, constness, ty: &RustType| {
+        RustType::Ref(
+            m,
+            Some(zngur_def::Lifetime("a".to_owned())),
+            Box::new(RustType::cpp_object(constness, ty.clone())),
+        )
+    };
+    assert_eq!(
+        methods[0].inputs,
+        [
+            reference(Mutability::Not, CppConstness::Const, &b),
+            reference(Mutability::Not, CppConstness::Var, &b),
+            reference(Mutability::Mut, CppConstness::Var, &b),
+            reference(Mutability::Mut, CppConstness::Const, &b),
+        ]
+    );
+    let rust_ref = |m| {
+        RustType::Ref(
+            m,
+            Some(zngur_def::Lifetime("a".to_owned())),
+            Box::new(i32.clone()),
+        )
+    };
+    assert_eq!(
+        methods[1].inputs,
+        [
+            reference(Mutability::Not, CppConstness::Const, &i32),
+            reference(Mutability::Not, CppConstness::Var, &i32),
+            reference(Mutability::Mut, CppConstness::Var, &i32),
+            rust_ref(Mutability::Not),
+            rust_ref(Mutability::Mut),
+        ]
+    );
+    let b_ptr = RustType::cpp_ptr(Mutability::Mut, CppIndirection::Pointer, b.clone());
+    assert_eq!(
+        methods[2].inputs,
+        [
+            // `&'a const c++::B*` is a reference to a `const` pointer (`B* const&`).
+            reference(Mutability::Not, CppConstness::Const, &b_ptr),
+            b_ptr.clone(),
+            RustType::cpp_ptr(Mutability::Not, CppIndirection::Pointer, i32.clone()),
+        ]
+    );
+}
+
+#[test]
+fn references_to_cpp_objects_through_aliases_and_templates() {
+    check_success(
+        r#"
+use c++::a::B as B;
+
+type c++::a::B {
+    safe fn f<'a>(&'a const self, &'a const B) -> &'a var B;
+}
+
+type<T> c++::Box<T> {
+    safe fn get<'a>(&'a const self) -> &'a const T;
+}
+
+type c++::Box<c++::a::B> {}
+type c++::Box<i32> {}
+type c++::Box<const i32> {}
+"#,
+    );
+}
+
+#[test]
+fn reference_to_cpp_class_without_constness_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    safe fn f<'a>(&'a const self, &'a c++::B);
+}
+"#,
+        expect![[r#"
+            Error: a reference to a C++ class must say whether the object is `const`: `&'a const c++::B` (a C++ `const T&`, `&T<Const>` in Rust) or `&'a var c++::B` (a shared `T&`, `&T` in Rust)
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     safe fn f<'a>(&'a const self, &'a c++::B);
+               │     ─────────────────────┬────────────────────  
+               │                          ╰────────────────────── a reference to a C++ class must say whether the object is `const`: `&'a const c++::B` (a C++ `const T&`, `&T<Const>` in Rust) or `&'a var c++::B` (a shared `T&`, `&T` in Rust)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn mutable_reference_to_cpp_class_is_rejected() {
+    check_fail(
+        r#"
+mod c++::ns {
+    safe fn f<'a>(&'a mut c++::B);
+}
+"#,
+        expect![[r#"
+            Error: a reference to a C++ class must say whether the object is `const`: `&'a unique var c++::B` (a `T&` that Rust uses uniquely, `&mut T` in Rust)
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     safe fn f<'a>(&'a mut c++::B);
+               │     ──────────────┬──────────────  
+               │                   ╰──────────────── a reference to a C++ class must say whether the object is `const`: `&'a unique var c++::B` (a `T&` that Rust uses uniquely, `&mut T` in Rust)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn reference_to_cpp_class_through_an_alias_without_constness_is_rejected() {
+    check_fail(
+        r#"
+use c++::a::B as B;
+
+type c++::a::B {
+    safe fn f<'a>(&'a const self, &'a B);
+}
+"#,
+        expect![[r#"
+            Error: a reference to a C++ class must say whether the object is `const`: `&'a const c++::a::B` (a C++ `const T&`, `&T<Const>` in Rust) or `&'a var c++::a::B` (a shared `T&`, `&T` in Rust)
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     safe fn f<'a>(&'a const self, &'a B);
+               │     ──────────────────┬──────────────────  
+               │                       ╰──────────────────── a reference to a C++ class must say whether the object is `const`: `&'a const c++::a::B` (a C++ `const T&`, `&T<Const>` in Rust) or `&'a var c++::a::B` (a shared `T&`, `&T` in Rust)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn reference_to_cpp_class_in_a_rust_item_without_constness_is_rejected() {
+    check_fail(
+        r#"
+type crate::Foo {
+    #layout(size = 0, align = 1);
+    fn f(&self, &c++::B);
+}
+"#,
+        expect![[r#"
+            Error: a reference to a C++ class must say whether the object is `const`: `&const c++::B` (a C++ `const T&`, `&T<Const>` in Rust) or `&var c++::B` (a shared `T&`, `&T` in Rust)
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     fn f(&self, &c++::B);
+               │     ──────────┬──────────  
+               │               ╰──────────── a reference to a C++ class must say whether the object is `const`: `&const c++::B` (a C++ `const T&`, `&T<Const>` in Rust) or `&var c++::B` (a shared `T&`, `&T` in Rust)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn const_reference_to_rust_type_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    safe fn f<'a>(&'a const self, &'a const crate::Foo);
+}
+"#,
+        expect![[r#"
+            Error: only C++ objects (`c++::` types, builtins and C++ pointers) can be `const` or `var`, and `crate::Foo` is a Rust type: use `&'a crate::Foo`
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     safe fn f<'a>(&'a const self, &'a const crate::Foo);
+               │     ──────────────────────────┬─────────────────────────  
+               │                               ╰─────────────────────────── only C++ objects (`c++::` types, builtins and C++ pointers) can be `const` or `var`, and `crate::Foo` is a Rust type: use `&'a crate::Foo`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn var_reference_to_str_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    safe fn f<'a>(&'a const self, &'a unique var str);
+}
+"#,
+        expect![[r#"
+            Error: only C++ objects (`c++::` types, builtins and C++ pointers) can be `const` or `var`, and `str` is a Rust type: use `&'a mut str`
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     safe fn f<'a>(&'a const self, &'a unique var str);
+               │     ─────────────────────────┬────────────────────────  
+               │                              ╰────────────────────────── only C++ objects (`c++::` types, builtins and C++ pointers) can be `const` or `var`, and `str` is a Rust type: use `&'a mut str`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn const_reference_to_char_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    safe fn f<'a>(&'a const self) -> &'a const char;
+}
+"#,
+        expect![[r#"
+            Error: `char` can't be a C++ object (C++ can store invalid code points in it), so references to it can't be `const` or `var`: use `&'a char` (a Rust value)
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     safe fn f<'a>(&'a const self) -> &'a const char;
+               │     ────────────────────────┬───────────────────────  
+               │                             ╰───────────────────────── `char` can't be a C++ object (C++ can store invalid code points in it), so references to it can't be `const` or `var`: use `&'a char` (a Rust value)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn unique_reference_without_constness_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    safe fn f<'a>(&'a const self, &'a unique c++::B);
+}
+"#,
+        expect![[r#"
+            Error: a `unique` reference is a reference to a C++ object, which says whether it's `const`: `&'a unique var T` (a C++ `T&` that Rust uses uniquely, `&mut T` in Rust) or `&'a unique const T`; a reference to a Rust value is `&'a mut T`
+               ╭─[ test.zng:3:35 ]
+               │
+             3 │     safe fn f<'a>(&'a const self, &'a unique c++::B);
+               │                                   ────────┬────────  
+               │                                           ╰────────── a `unique` reference is a reference to a C++ object, which says whether it's `const`: `&'a unique var T` (a C++ `T&` that Rust uses uniquely, `&mut T` in Rust) or `&'a unique const T`; a reference to a Rust value is `&'a mut T`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn mut_const_reference_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    safe fn f<'a>(&'a const self, &'a mut const c++::B);
+}
+"#,
+        expect![[r#"
+            Error: references to C++ objects say `unique` rather than `mut`: write `&'a unique const T` (or `&'a const T` for a shared reference)
+               ╭─[ test.zng:3:35 ]
+               │
+             3 │     safe fn f<'a>(&'a const self, &'a mut const c++::B);
+               │                                   ──────────┬─────────  
+               │                                             ╰─────────── references to C++ objects say `unique` rather than `mut`: write `&'a unique const T` (or `&'a const T` for a shared reference)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn rust_style_cpp_receivers_are_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    safe fn get<'a>(&'a self) -> i32;
+    safe fn set(&mut self, i32);
+}
+"#,
+        expect![[r#"
+            Error: the receiver of a C++ member function is a reference to a C++ object, which says whether it's `const`: `&'a const self` (a `const` member function)
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     safe fn get<'a>(&'a self) -> i32;
+               │     ────────────────┬────────────────  
+               │                     ╰────────────────── the receiver of a C++ member function is a reference to a C++ object, which says whether it's `const`: `&'a const self` (a `const` member function)
+            ───╯
+            Error: the receiver of a C++ member function is a reference to a C++ object, which says whether it's `const`: `&unique var self` (a non-`const` member function, `&mut self` in Rust)
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     safe fn set(&mut self, i32);
+               │     ──────────────┬─────────────  
+               │                   ╰─────────────── the receiver of a C++ member function is a reference to a C++ object, which says whether it's `const`: `&unique var self` (a non-`const` member function, `&mut self` in Rust)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn const_receiver_on_rust_method_is_rejected() {
+    check_fail(
+        r#"
+type crate::Foo {
+    #layout(size = 0, align = 1);
+    fn f(&const self);
+}
+"#,
+        expect![[r#"
+            Error: `const self` / `var self` receivers are for C++ member functions (which start with `safe` or `unsafe`); methods of Rust types and `extern "C++"` impls take `&self` or `&mut self`
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     fn f(&const self);
+               │     ────────┬────────  
+               │             ╰────────── `const self` / `var self` receivers are for C++ member functions (which start with `safe` or `unsafe`); methods of Rust types and `extern "C++"` impls take `&self` or `&mut self`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn template_instantiation_with_a_cpp_class_reference_without_constness_is_rejected() {
+    check_fail(
+        r#"
+type c++::a::B {}
+
+type<T> c++::Box<T> {
+    safe fn get<'a>(&'a const self) -> &'a T;
+}
+
+type c++::Box<i32> {}
+type c++::Box<c++::a::B> {}
+"#,
+        expect![[r#"
+            Error: in the instantiation `c++::Box<c++::a::B>` of a template, in `get`: a reference to a C++ class must say whether the object is `const`: `&'a const c++::a::B` (a C++ `const T&`, `&T<Const>` in Rust) or `&'a var c++::a::B` (a shared `T&`, `&T` in Rust)
+               ╭─[ test.zng:9:6 ]
+               │
+             9 │ type c++::Box<c++::a::B> {}
+               │      ─────────┬─────────  
+               │               ╰─────────── in the instantiation `c++::Box<c++::a::B>` of a template, in `get`: a reference to a C++ class must say whether the object is `const`: `&'a const c++::a::B` (a C++ `const T&`, `&T<Const>` in Rust) or `&'a var c++::a::B` (a shared `T&`, `&T` in Rust)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn unique_and_var_are_only_keywords_after_a_reference() {
+    check_success(
+        r#"
+type crate::var {
+    #layout(size = 0, align = 1);
+    fn unique(&self, &crate::var) -> crate::var;
+}
+"#,
+    );
 }
 
 #[test]
@@ -3325,16 +3818,16 @@ fn elided_lifetimes_warn() {
     check_warnings(
         r#"
 type c++::B {
-    safe fn get(&self) -> &i32;
+    safe fn get(&const self) -> &const i32;
 }
 "#,
         expect![[r#"
-            Warning: this C++ member function has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `fn f<'a>(&'a self) -> &'a T`), or silence this with `#allow(elided_lifetimes)`
+            Warning: this C++ member function has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `fn f<'a>(&'a const self) -> &'a const T`), or silence this with `#allow(elided_lifetimes)`
                ╭─[ test.zng:3:5 ]
                │
-             3 │     safe fn get(&self) -> &i32;
-               │     ─────────────┬─────────────  
-               │                  ╰─────────────── this C++ member function has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `fn f<'a>(&'a self) -> &'a T`), or silence this with `#allow(elided_lifetimes)`
+             3 │     safe fn get(&const self) -> &const i32;
+               │     ───────────────────┬───────────────────  
+               │                        ╰───────────────────── this C++ member function has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `fn f<'a>(&'a const self) -> &'a const T`), or silence this with `#allow(elided_lifetimes)`
             ───╯
         "#]],
     );
@@ -3348,8 +3841,8 @@ fn allow_silences_warnings() {
 #allow(safe_raw_pointer)
 
 type c++::B {
-    safe fn get(&self) -> &i32;
-    safe fn set(&mut self, const c++::B*);
+    safe fn get(&const self) -> &const i32;
+    safe fn set(&unique var self, const c++::B*);
 }
 "#,
     );

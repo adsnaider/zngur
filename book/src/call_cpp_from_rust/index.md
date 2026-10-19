@@ -15,9 +15,10 @@ zngur gives Rust two ways to use C++ code:
   - call [free C++ functions](./cpp_functions.md), including instantiations of function templates;
   - use instantiations of [class templates](./cpp_templates.md), like `std::unique_ptr<T>`.
 
-  C++ references are [Rust references](./cpp_pointers.md) (with lifetimes that you declare) or raw
-  pointers, and `const` is part of the type (`Point<Const>`). zngur generates the C++ code that
-  makes the calls, so there's nothing to write in C++.
+  C++ references are [references to C++ objects](./cpp_objects.md) (`&'a const T`,
+  `&'a unique var T`, ..., with lifetimes that you declare) or [raw pointers](./cpp_pointers.md),
+  and `const` is part of the type (`Point<Const>`, `Cpp<i32, Const>`). zngur generates the C++
+  code that makes the calls, so there's nothing to write in C++.
 - **Write a Rusty API in C++.** [`impl` blocks](./rust_impl.md) and functions written in C++ for Rust
   types, and C++ classes behind [trait objects](./trait_object.md), let you shape the API that Rust
   sees.

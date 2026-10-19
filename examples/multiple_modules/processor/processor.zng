@@ -6,7 +6,7 @@ import "../aggregation/aggregation.zng";
 "
 
 type c++::cpp_processor::RunConfig {
-    field const packets (type = u32);
+    field &const packets (type = u32);
 }
 
 // The home of `std::unique_ptr` is aggregation.zng, which gives this instantiation its layout and
@@ -19,8 +19,8 @@ type crate::Processor {
     fn run(
         &self,
         &mut receiver::Receiver,
-        &mut c++::cpp_stats::StatsAccumulator,
-        &c++::std::unique_ptr<c++::cpp_processor::RunConfig>,
+        &unique var c++::cpp_stats::StatsAccumulator,
+        &const c++::std::unique_ptr<c++::cpp_processor::RunConfig>,
     );
 }
 

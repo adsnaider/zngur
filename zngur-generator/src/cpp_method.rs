@@ -6,14 +6,23 @@
 use std::collections::HashMap;
 
 use zngur_def::{
-    CppIndirection, PrimitiveRustType, RustType, ZngurCppConstructor, ZngurCppField, ZngurCppFn,
-    ZngurCppMethod, ZngurMethodReceiver,
+    CppConstness, CppFieldAccess, CppIndirection, PrimitiveRustType, RustType, ZngurCppConstructor,
+    ZngurCppField, ZngurCppFn, ZngurCppMethod, ZngurMethodReceiver,
 };
 
 use crate::rust::IntoCpp;
 
 /// The C++ type of each type that Rust holds by value (`c++::` types with a layout and `#trivially_relocatable`).
 pub type StackOwnedTypes = HashMap<RustType, String>;
+
+/// The C++ `this` of a member function of `owner` whose receiver has the constness `constness`:
+/// `const T&` or `T&`.
+fn this_ptr(constness: CppConstness, owner: &RustType) -> RustType {
+    RustType::CppPtr(
+        CppIndirection::Reference,
+        Box::new(RustType::cpp_object(constness, owner.clone())),
+    )
+}
 
 /// Renders bridge functions. They take their arguments and output the way Rust's generated code
 /// passes them: as pointers to the Rust values (`i0`, `i1`, ..., and `o`).
@@ -71,8 +80,8 @@ impl BridgeRenderer<'_> {
     ) -> String {
         let mut params = vec![];
         let this = match method.receiver {
-            ZngurMethodReceiver::Ref(m) => {
-                let ptr = RustType::cpp_ptr(m, CppIndirection::Reference, owner.clone());
+            ZngurMethodReceiver::Ref(_) => {
+                let ptr = this_ptr(method.receiver_constness, owner);
                 params.push("uint8_t* i0".to_owned());
                 Some(self.move_from_rust(&ptr, 0))
             }
@@ -177,7 +186,7 @@ impl BridgeRenderer<'_> {
     }
 
     /// The bridge function `mangled_name` for the accessor `field` of `owner` (whose C++ type is
-    /// `owner_cpp_type`), which returns a reference to the field.
+    /// `owner_cpp_type`), which returns a reference to the field or a copy of it.
     pub fn field(
         &self,
         mangled_name: &str,
@@ -186,20 +195,33 @@ impl BridgeRenderer<'_> {
         field: &ZngurCppField,
     ) -> String {
         let namespace = self.namespace;
-        let this_ty = RustType::cpp_ptr(field.mutability, CppIndirection::Reference, owner.clone());
-        let this = self.move_from_rust(&this_ty, 0);
-        let output = field.as_cpp_method().output.cpp_bridge_type();
+        let method = field.as_cpp_method();
+        let this = self.move_from_rust(&this_ptr(method.receiver_constness, owner), 0);
         let name = &field.name;
         let field_ty = self.cpp(&field.ty);
-        format!(
-            "void {mangled_name}(uint8_t* i0, uint8_t* o) {{\n  \
-             static_assert(::std::is_same< ::std::remove_cv< decltype({owner_cpp_type}::{name}) >::type, \
-             ::{namespace}::CppTypeOf< {field_ty} >::type >::value, \
-             \"`{owner_cpp_type}::{name}` doesn't have the type declared in the .zng file\");\n  \
-             {} __zngur_o = &({this})->{name};\n  \
-             ::{namespace}::__zngur_internal_move_to_rust(o, __zngur_o);\n}}\n",
-            self.cpp(&output)
-        )
+        let check = format!(
+            "static_assert(::std::is_same< ::std::remove_cv< decltype({owner_cpp_type}::{name}) \
+             >::type, ::{namespace}::CppTypeOf< {field_ty} >::type >::value, \
+             \"`{owner_cpp_type}::{name}` doesn't have the type declared in the .zng file\");"
+        );
+        let body = match field.access {
+            CppFieldAccess::Ref { .. } => format!(
+                "{} __zngur_o = &({this})->{name};\n  \
+                 ::{namespace}::__zngur_internal_move_to_rust(o, __zngur_o);",
+                self.cpp(&method.output.cpp_bridge_type())
+            ),
+            // A copy of a C++ class, constructed in place in the Rust value (whose constness is
+            // only a marker).
+            CppFieldAccess::Copy { .. } if self.stack_owned.contains_key(&field.ty) => {
+                format!("new (o) {}(({this})->{name});", self.stack_owned[&field.ty])
+            }
+            // A copy of a builtin or a pointer (`zngur_lib::Cpp<T, Const>` has the same layout as
+            // `T`), also constructed in place.
+            CppFieldAccess::Copy { .. } => {
+                format!("new (o) ::{namespace}::CppTypeOf< {field_ty} >::type(({this})->{name});")
+            }
+        };
+        format!("void {mangled_name}(uint8_t* i0, uint8_t* o) {{\n  {check}\n  {body}\n}}\n")
     }
 
     /// The bridge function `mangled_name` for `constructor` of the C++ type `owner_cpp_type`,

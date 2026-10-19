@@ -151,10 +151,22 @@ impl WriteIDL for crate::RustType {
                 if let Some(lifetime) = lifetime {
                     write!(p, "{lifetime} ")?;
                 }
-                if *m == crate::Mutability::Mut {
-                    write!(p, "mut ")?;
+                match ty.as_cpp_object() {
+                    // A reference to a C++ object: `&'a [unique] (const | var) T`.
+                    Some((constness, inner)) => {
+                        if *m == crate::Mutability::Mut {
+                            write!(p, "unique ")?;
+                        }
+                        write!(p, "{} ", constness.keyword())?;
+                        p.write_idl(inner)
+                    }
+                    None => {
+                        if *m == crate::Mutability::Mut {
+                            write!(p, "mut ")?;
+                        }
+                        p.write_idl(ty)
+                    }
                 }
-                p.write_idl(ty)
             }
             Self::Raw(m, ty) => {
                 match m {
@@ -220,6 +232,8 @@ impl WriteIDL for crate::RustType {
                 write!(p, "const ")?;
                 p.write_idl(ty)
             }
+            // `T&` / `T*` is a pointer to a non-`const` C++ object.
+            Self::CppVar(ty) => p.write_idl(ty),
         }
     }
 }
@@ -917,12 +931,15 @@ impl WriteIDL for crate::ZngurMethod {
 impl WriteIDL for crate::ZngurCppField {
     fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
         if p.enabled(&IDLItem::TypeField) {
-            let constness = match self.mutability {
-                crate::Mutability::Not => "const ",
-                crate::Mutability::Mut => "",
+            let access = match self.access {
+                crate::CppFieldAccess::Ref { unique, constness } => {
+                    let unique = if unique { "unique " } else { "" };
+                    format!("&{unique}{} ", constness.keyword())
+                }
+                crate::CppFieldAccess::Copy { constness } => format!("{} ", constness.keyword()),
             };
             let name = &self.name;
-            write!(p, "field {constness}{name} (type = ")?;
+            write!(p, "field {access}{name} (type = ")?;
             p.write_idl(&self.ty)?;
             write!(p, ")")?;
             if let Some(rust_name) = &self.rust_name {
@@ -964,11 +981,10 @@ impl WriteIDL for crate::ZngurCppMethod {
             write_lifetimes_and_generics(p, &self.lifetimes, &self.template_args)?;
             write!(p, "(")?;
             let receiver = match (self.receiver, self.raw_receiver) {
-                (crate::ZngurMethodReceiver::Ref(m), Some(indirection)) => {
-                    let constness = if m == crate::Mutability::Not {
-                        "const "
-                    } else {
-                        ""
+                (crate::ZngurMethodReceiver::Ref(_), Some(indirection)) => {
+                    let constness = match self.receiver_constness {
+                        crate::CppConstness::Const => "const ",
+                        crate::CppConstness::Var => "",
                     };
                     let sigil = match indirection {
                         crate::CppIndirection::Pointer => "*",
@@ -982,12 +998,13 @@ impl WriteIDL for crate::ZngurCppMethod {
                         .as_ref()
                         .map(|l| format!("{l} "))
                         .unwrap_or_default();
-                    let mutability = if m == crate::Mutability::Mut {
-                        "mut "
+                    let unique = if m == crate::Mutability::Mut {
+                        "unique "
                     } else {
                         ""
                     };
-                    Some(format!("&{lifetime}{mutability}self"))
+                    let constness = self.receiver_constness.keyword();
+                    Some(format!("&{lifetime}{unique}{constness} self"))
                 }
                 _ => None,
             };

@@ -38,10 +38,14 @@ Rust can also call existing C++ functions directly: [member functions](./call_cp
 Declaring one `safe` promises the same as above: that no arguments can cause UB.
 Their C++ references and pointers come with these guarantees:
 
-- A Rust reference (`&'a T<Const>` for a `const T&`, `&'a mut T` for a `T&`) promises what Rust
-  references always do: the object is valid for `'a`, and isn't mutated (or, for `&mut`, accessed
-  by anything else) meanwhile. zngur can't check that against C++: the `.zng` file promises it, so
-  name the lifetimes carefully ([Lifetimes](./lifetimes.md)).
+- A reference to a [C++ object](./call_cpp_from_rust/cpp_objects.md) (`&'a const T`, `&'a var T`)
+  promises that the object is valid for `'a`. C++ may still change a `var` object meanwhile (Rust
+  stores C++ objects in an `UnsafeCell`, and builtins are `zngur_lib::Cpp<T>`), and a `unique` one
+  (`&'a unique var T`, a Rust `&'a mut T`) also promises that nothing else accesses it meanwhile.
+- A reference to a Rust value (`&'a i32`, `&'a mut i32`) promises what Rust references always do:
+  the value isn't mutated (or, for `&mut`, accessed by anything else) meanwhile.
+- zngur can't check any of that against C++: the `.zng` file promises it, so name the lifetimes
+  carefully ([Lifetimes](./lifetimes.md)).
 - A raw pointer (a C++-style `const T&` / `T*` in the `.zng` file) has no guarantee.
   zngur warns about `safe` functions that take one.
 

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use zngur_def::{
-    CppTypePath, Merge, RustPathAndGenerics, RustTrait, RustType, TypeVar, ZngurConstructor,
-    ZngurCppConstructor, ZngurCppField, ZngurCppMethod, ZngurField, ZngurMethod,
+    CppConstness, CppTypePath, Merge, RustPathAndGenerics, RustTrait, RustType, TypeVar,
+    ZngurConstructor, ZngurCppConstructor, ZngurCppField, ZngurCppMethod, ZngurField, ZngurMethod,
     ZngurMethodDetails, ZngurType, ZngurVariant,
 };
 
@@ -102,7 +102,8 @@ fn matches_template<'a, 'b>(
         (RustType::CppPtr(k1, t1), RustType::CppPtr(k2, t2)) => {
             k1 == k2 && matches_template(t1, t2, mapping)
         }
-        (RustType::CppConst(t1), RustType::CppConst(t2)) => matches_template(t1, t2, mapping),
+        (RustType::CppConst(t1), RustType::CppConst(t2))
+        | (RustType::CppVar(t1), RustType::CppVar(t2)) => matches_template(t1, t2, mapping),
         (_, _) => false,
     }
 }
@@ -202,7 +203,13 @@ fn substitute_vars<'a>(
             RustType::CppPtr(kind, t) => {
                 RustType::CppPtr(*kind, Box::new(substitute_type(t, mapping)?))
             }
-            RustType::CppConst(t) => RustType::CppConst(Box::new(substitute_type(t, mapping)?)),
+            // A `const T` or `var T` where `T` is `const i32` is a `const i32`.
+            RustType::CppConst(t) => {
+                RustType::cpp_object(CppConstness::Const, substitute_type(t, mapping)?)
+            }
+            RustType::CppVar(t) => {
+                RustType::cpp_object(CppConstness::Var, substitute_type(t, mapping)?)
+            }
         };
         Ok(ty)
     }

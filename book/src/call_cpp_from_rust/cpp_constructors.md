@@ -11,13 +11,14 @@ type c++::geo::Point {
 
     safe constructor();
     safe constructor(i32, i32);
-    safe constructor<'a>(&'a c++::geo::Point);
+    safe constructor<'a>(&'a const c++::geo::Point);
     unsafe constructor(const c++::geo::Point*, i32);
 }
 ```
 
-The parameter types are written like those of [member functions](./cpp_methods.md): `&'a T` for a
-`const T&`, `&'a mut T` for a `T&`, and C++-style raw pointers. Each constructor is `safe` or
+The parameter types are written like those of [member functions](./cpp_methods.md): `&'a const T`
+for a `const T&`, `&'a unique var T` for a `T&` that Rust uses uniquely, and C++-style raw
+pointers. Each constructor is `safe` or
 `unsafe`, like the functions in `extern "C++"` blocks. zngur warns about `safe` constructors that
 take [raw pointers](./cpp_pointers.md), which may be null or invalid. References are fine, so copy
 constructors can be `safe`.
