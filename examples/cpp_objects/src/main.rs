@@ -2,11 +2,11 @@
 mod generated;
 
 use generated::objects::{Counter, Point};
-use zngur_lib::{Const, Cpp, ZngCppConstruct};
+use zngur_lib::{Const, Cpp, CppCtor};
 
 fn main() {
-    let mut first = Counter::build((1,));
-    let mut second = Counter::build((10,));
+    let mut first = Counter::new(1).build();
+    let mut second = Counter::new(10).build();
 
     // A pointer field, set through a shared reference: `next_var()` is a `&Cpp<*mut Counter>`.
     first.next_var().set(&mut second);

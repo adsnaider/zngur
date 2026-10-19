@@ -231,10 +231,11 @@ impl ZngurGenerator {
                         field,
                     ));
                 }
-                // C++ constructors (by-value types only, checked by the parser): a
-                // `ZngCppConstruct` impl, and a C++ function that runs the constructor in place.
-                for (index, constructor) in ty_def.cpp_constructors.iter().enumerate() {
-                    let mangled_name = rust_file.add_cpp_constructor(ty, index, constructor);
+                // C++ constructors (by-value types only, checked by the parser): an associated
+                // function returning a `CppCtor`, and a C++ function that runs the constructor in
+                // place.
+                for constructor in &ty_def.cpp_constructors {
+                    let mangled_name = rust_file.add_cpp_constructor(ty, constructor);
                     cpp_file.cpp_method_bridges.push(bridges.constructor(
                         &mangled_name,
                         owner_cpp_type,
@@ -1466,23 +1467,46 @@ mod tests {
     }
 
     #[test]
-    fn cpp_constructors_get_construct_impls_and_cpp_bridges() {
+    fn cpp_constructors_get_associated_functions_and_cpp_bridges() {
         let b = cpp(&["a", "B"]);
         let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
         let mut ty = minimal_stack_owned_type(b.clone(), 8, 4);
         ty.cpp_constructors = vec![
             ZngurCppConstructor {
+                rust_name: "new".to_owned(),
                 lifetimes: vec![],
                 inputs: vec![],
                 is_safe: true,
             },
             ZngurCppConstructor {
+                rust_name: "shifted".to_owned(),
                 lifetimes: vec![],
                 inputs: vec![
                     i32,
-                    RustType::cpp_ptr(Mutability::Not, CppIndirection::Reference, b),
+                    RustType::cpp_ptr(Mutability::Not, CppIndirection::Reference, b.clone()),
                 ],
                 is_safe: false,
+            },
+            ZngurCppConstructor {
+                rust_name: "copy".to_owned(),
+                lifetimes: vec![Lifetime("a".to_owned())],
+                inputs: vec![RustType::Ref(
+                    Mutability::Not,
+                    Some(Lifetime("a".to_owned())),
+                    Box::new(RustType::CppConst(Box::new(b.clone()))),
+                )],
+                is_safe: true,
+            },
+            // With `#allow(elided_lifetimes)`.
+            ZngurCppConstructor {
+                rust_name: "copy_elided".to_owned(),
+                lifetimes: vec![],
+                inputs: vec![RustType::Ref(
+                    Mutability::Not,
+                    None,
+                    Box::new(RustType::CppConst(Box::new(b))),
+                )],
+                is_safe: true,
             },
         ];
         let spec = ZngurSpec {
@@ -1493,14 +1517,35 @@ mod tests {
             ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
         let cpp_code = cpp_code.expect("C++ constructors need a C++ file");
 
-        assert!(rust_code.contains("unsafe impl ::zngur_lib::ZngCppConstruct<()> for a::B {"));
-        assert!(rust_code.contains("type Safety = ::zngur_lib::IsSafe;"));
-        // Inputs that are `const` C++ objects are generic over their constness.
-        assert!(rust_code.contains(
-            "unsafe impl<__C1: ::zngur_lib::Constness> ::zngur_lib::ZngCppConstruct<(i32, \
-             *const a::B::<__C1>, )> for a::B {"
-        ));
-        assert!(rust_code.contains("type Safety = ::zngur_lib::IsUnsafe;"));
+        assert!(
+            rust_code.contains("pub fn new() -> impl ::zngur_lib::CppCtor<Output = Self> {"),
+            "{rust_code}"
+        );
+        // `unsafe` constructors are `unsafe` functions, and inputs that are `const` C++ objects
+        // are generic over their constness. The returned constructor call captures the generic
+        // parameters, borrowed inputs' lifetimes included.
+        assert!(
+            rust_code.contains(
+                "pub unsafe fn shifted<__C1: ::zngur_lib::Constness>(i0: i32, i1: *const \
+                 a::B::<__C1>, ) -> impl ::zngur_lib::CppCtor<Output = Self> + use<__C1> {"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "pub fn copy<'a, __C1: ::zngur_lib::Constness>(i0: &'a a::B::<__C1>, ) -> impl \
+                 ::zngur_lib::CppCtor<Output = Self> + use<'a, __C1> {"
+            ),
+            "{rust_code}"
+        );
+        // Elided lifetimes get names, so that the constructor call can capture them.
+        assert!(
+            rust_code.contains(
+                "pub fn copy_elided<'__l1, __C1: ::zngur_lib::Constness>(i0: &'__l1 a::B::<__C1>, \
+                 ) -> impl ::zngur_lib::CppCtor<Output = Self> + use<'__l1, __C1> {"
+            ),
+            "{rust_code}"
+        );
 
         assert!(cpp_code.contains("new (o) ::a::B();"), "{cpp_code}");
         assert!(

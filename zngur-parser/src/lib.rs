@@ -458,11 +458,13 @@ enum ParsedTypeItem<'a> {
         output: ParsedRustType<'a>,
         rust_name: Option<&'a str>,
     },
-    /// A C++ constructor: `(safe | unsafe) constructor[<lifetimes...>](types...);`
+    /// A C++ constructor: `(safe | unsafe) constructor[<lifetimes...>](types...) as rust_name;`.
+    /// `rust_name` is required, which is checked when it's processed.
     CppConstructor {
         is_safe: bool,
         lifetimes: Vec<&'a str>,
         inputs: Vec<ParsedRustType<'a>>,
+        rust_name: Option<&'a str>,
     },
     /// An accessor for a field of a C++ type:
     /// `field [& [unique]] (const | var) name (type = T) [as rust_name];`. `constness` is `None`
@@ -768,42 +770,30 @@ fn zng_spelling(ty: &RustType) -> String {
     }
 }
 
-/// Whether the `ZngCppConstruct` impls of C++ constructors taking `a` and `b` would overlap only
-/// because the inputs that are `const` C++ objects are generic over their constness: in some
-/// position, one takes a `&'a const T` (`&'a T<C1>` in Rust) and the other a `&'a var T`
-/// (`&'a T`), or `unique` ones, and the other inputs are the same. Returns the first such
-/// position, whether the references there are `unique`, and the type (`T`) they refer to.
-fn constness_overlap<'a>(
-    a: &'a [RustType],
-    b: &'a [RustType],
-) -> Option<(usize, bool, &'a RustType)> {
-    if a.len() != b.len() {
-        return None;
+/// Reports a member of a C++ type (a constructor, member function or field accessor) whose Rust
+/// name `name` an earlier member already has, and returns whether there was none.
+fn check_member_name(
+    ctx: &mut ParseContext,
+    span: Span,
+    name: &str,
+    constructors: &[ZngurCppConstructor],
+    methods: &[ZngurCppMethod],
+    fields: &[ZngurCppField],
+) -> bool {
+    let taken = constructors.iter().any(|c| c.rust_name == name)
+        || methods.iter().any(|m| m.rust_name() == name)
+        || fields.iter().any(|f| f.rust_name() == name);
+    if taken {
+        ctx.add_error_str(&duplicate_member_name(name), span);
     }
-    let mut first = None;
-    for (n, (a, b)) in a.iter().zip(b).enumerate() {
-        let (a, b) = (a.with_anonymous_lifetimes(), b.with_anonymous_lifetimes());
-        if a == b {
-            continue;
-        }
-        let (RustType::Ref(m1, _, p1), RustType::Ref(m2, _, p2)) = (&a, &b) else {
-            return None;
-        };
-        let (Some((c1, t1)), Some((c2, t2))) = (p1.as_cpp_object(), p2.as_cpp_object()) else {
-            return None;
-        };
-        if m1 != m2 || c1 == c2 || t1 != t2 {
-            return None;
-        }
-        first.get_or_insert(n);
-    }
-    let n = first?;
-    match &a[n] {
-        RustType::Ref(m, _, p) => p
-            .as_cpp_object()
-            .map(|(_, t)| (n, *m == Mutability::Mut, t)),
-        _ => unreachable!("checked above"),
-    }
+    !taken
+}
+
+fn duplicate_member_name(name: &str) -> String {
+    format!(
+        "`{name}` is already the Rust name of another member of this type (a constructor, member \
+         function or field accessor)"
+    )
 }
 
 /// Checks the references to C++ objects in `ty`, once its paths are resolved: a reference to a
@@ -1526,6 +1516,16 @@ impl ProcessedItem<'_> {
                                 &method.inputs,
                                 &method.output,
                             );
+                            if !check_member_name(
+                                ctx,
+                                item_span,
+                                method.rust_name(),
+                                &cpp_constructors,
+                                &cpp_methods,
+                                &cpp_fields,
+                            ) {
+                                continue;
+                            }
                             ctx.record_span(
                                 &method.as_rust_method().into_span_key_with(rust_ty.clone()),
                                 item_span.into_range(),
@@ -1536,7 +1536,15 @@ impl ProcessedItem<'_> {
                             is_safe,
                             lifetimes: constructor_lifetimes,
                             inputs,
+                            rust_name,
                         } => {
+                            let Some(rust_name) = rust_name else {
+                                ctx.add_error_str(
+                                    "C++ constructors need a Rust name: `as <name>`",
+                                    item_span,
+                                );
+                                continue;
+                            };
                             let inputs: Vec<RustType> =
                                 inputs.into_iter().map(|x| x.to_zngur(scope)).collect();
                             let constructor_lifetimes = lifetimes(&constructor_lifetimes);
@@ -1553,39 +1561,18 @@ impl ProcessedItem<'_> {
                                 &inputs,
                                 &RustType::UNIT,
                             );
-                            // They'd implement the same `ZngCppConstruct<Args>`.
-                            if cpp_constructors
-                                .iter()
-                                .any(|c: &ZngurCppConstructor| c.inputs == inputs)
-                            {
-                                ctx.add_error_str(
-                                    "another C++ constructor has the same argument types",
-                                    item_span,
-                                );
-                                continue;
-                            }
-                            // Inputs that are `const` C++ objects are generic over their
-                            // constness, so a `&'a const T` input also accepts a `&'a var T`.
-                            if let Some((n, unique, t)) = cpp_constructors
-                                .iter()
-                                .find_map(|c| constness_overlap(&c.inputs, &inputs))
-                            {
-                                let t = zng_spelling(t);
-                                let unique = if unique { "unique " } else { "" };
-                                ctx.add_error_str(
-                                    &format!(
-                                        "this C++ constructor overlaps with another one in Rust: \
-                                         argument {} is a `&{unique}const {t}` in one and a \
-                                         `&{unique}var {t}` in the other, and a reference to a \
-                                         `const` object accepts a non-`const` one too. Take a \
-                                         raw `const {t}&` in one of them, or remove one",
-                                        n + 1
-                                    ),
-                                    item_span,
-                                );
+                            if !check_member_name(
+                                ctx,
+                                item_span,
+                                rust_name,
+                                &cpp_constructors,
+                                &cpp_methods,
+                                &cpp_fields,
+                            ) {
                                 continue;
                             }
                             let constructor = ZngurCppConstructor {
+                                rust_name: rust_name.to_owned(),
                                 lifetimes: constructor_lifetimes,
                                 inputs,
                                 is_safe,
@@ -1593,7 +1580,7 @@ impl ProcessedItem<'_> {
                             ctx.record_span(
                                 &PartialSpanKey::CppConstructor(
                                     rust_ty.clone(),
-                                    constructor.inputs.clone(),
+                                    constructor.rust_name.clone(),
                                 ),
                                 item_span.into_range(),
                             );
@@ -1650,6 +1637,16 @@ impl ProcessedItem<'_> {
                             }
                             if let Err(e) = check_cpp_field(&field) {
                                 ctx.add_error_str(&e, item_span);
+                                continue;
+                            }
+                            if !check_member_name(
+                                ctx,
+                                item_span,
+                                field.rust_name(),
+                                &cpp_constructors,
+                                &cpp_methods,
+                                &cpp_fields,
+                            ) {
                                 continue;
                             }
                             ctx.record_span(
@@ -2252,8 +2249,8 @@ enum PartialSpanKey {
     /// outer_ty, method
     Method(RustType, ZngurMethod),
     /// a [`CppConstructor`](zngur_def::ZngurCppConstructor)
-    /// outer_ty, inputs
-    CppConstructor(RustType, Vec<RustType>),
+    /// outer_ty, rust_name
+    CppConstructor(RustType, String),
     /// a [`Field`](`zngur_def::ZngurField`) on a [`Type`](zngur_def::ZngurType)
     /// or it's internal [`Variant`](zngur_def::ZngurVariant)
     /// outer_ty, variant?, field_name
@@ -2350,8 +2347,8 @@ impl VariantQualifiedSpanKeyExt for zngur_def::ConflictSource {
             zngur_def::ConflictSource::Method(method) => {
                 PartialSpanKey::Method(outer_ty, method.clone())
             }
-            zngur_def::ConflictSource::CppConstructor(inputs) => {
-                PartialSpanKey::CppConstructor(outer_ty, inputs.clone())
+            zngur_def::ConflictSource::CppConstructor(name) => {
+                PartialSpanKey::CppConstructor(outer_ty, name.clone())
             }
             zngur_def::ConflictSource::Field(name) => {
                 PartialSpanKey::Field(outer_ty, variant, name.clone())
@@ -3353,6 +3350,21 @@ impl ZngurSpecBuilder {
             if is_cpp && let Err(e) = ty.ty.cpp_spelling() {
                 type_error(ctx, &ty.ty, &e);
             }
+            // Members of the same kind are merged by their Rust name, and duplicates in a
+            // declaration were reported there, so this only finds members of different kinds,
+            // declared in different files, with the same name.
+            let mut member_names = HashSet::new();
+            for name in ty
+                .cpp_constructors
+                .iter()
+                .map(|c| c.rust_name.as_str())
+                .chain(ty.cpp_methods.iter().map(|m| m.rust_name()))
+                .chain(ty.cpp_fields.iter().map(|f| f.rust_name()))
+            {
+                if !member_names.insert(name) {
+                    type_error(ctx, &ty.ty, &duplicate_member_name(name));
+                }
+            }
             // The members of a template are checked once its type variables are substituted (the
             // other members were checked when they were declared).
             if from_template {
@@ -3369,7 +3381,7 @@ impl ZngurSpecBuilder {
                     .chain(
                         ty.cpp_constructors
                             .iter()
-                            .flat_map(|c| c.inputs.iter().map(|t| ("constructor", t))),
+                            .flat_map(|c| c.inputs.iter().map(|t| (c.rust_name.as_str(), t))),
                     )
                     .filter_map(|(member, t)| {
                         check_cpp_objects(t)
@@ -4584,11 +4596,19 @@ fn inner_type_item<'a>()
         let cpp_constructor = just(Token::Ident("constructor"))
             .ignore_then(lifetime_params())
             .then(cpp_params)
-            .map(|(lifetimes, inputs)| ParsedTypeItem::CppConstructor {
-                is_safe: false, // Set below.
-                lifetimes,
-                inputs,
-            });
+            .then(
+                just(Token::KwAs)
+                    .ignore_then(select! { Token::Ident(c) => c })
+                    .or_not(),
+            )
+            .map(
+                |((lifetimes, inputs), rust_name)| ParsedTypeItem::CppConstructor {
+                    is_safe: false, // Set below.
+                    lifetimes,
+                    inputs,
+                    rust_name,
+                },
+            );
         let cpp_method = choice((
             just(Token::KwSafe).to(true),
             just(Token::KwUnsafe).to(false),

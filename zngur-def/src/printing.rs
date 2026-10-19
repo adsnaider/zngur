@@ -964,7 +964,7 @@ impl WriteIDL for crate::ZngurCppConstructor {
                 }
                 p.write_idl(input)?;
             }
-            writeln!(p, ");")?;
+            writeln!(p, ") as {};", self.rust_name)?;
         }
         Ok(())
     }

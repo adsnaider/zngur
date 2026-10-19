@@ -222,6 +222,54 @@ impl CppRustReceiver {
     }
 }
 
+/// `ty`, with each elided lifetime (of a reference without one, or `'_`) replaced by a new named
+/// one from `fresh`, so that a return type can capture it (`use<...>`). Those inside `dyn` and
+/// `impl` traits are left alone, since they may be bound there (`dyn Fn(&i32)`).
+fn name_elided_lifetimes(ty: &RustType, fresh: &mut dyn FnMut() -> Lifetime) -> RustType {
+    let named = |l: Option<&Lifetime>, fresh: &mut dyn FnMut() -> Lifetime| match l {
+        Some(l) if l.0 != "_" => l.clone(),
+        _ => fresh(),
+    };
+    let all = |tys: &[RustType], fresh: &mut dyn FnMut() -> Lifetime| -> Vec<RustType> {
+        tys.iter()
+            .map(|t| name_elided_lifetimes(t, fresh))
+            .collect()
+    };
+    let inner = |t: &RustType, fresh: &mut dyn FnMut() -> Lifetime| {
+        Box::new(name_elided_lifetimes(t, fresh))
+    };
+    match ty {
+        RustType::Ref(m, l, t) => {
+            let l = named(l.as_ref(), fresh);
+            RustType::Ref(*m, Some(l), inner(t, fresh))
+        }
+        RustType::Raw(m, t) => RustType::Raw(*m, inner(t, fresh)),
+        RustType::Boxed(t) => RustType::Boxed(inner(t, fresh)),
+        RustType::Slice(t) => RustType::Slice(inner(t, fresh)),
+        RustType::CppPtr(k, t) => RustType::CppPtr(*k, inner(t, fresh)),
+        RustType::CppConst(t) => RustType::CppConst(inner(t, fresh)),
+        RustType::CppVar(t) => RustType::CppVar(inner(t, fresh)),
+        RustType::Tuple(tys) => RustType::Tuple(all(tys, fresh)),
+        RustType::Adt(pg) => RustType::Adt(RustPathAndGenerics {
+            path: pg.path.clone(),
+            lifetimes: pg.lifetimes.iter().map(|l| named(Some(l), fresh)).collect(),
+            generics: all(&pg.generics, fresh),
+            named_generics: pg
+                .named_generics
+                .iter()
+                .map(|(n, t)| (n.clone(), name_elided_lifetimes(t, fresh)))
+                .collect(),
+        }),
+        RustType::Cpp(path) => RustType::Cpp(CppTypePath {
+            path: path.path.clone(),
+            generics: all(&path.generics, fresh),
+        }),
+        RustType::Dyn(..) | RustType::Impl(..) | RustType::Primitive(_) | RustType::TypeVar(_) => {
+            ty.clone()
+        }
+    }
+}
+
 pub struct RustFile {
     pub text: String,
     pub panic_to_exception: bool,
@@ -1340,26 +1388,50 @@ pub {}fn {name}{params}("#,
         mangled_name
     }
 
-    /// Adds the `zngur_lib::ZngCppConstruct` impl for the C++ constructor `constructor` of
-    /// `owner` (its `index`th one), which calls the C++ bridge function whose (mangled) name is
-    /// returned. Only non-`const` objects are constructed (`into_const()` makes them `const`).
+    /// Adds the associated function of `owner` for the C++ constructor `constructor`, which
+    /// returns the constructor call as a `zngur_lib::CppCtor` that calls the C++ bridge function
+    /// whose (mangled) name is returned. Only non-`const` objects are constructed (`into_const()` makes them `const`).
     /// Like the inputs of other C++ functions, those that are `const` C++ objects are generic
     /// over their constness.
     pub fn add_cpp_constructor(
         &mut self,
         owner: &RustType,
-        index: usize,
         constructor: &ZngurCppConstructor,
     ) -> String {
-        let mangled_name = self.mangle_name(&format!("{owner}_cpp_constructor_{index}"));
-        let inputs = &constructor.inputs;
-        let (params, input_tys) = cpp_fn_inputs(&constructor.lifetimes, inputs);
-        let args_ty: String = input_tys.iter().map(|ty| format!("{ty}, ")).collect();
-        let args_pattern: String = (0..inputs.len()).map(|n| format!("i{n}, ")).collect();
-        let safety = if constructor.is_safe {
-            "IsSafe"
+        let name = &constructor.rust_name;
+        let mangled_name = self.mangle_name(&format!("{owner}_cpp_constructor_{name}"));
+        // The returned constructor call captures every generic parameter (the borrowed inputs'
+        // lifetimes and their constnesses), so it can't outlive the inputs. Elided lifetimes get
+        // names, since `use<...>` can only list named ones.
+        let mut lifetimes = constructor.lifetimes.clone();
+        let mut n_elided = 0;
+        let inputs: Vec<RustType> = constructor
+            .inputs
+            .iter()
+            .map(|ty| {
+                name_elided_lifetimes(ty, &mut || {
+                    n_elided += 1;
+                    let l = Lifetime(format!("__l{n_elided}"));
+                    lifetimes.push(l.clone());
+                    l
+                })
+            })
+            .collect();
+        let inputs = &inputs;
+        let (params, input_tys) = cpp_fn_inputs(&lifetimes, inputs);
+        let n_generic_consts = inputs
+            .iter()
+            .filter(|ty| ty.generic_const_input("_").is_some())
+            .count();
+        let captured: Vec<String> = lifetimes
+            .iter()
+            .map(|l| l.to_string())
+            .chain((1..=n_generic_consts).map(|n| format!("__C{n}")))
+            .collect();
+        let use_bound = if captured.is_empty() {
+            String::new()
         } else {
-            "IsUnsafe"
+            format!(" + use<{}>", captured.join(", "))
         };
         w!(
             self,
@@ -1370,15 +1442,23 @@ unsafe extern "C" {{ fn {mangled_name}("#
             w!(self, "i{n}: *mut u8, ");
         }
         wln!(self, r#"o: *mut u8); }}"#);
-        wln!(
+        w!(
             self,
             r#"
-unsafe impl{params} ::zngur_lib::ZngCppConstruct<({args_ty})> for {owner} {{
-    type Safety = ::zngur_lib::{safety};
-
+impl {} {{
+#[allow(non_snake_case, clippy::too_many_arguments)]
+pub {}fn {name}{params}("#,
+            self.impl_target(owner),
+            if constructor.is_safe { "" } else { "unsafe " },
+        );
+        for (n, ty) in input_tys.iter().enumerate() {
+            w!(self, "i{n}: {ty}, ");
+        }
+        wln!(
+            self,
+            ") -> impl ::zngur_lib::CppCtor<Output = Self>{use_bound} {{
     #[allow(unused_mut)]
-    unsafe fn construct_unchecked(slot: &mut ::core::mem::MaybeUninit<Self>, args: ({args_ty})) {{
-        let ({args_pattern}) = args;"#
+    let construct_at = move |o: *mut Self| {{"
         );
         for n in 0..inputs.len() {
             wln!(self, "let mut i{n} = ::core::mem::MaybeUninit::new(i{n});");
@@ -1387,8 +1467,15 @@ unsafe impl{params} ::zngur_lib::ZngCppConstruct<({args_ty})> for {owner} {{
         for n in 0..inputs.len() {
             w!(self, "i{n}.as_mut_ptr() as *mut u8, ");
         }
-        wln!(self, "slot.as_mut_ptr() as *mut u8) }}");
-        wln!(self, "}} }}");
+        wln!(self, "o as *mut u8) }}");
+        wln!(
+            self,
+            "}};
+    // SAFETY: `construct_at` runs the C++ constructor on the slot that it gets. Creating the
+    // constructor call is where an `unsafe` constructor's preconditions are promised.
+    unsafe {{ ::zngur_lib::CppCtorFn::new(construct_at) }}
+}} }}"
+        );
         mangled_name
     }
 

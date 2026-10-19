@@ -2147,9 +2147,9 @@ type c++::B {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
 
-    safe constructor();
-    safe constructor(i32, i32);
-    unsafe constructor(const c++::B&);
+    safe constructor() as new;
+    safe constructor(i32, i32) as from_xy;
+    unsafe constructor(const c++::B&) as copy_from;
 }
 "#,
         NullCfg,
@@ -2159,7 +2159,8 @@ type c++::B {
     let b = RustType::Cpp(vec!["B".to_owned()].into());
     let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
     let constructors = &ty.cpp_constructors;
-    assert_eq!(constructors.len(), 3);
+    let names: Vec<_> = constructors.iter().map(|c| c.rust_name.as_str()).collect();
+    assert_eq!(names, ["new", "from_xy", "copy_from"]);
     assert!(constructors[0].inputs.is_empty());
     assert!(constructors[0].is_safe);
     assert_eq!(constructors[1].inputs, vec![i32.clone(), i32]);
@@ -2181,95 +2182,173 @@ fn safe_cpp_constructor_with_cpp_ptr_warns() {
 type c++::B {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
-    safe constructor(const c++::B*);
+    safe constructor(const c++::B*) as from_ptr;
 }
 "#,
         expect![[r#"
             Warning: this C++ constructor is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
                ╭─[ test.zng:5:5 ]
                │
-             5 │     safe constructor(const c++::B*);
-               │     ────────────────┬───────────────  
-               │                     ╰───────────────── this C++ constructor is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
+             5 │     safe constructor(const c++::B*) as from_ptr;
+               │     ──────────────────────┬─────────────────────  
+               │                           ╰─────────────────────── this C++ constructor is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
             ───╯
         "#]],
     );
 }
 
 #[test]
-fn cpp_constructors_with_the_same_rust_signature_are_rejected() {
+fn cpp_constructor_without_a_rust_name_is_rejected() {
     check_fail(
         r#"
 type c++::B {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
     safe constructor(i32);
-    unsafe constructor(i32);
 }
 "#,
         expect![[r#"
-            Error: another C++ constructor has the same argument types
-               ╭─[ test.zng:6:5 ]
+            Error: C++ constructors need a Rust name: `as <name>`
+               ╭─[ test.zng:5:5 ]
                │
-             6 │     unsafe constructor(i32);
-               │     ────────────┬───────────  
-               │                 ╰───────────── another C++ constructor has the same argument types
+             5 │     safe constructor(i32);
+               │     ───────────┬──────────  
+               │                ╰──────────── C++ constructors need a Rust name: `as <name>`
             ───╯
         "#]],
     );
 }
 
 #[test]
-fn cpp_constructors_that_overlap_through_constness_are_rejected() {
+fn members_with_the_same_rust_name_are_rejected() {
     check_fail(
+        r#"
+#allow(elided_lifetimes)
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe constructor(i32) as new;
+    unsafe constructor(i64) as new;
+    safe fn new(&const self) -> i32;
+    safe fn value(&const self) -> i32;
+    safe fn value(&const self) -> i64;
+    field &const value (type = i32);
+    safe constructor() as value;
+}
+"#,
+        expect![[r#"
+            Error: `new` is already the Rust name of another member of this type (a constructor, member function or field accessor)
+               ╭─[ test.zng:7:5 ]
+               │
+             7 │     unsafe constructor(i64) as new;
+               │     ───────────────┬───────────────  
+               │                    ╰───────────────── `new` is already the Rust name of another member of this type (a constructor, member function or field accessor)
+            ───╯
+            Error: `new` is already the Rust name of another member of this type (a constructor, member function or field accessor)
+               ╭─[ test.zng:8:5 ]
+               │
+             8 │     safe fn new(&const self) -> i32;
+               │     ────────────────┬───────────────  
+               │                     ╰───────────────── `new` is already the Rust name of another member of this type (a constructor, member function or field accessor)
+            ───╯
+            Error: `value` is already the Rust name of another member of this type (a constructor, member function or field accessor)
+                ╭─[ test.zng:10:5 ]
+                │
+             10 │     safe fn value(&const self) -> i64;
+                │     ─────────────────┬────────────────  
+                │                      ╰────────────────── `value` is already the Rust name of another member of this type (a constructor, member function or field accessor)
+            ────╯
+            Error: `value` is already the Rust name of another member of this type (a constructor, member function or field accessor)
+                ╭─[ test.zng:11:5 ]
+                │
+             11 │     field &const value (type = i32);
+                │     ────────────────┬───────────────  
+                │                     ╰───────────────── `value` is already the Rust name of another member of this type (a constructor, member function or field accessor)
+            ────╯
+            Error: `value` is already the Rust name of another member of this type (a constructor, member function or field accessor)
+                ╭─[ test.zng:12:5 ]
+                │
+             12 │     safe constructor() as value;
+                │     ──────────────┬─────────────  
+                │                   ╰─────────────── `value` is already the Rust name of another member of this type (a constructor, member function or field accessor)
+            ────╯
+        "#]],
+    );
+}
+
+#[test]
+fn members_with_the_same_rust_name_in_different_files_are_rejected() {
+    let resolver = MockFilesystem::new(vec![(
+        "./a.zng",
         r#"
 type c++::B {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
-    safe constructor<'a>(i32, &'a const c++::B);
-    safe constructor<'b>(i32, &'b var c++::B);
-    safe constructor<'a>(&'a unique const i32);
-    safe constructor<'a>(&'a unique var i32);
-    // Not an overlap: a reference and a raw `const` reference, or a shared and a unique one.
-    unsafe constructor(i32, const c++::B&);
-    safe constructor<'a>(i32, &'a unique var c++::B);
+    safe fn make() -> c++::B;
+    safe constructor(i32) as new;
+}
+"#,
+    )]);
+
+    check_import_fail(
+        r#"
+merge "./a.zng";
+type c++::B {
+    safe constructor() as make;
+    safe constructor(i64) as new;
 }
 "#,
         expect![[r#"
-            Error: this C++ constructor overlaps with another one in Rust: argument 2 is a `&const c++::B` in one and a `&var c++::B` in the other, and a reference to a `const` object accepts a non-`const` one too. Take a raw `const c++::B&` in one of them, or remove one
-               ╭─[ test.zng:6:5 ]
+            Error: C++ constructor mismatch
+               ╭─[ ./a.zng:2:6 ]
                │
-             6 │     safe constructor<'b>(i32, &'b var c++::B);
-               │     ─────────────────────┬────────────────────  
-               │                          ╰────────────────────── this C++ constructor overlaps with another one in Rust: argument 2 is a `&const c++::B` in one and a `&var c++::B` in the other, and a reference to a `const` object accepts a non-`const` one too. Take a raw `const c++::B&` in one of them, or remove one
+             2 │ type c++::B {
+               │      ───┬──  
+               │         ╰──── C++ constructor mismatch
+               │ 
+             6 │     safe constructor(i32) as new;
+               │     ──────────────┬──────────────  
+               │                   ╰──────────────── declaration here ...
+               │
+               ├─[ test.zng:5:5 ]
+               │
+             5 │     safe constructor(i64) as new;
+               │     ──────────────┬──────────────  
+               │                   ╰──────────────── conflicts with the declaration here.
             ───╯
-            Error: this C++ constructor overlaps with another one in Rust: argument 1 is a `&unique const i32` in one and a `&unique var i32` in the other, and a reference to a `const` object accepts a non-`const` one too. Take a raw `const i32&` in one of them, or remove one
-               ╭─[ test.zng:8:5 ]
+            Error: `make` is already the Rust name of another member of this type (a constructor, member function or field accessor)
+               ╭─[ test.zng:3:6 ]
                │
-             8 │     safe constructor<'a>(&'a unique var i32);
-               │     ────────────────────┬────────────────────  
-               │                         ╰────────────────────── this C++ constructor overlaps with another one in Rust: argument 1 is a `&unique const i32` in one and a `&unique var i32` in the other, and a reference to a `const` object accepts a non-`const` one too. Take a raw `const i32&` in one of them, or remove one
+             3 │ type c++::B {
+               │      ───┬──  
+               │         ╰──── `make` is already the Rust name of another member of this type (a constructor, member function or field accessor)
             ───╯
         "#]],
+        &resolver,
     );
 }
 
 #[test]
-fn cpp_constructors_taking_a_pointer_or_a_reference_are_different() {
+fn cpp_constructors_with_the_same_argument_types_are_fine() {
+    // Each one is its own Rust function, so nothing overlaps.
     let parsed = parse_str(
         r#"
 type c++::B {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
-    safe constructor(const c++::B&);
-    unsafe constructor(const c++::B*);
+    safe constructor(i32) as new;
+    unsafe constructor(i32) as new_unchecked;
+    safe constructor<'a>(i32, &'a const c++::B) as from_const;
+    safe constructor<'b>(i32, &'b var c++::B) as from_var;
+    safe constructor(const c++::B&) as from_ref;
+    unsafe constructor(const c++::B*) as from_ptr;
 }
 "#,
         NullCfg,
         |_| {},
     );
     let ty = parsed.spec.types.first().expect("no type parsed");
-    assert_eq!(ty.cpp_constructors.len(), 2);
+    assert_eq!(ty.cpp_constructors.len(), 6);
 }
 
 #[test]
@@ -2277,7 +2356,7 @@ fn cpp_constructor_on_cpp_ref_type_is_rejected() {
     check_fail(
         r#"
 type c++::B {
-    safe constructor(i32);
+    safe constructor(i32) as new;
 }
 "#,
         expect![[r#"

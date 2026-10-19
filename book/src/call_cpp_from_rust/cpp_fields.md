@@ -46,7 +46,7 @@ Each accessor is a safe method. Builtins behind references are
 `get()` reads:
 
 ```rust
-let mut p = Point::build((1, 2));
+let mut p = Point::from_xy(1, 2).build();
 *p.x_mut().get_mut() += 10;
 let x: i32 = p.x().get();
 let y: i32 = p.y();

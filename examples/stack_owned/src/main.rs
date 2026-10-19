@@ -4,7 +4,7 @@ mod generated;
 use std::mem::MaybeUninit;
 
 use generated::{MyConservativeWrapper, MyCppWrapper};
-use zngur_lib::{Const, Cpp, ZngCppConstruct};
+use zngur_lib::{Const, Cpp, CppCtor};
 
 fn main() {
     let mut c = MyCppWrapper::new(5, 6);
@@ -36,21 +36,22 @@ fn main() {
     c.swapped().print();
     MyCppWrapper::diagonal(7).print();
 
-    // C++ constructors. `build` returns the object, and `construct` constructs it in a slot.
-    let built = MyCppWrapper::build((3, 4));
+    // C++ constructors, which return the constructor call (a `CppCtor`): `build()` returns the
+    // object, and `init()` constructs it in a slot. Calling an `unsafe` constructor is `unsafe`.
+    let built = MyCppWrapper::from_xy(3, 4).build();
     built.print();
-    let copy = MyCppWrapper::build((&built,));
+    let copy = MyCppWrapper::copy(&built).build();
     copy.print();
-    let moved = unsafe { MyCppWrapper::build_unchecked((&raw const built, 10)) };
+    let moved = unsafe { MyCppWrapper::shifted(&raw const built, 10) }.build();
     moved.print();
     let mut slot = MaybeUninit::uninit();
-    MyCppWrapper::construct(&mut slot, (8, 9));
-    let constructed = unsafe { slot.assume_init() };
+    // `MaybeUninit` doesn't run the destructor (which `CppType` doesn't have anyway).
+    let constructed: &mut MyCppWrapper = MyCppWrapper::from_xy(8, 9).init(&mut slot);
     constructed.print();
-    MyConservativeWrapper::build((30, 40)).print();
+    MyConservativeWrapper::from_values(30, 40).build().print();
 
     // Free C++ functions.
-    let dot = generated::geometry::dot(&built, &constructed);
+    let dot = generated::geometry::dot(&built, constructed);
     println!("dot = {dot}");
     generated::geometry::origin().print();
     println!(
@@ -60,7 +61,7 @@ fn main() {
     );
 
     // C++ field accessors, which return a reference to the field.
-    let mut point = MyCppWrapper::build((1, 2));
+    let mut point = MyCppWrapper::from_xy(1, 2).build();
     *point.x_mut().get_mut() += 100;
     let x = point.x().get();
     let y = point.y().get();
@@ -68,8 +69,8 @@ fn main() {
     point.print();
 
     // Instantiations of C++ class templates.
-    let mut ints = generated::Pair::<i32>::build((3, 4));
-    let doubles = generated::Pair::<f64>::build((1.5, 2.25));
+    let mut ints = generated::Pair::<i32>::new(3, 4).build();
+    let doubles = generated::Pair::<f64>::new(1.5, 2.25).build();
     ints.first_mut().set(30);
     println!("pairs = {} {}", ints.sum(), doubles.sum());
     let boxed: generated::std::unique_ptr<generated::Pair<i32>> = generated::pairs::boxed(5, 6);
@@ -78,8 +79,8 @@ fn main() {
     println!("boxed = {}", pair.sum());
 
     // Fields of pointer type.
-    let mut first = generated::Node::build((1,));
-    let mut second = generated::Node::build((2,));
+    let mut first = generated::Node::new(1).build();
+    let mut second = generated::Node::new(2).build();
     first.next_mut().set(&mut second);
     second.type_mut().set(5);
     let next = unsafe { first.next().get().as_mut() }.expect("null");
@@ -102,10 +103,10 @@ fn main() {
     let third: i32 = unsafe { squares.at(3) }.get();
     println!("squares = {len} items, squares[3] = {third}");
     let _: &generated::View<Cpp<i32, Const>> = &squares;
-    let mut point = MyCppWrapper::build((2, 3));
+    let mut point = MyCppWrapper::from_xy(2, 3).build();
     let exclusive: &mut MyCppWrapper<Const> = point.as_const_mut();
     println!("const sum() = {}", exclusive.sum());
-    let frozen: MyCppWrapper<Const> = MyCppWrapper::build((4, 5)).into_const();
+    let frozen: MyCppWrapper<Const> = MyCppWrapper::from_xy(4, 5).build().into_const();
     println!("frozen sum() = {}", frozen.sum());
 
     let mut vec = Vec::new();

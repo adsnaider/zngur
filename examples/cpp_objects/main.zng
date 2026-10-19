@@ -21,7 +21,7 @@ type c++::objects::Counter {
     #layout(size = 24, align = 8);
     #trivially_relocatable;
 
-    safe constructor(i32);
+    safe constructor(i32) as new;
 
     // A non-`const` member function called through a shared reference: other references may see
     // the object change, which the Rust wrapper allows.

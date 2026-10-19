@@ -3,7 +3,7 @@ mod generated;
 
 use generated::shapes::{Canvas, Point};
 use generated::std::{make_canvas, make_point};
-use zngur_lib::ZngCppConstruct;
+use zngur_lib::CppCtor;
 
 fn main() {
     // A type that Rust can hold by value, constructed on the heap instead.
@@ -17,7 +17,7 @@ fn main() {
     // SAFETY: `canvas` owns a `Canvas`, which lives as long as it does.
     let canvas_ref: &mut Canvas = unsafe { canvas.get().as_mut() }.expect("null");
     canvas_ref.Draw(point);
-    canvas_ref.Draw(&Point::build((5, 6)));
+    canvas_ref.Draw(&Point::new(5, 6).build());
     println!("points drawn = {}", canvas_ref.Points());
 
     // Dropping the `std::unique_ptr` destroys the canvas.

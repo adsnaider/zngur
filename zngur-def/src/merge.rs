@@ -44,8 +44,8 @@ pub enum ConflictSource {
     Layout,
     Constructor(Option<Vec<(String, RustType)>>),
     Method(ZngurMethod),
-    /// A C++ constructor, by its inputs.
-    CppConstructor(Vec<RustType>),
+    /// A C++ constructor, by its Rust name.
+    CppConstructor(String),
     Field(String),
 }
 
@@ -171,7 +171,7 @@ impl Merge for ZngurType {
             a.rust_name() == b.rust_name()
         })?;
         merge_by_identity(self.cpp_constructors, &mut into.cpp_constructors, |a, b| {
-            a.inputs == b.inputs
+            a.rust_name == b.rust_name
         })?;
         merge_by_identity(self.cpp_fields, &mut into.cpp_fields, |a, b| {
             a.rust_name() == b.rust_name()
@@ -262,7 +262,7 @@ impl Merge for crate::ZngurCppField {
 impl Merge for crate::ZngurCppConstructor {
     fn merge(self, into: &mut Self) -> MergeResult {
         if self != *into {
-            let source = |c: &Self| ConflictSource::CppConstructor(c.inputs.clone());
+            let source = |c: &Self| ConflictSource::CppConstructor(c.rust_name.clone());
             return Err(MergeFailure::Conflict(
                 "C++ constructor mismatch".to_string(),
                 (source(&self), source(into)),

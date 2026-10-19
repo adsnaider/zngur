@@ -267,47 +267,14 @@ pub unsafe trait ZngCppDestruct: ZngCppObject {
     unsafe fn destruct(&mut self);
 }
 
-/// Whether a C++ constructor ([`ZngCppConstruct`]) is safe ([`IsSafe`]) or not ([`IsUnsafe`]).
-pub trait Safety: sealed::Sealed + 'static {}
-
-/// Implemented only by [`IsSafe`], to make the safe methods of [`ZngCppConstruct`] available.
+/// A C++ constructor call with its arguments, which hasn't run yet: what the functions that zngur
+/// generates for C++ constructors (`safe constructor(i32, i32) as from_xy;`) return. Running it
+/// constructs the object in place, like in C++: [`build`](CppCtor::build) returns the object (for
+/// C++ objects that Rust holds by value, which are trivially relocatable), and
+/// [`init`](CppCtor::init) constructs it in a slot.
 ///
-/// So they don't compile for `unsafe` constructors:
-///
-/// ```compile_fail
-/// # use core::mem::MaybeUninit;
-/// # use zngur_lib::*;
-/// # struct Bar(i32);
-/// # unsafe impl ZngCppObject for Bar {}
-/// # unsafe impl ZngCppStackObject for Bar {}
-/// unsafe impl ZngCppConstruct<(i32,)> for Bar {
-///     type Safety = IsUnsafe;
-///     unsafe fn construct_unchecked(slot: &mut MaybeUninit<Self>, args: (i32,)) {
-///         slot.write(Bar(args.0));
-///     }
-/// }
-/// let bar = Bar::build((1,)); // Error: `IsUnsafe: Safe` isn't satisfied.
-/// ```
-pub trait Safe: Safety {}
-
-/// Marks a C++ constructor declared `safe`.
-pub enum IsSafe {}
-
-/// Marks a C++ constructor declared `unsafe`.
-pub enum IsUnsafe {}
-
-impl sealed::Sealed for IsSafe {}
-impl sealed::Sealed for IsUnsafe {}
-impl Safety for IsSafe {}
-impl Safety for IsUnsafe {}
-impl Safe for IsSafe {}
-
-/// A C++ constructor of `Self` that takes `Args`, a tuple of the arguments: `ZngCppConstruct<()>`
-/// is the default constructor, `ZngCppConstruct<(i32,)>` one taking an `i32`, and so on. Like C++
-/// constructors, it initializes an object in place.
-///
-/// The `*_unchecked` methods are always available. The safe ones, [`construct`] and [`build`],
-/// only exist for constructors declared `safe` (`Self::Safety` is [`IsSafe`]).
+/// For an `unsafe` constructor, the generated function is `unsafe`: calling it is where the
+/// constructor's preconditions are promised, and running the returned value is safe.
 ///
 /// ```
 /// # use core::mem::MaybeUninit;
@@ -315,71 +282,91 @@ impl Safe for IsSafe {}
 /// # struct Bar(i32);
 /// # unsafe impl ZngCppObject for Bar {}
 /// # unsafe impl ZngCppStackObject for Bar {}
-/// // zngur generates this for `safe constructor(i32);`, with a body that calls C++.
-/// unsafe impl ZngCppConstruct<(i32,)> for Bar {
-///     type Safety = IsSafe;
-///     unsafe fn construct_unchecked(slot: &mut MaybeUninit<Self>, args: (i32,)) {
-///         slot.write(Bar(args.0));
+/// impl Bar {
+///     // zngur generates this for `safe constructor(i32) as new;`, with a closure that calls C++.
+///     pub fn new(i0: i32) -> impl CppCtor<Output = Self> {
+///         // SAFETY: The closure initializes the slot that it gets.
+///         unsafe { CppCtorFn::new(move |slot: *mut Self| slot.write(Bar(i0))) }
 ///     }
 /// }
-/// let bar = Bar::build((1,));
+/// let bar = Bar::new(1).build();
 /// let mut slot = MaybeUninit::uninit();
-/// Bar::construct(&mut slot, (2,));
-/// assert_eq!(bar.0 + unsafe { slot.assume_init() }.0, 3);
+/// let in_slot: &mut Bar = Bar::new(2).init(&mut slot);
+/// assert_eq!(bar.0 + in_slot.0, 3);
 /// ```
-///
-/// [`construct`]: ZngCppConstruct::construct
-/// [`build`]: ZngCppConstruct::build
 ///
 /// # Safety
 ///
-/// [`construct_unchecked`](ZngCppConstruct::construct_unchecked) must initialize `slot`, and
-/// `Safety` may only be [`IsSafe`] if the constructor is safe to call with any `args`.
-pub unsafe trait ZngCppConstruct<Args>: ZngCppObject {
-    /// [`IsSafe`] for a `safe constructor(...)`, and [`IsUnsafe`] for an `unsafe` one.
-    type Safety: Safety;
+/// [`construct_at`](CppCtor::construct_at) must initialize the `Output` that `slot` points to.
+#[must_use = "a C++ constructor call does nothing until it's run with `build()` or `init()`"]
+pub unsafe trait CppCtor: Sized {
+    /// The C++ object that it constructs.
+    type Output: ZngCppObject;
 
-    /// Runs the C++ constructor on `slot`, which is initialized afterwards.
+    /// Runs the C++ constructor on `slot`, which is initialized afterwards (without dropping
+    /// what was there).
     ///
     /// # Safety
     ///
-    /// The preconditions of the C++ constructor must hold.
-    unsafe fn construct_unchecked(slot: &mut core::mem::MaybeUninit<Self>, args: Args);
+    /// `slot` must be valid for writes and properly aligned.
+    unsafe fn construct_at(self, slot: *mut Self::Output);
 
-    /// Constructs an object and returns it. Moving it out of the slot it was constructed in is
-    /// fine, because C++ objects that live on the Rust stack are trivially relocatable.
+    /// Runs the C++ constructor on `slot`, and returns the object, which lives there.
     ///
-    /// # Safety
-    ///
-    /// The preconditions of the C++ constructor must hold.
-    unsafe fn build_unchecked(args: Args) -> Self
-    where
-        Self: ZngCppStackObject,
-    {
-        let mut slot = core::mem::MaybeUninit::uninit();
+    /// `MaybeUninit` doesn't drop what it contains, so the object's destructor only runs if the
+    /// caller drops it (e.g. with [`MaybeUninit::assume_init_drop`]). Otherwise it leaks, which is
+    /// safe.
+    fn init(self, slot: &mut core::mem::MaybeUninit<Self::Output>) -> &mut Self::Output {
+        // SAFETY: `slot` is a valid and aligned `MaybeUninit`, and `construct_at` initializes it.
         unsafe {
-            Self::construct_unchecked(&mut slot, args);
-            slot.assume_init()
+            self.construct_at(slot.as_mut_ptr());
+            slot.assume_init_mut()
         }
     }
 
-    /// Runs the C++ constructor on `slot`, which is initialized afterwards.
-    fn construct(slot: &mut core::mem::MaybeUninit<Self>, args: Args)
+    /// Constructs an object and returns it. Moving it out of the slot it was constructed in is
+    /// fine, because C++ objects that live on the Rust stack are trivially relocatable.
+    fn build(self) -> Self::Output
     where
-        Self::Safety: Safe,
+        Self::Output: ZngCppStackObject,
     {
-        // SAFETY: The constructor is safe (`Self::Safety` is `IsSafe`).
-        unsafe { Self::construct_unchecked(slot, args) }
+        let mut slot = core::mem::MaybeUninit::uninit();
+        // SAFETY: `slot` is a valid and aligned `MaybeUninit`, and `construct_at` initializes it.
+        unsafe {
+            self.construct_at(slot.as_mut_ptr());
+            slot.assume_init()
+        }
     }
+}
 
-    /// Constructs an object and returns it.
-    fn build(args: Args) -> Self
-    where
-        Self: ZngCppStackObject,
-        Self::Safety: Safe,
-    {
-        // SAFETY: The constructor is safe (`Self::Safety` is `IsSafe`).
-        unsafe { Self::build_unchecked(args) }
+/// A [`CppCtor`] that runs a closure, which zngur's generated code uses: the closure calls the C++
+/// constructor with the arguments that it captured.
+pub struct CppCtorFn<T, F: FnOnce(*mut T)> {
+    construct_at: F,
+    _output: core::marker::PhantomData<fn() -> T>,
+}
+
+impl<T, F: FnOnce(*mut T)> CppCtorFn<T, F> {
+    /// A constructor call that runs `construct_at` on the slot.
+    ///
+    /// # Safety
+    ///
+    /// `construct_at` must initialize the `T` that it gets a (valid for writes and aligned)
+    /// pointer to.
+    pub const unsafe fn new(construct_at: F) -> Self {
+        CppCtorFn {
+            construct_at,
+            _output: core::marker::PhantomData,
+        }
+    }
+}
+
+// SAFETY: `construct_at` initializes the slot (see `CppCtorFn::new`).
+unsafe impl<T: ZngCppObject, F: FnOnce(*mut T)> CppCtor for CppCtorFn<T, F> {
+    type Output = T;
+
+    unsafe fn construct_at(self, slot: *mut T) {
+        (self.construct_at)(slot)
     }
 }
 

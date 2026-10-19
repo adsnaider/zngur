@@ -10,7 +10,7 @@ type c++::shapes::Point {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
 
-    safe constructor(i32, i32);
+    safe constructor(i32, i32) as new;
     field &const x (type = i32);
     field &const y (type = i32);
 }

@@ -22,11 +22,13 @@ type c++::MyCppWrapper {
     safe fn swapped(&const self) -> c++::MyCppWrapper;
     safe fn diagonal(i32) -> c++::MyCppWrapper;
 
-    // C++ constructors, which `zngur_lib::ZngCppConstruct` runs in place. C++-style pointers and
-    // references (`const T*`, `T&`, ...) are raw pointers in Rust.
-    safe constructor(i32, i32);
-    safe constructor(&const c++::MyCppWrapper);
-    unsafe constructor(const c++::MyCppWrapper*, i32);
+    // C++ constructors, which are Rust functions named with `as` (not `new` here, which the
+    // `extern "C++"` block below takes). They return a `zngur_lib::CppCtor`, which runs the
+    // constructor in place. C++-style pointers and references (`const T*`, `T&`, ...) are raw
+    // pointers in Rust.
+    safe constructor(i32, i32) as from_xy;
+    safe constructor(&const c++::MyCppWrapper) as copy;
+    unsafe constructor(const c++::MyCppWrapper*, i32) as shifted;
 
     // Accessors for C++ fields, which return a reference to the field (`&Cpp<i32, Const>`,
     // `&mut Cpp<i32>`).
@@ -40,7 +42,7 @@ type c++::MyConservativeWrapper {
     #layout_conservative(size = 32, align = 16);
 
     safe fn total_with(&const self, c++::MyConservativeWrapper) -> i64;
-    safe constructor(i64, i32);
+    safe constructor(i64, i32) as from_values;
 }
 
 // Free C++ functions, in their C++ namespace. Rust calls them directly, as
@@ -58,7 +60,7 @@ type c++::Pair<i32> {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
 
-    safe constructor(i32, i32);
+    safe constructor(i32, i32) as new;
     safe fn sum(&const self) -> i32;
     field &unique var first (type = i32) as first_mut;
 }
@@ -67,7 +69,7 @@ type c++::Pair<f64> {
     #layout(size = 16, align = 8);
     #trivially_relocatable;
 
-    safe constructor(f64, f64);
+    safe constructor(f64, f64) as new;
     safe fn sum(&const self) -> f64;
 }
 
@@ -88,7 +90,7 @@ type c++::Node {
     #layout(size = 16, align = 8);
     #trivially_relocatable;
 
-    safe constructor(i32);
+    safe constructor(i32) as new;
     field &const id (type = i32);
     field &unique var type (type = i32) as type_mut;
     field &const next (type = c++::Node*);
