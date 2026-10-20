@@ -3,6 +3,7 @@ use zngur::Zngur;
 fn main() {
     build::rerun_if_changed("main.zng");
     build::rerun_if_changed("counter.h");
+    build::rerun_if_changed("impls.cpp");
     build::rerun_if_changed("src/");
 
     let crate_dir = build::cargo_manifest_dir();
@@ -20,5 +21,6 @@ fn main() {
         .std("c++17")
         .include(".")
         .file("generated.cpp")
+        .file("impls.cpp")
         .compile("zngur_generated");
 }

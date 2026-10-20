@@ -47,4 +47,15 @@ inline void double_step(Counter &c) { c.step *= 2; }
 
 inline int32_t peek(const Counter &c) { return c.count; }
 
+// Pointers that may be null, which Rust sees as nullable references (`Option<&'a ...>`).
+inline int32_t count_or(const Counter *c, int32_t fallback) {
+  return c != nullptr ? c->count : fallback;
+}
+
+inline Counter *next_of(Counter &c) { return c.next; }
+
+// Calls a Rust function with a nullable reference (defined in impls.cpp, which needs the generated
+// header).
+int32_t bump_in_rust(Counter *c);
+
 } // namespace objects

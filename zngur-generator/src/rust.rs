@@ -103,17 +103,25 @@ impl IntoCpp for RustType {
                 generic_args: vec![t.into_cpp(namespace, crate_name)],
                 tail: None,
             },
-            // References to C++ objects (in Rust-facing items) are C++ references to the wrappers,
-            // `const` or not.
+            // References to C++ objects (in Rust-facing items) are C++ references: `const T&` or
+            // `T&` (`CppRef<W>` from zngur.h), and so are the receivers (`&self`) of `extern
+            // "C++"` impls of C++ types.
+            RustType::Ref(_, _, t)
+                if t.as_cpp_object().is_some() || matches!(**t, RustType::Cpp(_)) =>
+            {
+                CppType {
+                    path: CppPath::from(&*format!("{namespace}::CppRef")),
+                    generic_args: vec![t.into_cpp(namespace, crate_name)],
+                    tail: None,
+                }
+            }
+            // References to Rust values are `rust::Ref<T>` / `rust::RefMut<T>`.
             RustType::Ref(m, _, t) => CppType {
                 path: match m {
                     Mutability::Mut => CppPath::from(&*format!("{}::RefMut", namespace)),
                     Mutability::Not => CppPath::from(&*format!("{}::Ref", namespace)),
                 },
-                generic_args: vec![match t.as_cpp_object() {
-                    Some((_, t)) => t.into_cpp(namespace, crate_name),
-                    None => t.into_cpp(namespace, crate_name),
-                }],
+                generic_args: vec![t.into_cpp(namespace, crate_name)],
                 tail: None,
             },
             RustType::Slice(s) => CppType {
@@ -129,7 +137,15 @@ impl IntoCpp for RustType {
                 generic_args: vec![t.into_cpp(namespace, crate_name)],
                 tail: None,
             },
-            RustType::Adt(pg) => pg.into_cpp(namespace, crate_name),
+            RustType::Adt(pg) => match self.as_nullable_cpp_ref() {
+                // A nullable reference to a C++ object is a C++ pointer: `const T*` or `T*`.
+                Some((_, _, pointee)) => CppType {
+                    path: CppPath::from(&*format!("{namespace}::CppPtr")),
+                    generic_args: vec![pointee.into_cpp(namespace, crate_name)],
+                    tail: None,
+                },
+                None => pg.into_cpp(namespace, crate_name),
+            },
             // The C++ wrappers of `c++::` types are in `rust::cpp`, apart from those of Rust types
             // (`rust::crate`, `rust::std`, ...): `c++::a::B` is `rust::cpp::a::B`.
             RustType::Cpp(path) => RustPathAndGenerics {

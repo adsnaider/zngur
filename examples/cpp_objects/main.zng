@@ -49,4 +49,17 @@ mod c++::objects {
     safe fn reset<'a>(&'a var c++::objects::Counter);
     safe fn double_step<'a>(&'a unique var c++::objects::Counter);
     safe fn peek<'a>(&'a unique const c++::objects::Counter) -> i32;
+
+    // Nullable references: a C++ pointer that may be null is an `Option<&'a ...>` in Rust, with
+    // the same rules as references (`Option<&'a const T>` is a `const T*`, and takes non-`const`
+    // objects too).
+    safe fn count_or<'a>(::std::option::Option<&'a const c++::objects::Counter>, i32) -> i32;
+    safe fn next_of<'a>(&'a var c++::objects::Counter) -> ::std::option::Option<&'a var c++::objects::Counter>;
+    safe fn bump_in_rust<'a>(::std::option::Option<&'a var c++::objects::Counter>) -> i32;
+}
+
+// A Rust function that C++ calls (from `bump_in_rust`), with a nullable reference to a C++ object,
+// which C++ passes as a `Counter*`.
+mod crate {
+    fn bump_chain(::std::option::Option<&var c++::objects::Counter>) -> i32;
 }

@@ -36,11 +36,11 @@ type c++::osmium::Way {
 }
 ```
 
-This enables creating `rust::Ref<rust::cpp::osmium::Way>` from a `const osmium::Way&` in C++ and you can
-pass it to the Rust side. Rust side can't do anything meaningful with it, except passing it again to
-the C++ side or calling its [member functions](./cpp_methods.md). In the C++ side
-`rust::Ref<rust::cpp::osmium::Way>` has a `.cpp()` method which will return the `osmium::Way&` back to
-you. You can also write `impl` and `impl trait` blocks for the Rust type `Way` inside C++. See the
+Rust refers to it through references (`&'a var c++::osmium::Way`, `&'a const c++::osmium::Way`), which
+C++ passes and gets as plain C++ references (`osmium::Way&`, `const osmium::Way&`; see
+[C++ references and pointers](./cpp_pointers.md#in-c)). Rust side can't do anything meaningful with
+it, except passing it again to the C++ side or calling its [member functions](./cpp_methods.md).
+You can also write `impl` and `impl trait` blocks for the Rust type `Way` inside C++. See the
 [`examples/osmium`](https://github.com/HKalbasi/zngur/blob/main/examples/osmium) for a full working
 example.
 

@@ -5,21 +5,21 @@
 using rust::cpp::cpp_stats::StatsAccumulator;
 using rust::packet::Packet;
 
-// We need to implement the methods declared in aggregation.zng
+// We need to implement the methods declared in aggregation.zng. Their receivers are C++
+// references to the C++ object.
 rust::cpp::std::unique_ptr<StatsAccumulator> rust::Impl<StatsAccumulator>::create() {
   return rust::cpp::std::unique_ptr<StatsAccumulator>::build(
       new ::cpp_stats::StatsAccumulator());
 }
 
 rust::Unit
-rust::Impl<StatsAccumulator>::add_packet(rust::RefMut<StatsAccumulator> self,
-                                         Packet p) {
-  self.cpp().add_packet(p);
+rust::Impl<StatsAccumulator>::add_packet(::cpp_stats::StatsAccumulator &self, Packet p) {
+  self.add_packet(p);
   return {};
 }
 
 rust::Unit
-rust::Impl<StatsAccumulator>::print_report(rust::Ref<StatsAccumulator> self) {
-  self.cpp().print_report();
+rust::Impl<StatsAccumulator>::print_report(::cpp_stats::StatsAccumulator &self) {
+  self.print_report();
   return {};
 }

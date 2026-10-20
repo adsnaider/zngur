@@ -14,7 +14,9 @@ import "packet.zng";
 type<T> c++::std::unique_ptr<T> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
-    safe fn get(&const self) -> T*;
+    // The owned object, if any, borrowed from the `unique_ptr` (a C++ pointer, null if it's empty).
+    safe fn get<'a>(&'a const self) -> ::std::option::Option<&'a var T>;
+    safe fn get<'a>(&'a unique var self) -> ::std::option::Option<&'a unique var T> as get_mut;
 }
 
 // Rust only refers to the C++ object, which is owned through a `std::unique_ptr`.

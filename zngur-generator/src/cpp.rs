@@ -54,8 +54,9 @@ impl CppPath {
         // Top level namespace and type...
         if self.0.len() == 2 {
             let ty = &self.0[1];
-            // `CppConst` and `CppPtr` are declared in zngur.h.
-            return !["Unit", "Ref", "RefMut", "CppConst", "CppPtr"].contains(&ty.as_str());
+            // `CppConst`, `CppPtr` and `CppRef` are declared in zngur.h.
+            return !["Unit", "Ref", "RefMut", "CppConst", "CppPtr", "CppRef"]
+                .contains(&ty.as_str());
         }
         true
     }
@@ -102,6 +103,18 @@ pub struct CppType {
 }
 
 impl CppType {
+    /// For a C++ reference (`CppRef<W>`, a `T&` or `const T&`), the pointer that it crosses to
+    /// Rust as (`CppPtr<W>`).
+    pub(crate) fn native_ref_as_ptr(&self) -> Option<CppType> {
+        match self.path.0.as_slice() {
+            [_, name] if name == "CppRef" && self.tail.is_none() => Some(CppType {
+                path: CppPath(vec![self.path.0[0].clone(), "CppPtr".to_owned()]),
+                ..self.clone()
+            }),
+            _ => None,
+        }
+    }
+
     pub fn with_tail(self, tail: String) -> Self {
         Self {
             tail: Some(tail),

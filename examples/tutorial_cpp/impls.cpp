@@ -24,13 +24,15 @@ InventoryPtr Impl<Inventory>::new_empty(uint32_t space) {
   return InventoryPtr::build(new ::cpp_inventory::Inventory(space));
 }
 
-Unit Impl<Inventory>::add_banana(RefMut<Inventory> self, uint32_t count) {
-  self.cpp().add_banana(count);
+// The receivers are C++ references to the C++ objects (`CppRef<Inventory>` is a
+// `::cpp_inventory::Inventory&`).
+Unit Impl<Inventory>::add_banana(::cpp_inventory::Inventory &self, uint32_t count) {
+  self.add_banana(count);
   return {};
 }
 
-Unit Impl<Inventory>::add_item(RefMut<Inventory> self, ItemPtr item) {
-  self.cpp().add_item(::std::move(*item.cpp()));
+Unit Impl<Inventory>::add_item(::cpp_inventory::Inventory &self, ItemPtr item) {
+  self.add_item(::std::move(*item.cpp()));
   return {};
 }
 
@@ -41,12 +43,12 @@ ItemPtr Impl<Item>::new_(Ref<Str> name, uint32_t size) {
       .size = size});
 }
 
-Result Impl<Inventory, Debug>::fmt(Ref<Inventory> self, RefMut<Formatter> f) {
+Result Impl<Inventory, Debug>::fmt(::cpp_inventory::Inventory &self, RefMut<Formatter> f) {
   ::std::string result = "Inventory { remaining_space: ";
-  result += ::std::to_string(self.cpp().remaining_space);
+  result += ::std::to_string(self.remaining_space);
   result += ", items: [";
   bool is_first = true;
-  for (const auto &item : self.cpp().items) {
+  for (const auto &item : self.items) {
     if (!is_first) {
       result += ", ";
     } else {

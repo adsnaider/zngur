@@ -1215,6 +1215,18 @@ impl ProcessedItem<'_> {
                 };
                 let rust_ty = ty.inner.to_zngur(scope);
                 check_types(ctx, ty.span, &type_lifetimes, [&rust_ty], []);
+                // It's a C++ pointer in C++, which isn't a type to declare.
+                if let Some((_, _, pointee)) = rust_ty.as_nullable_cpp_ref() {
+                    ctx.add_error_str(
+                        &format!(
+                            "a nullable reference to a C++ object (`Option<&'a const T>`, \
+                             `Option<&'a var T>`, ...) is a C++ pointer in C++ (here to `{}`), not \
+                             a type to declare: use it in signatures directly",
+                            zng_spelling(pointee)
+                        ),
+                        ty.span,
+                    );
+                }
                 while let Some(item) = to_process.pop() {
                     let item_span = item.span;
                     let item = item.inner;

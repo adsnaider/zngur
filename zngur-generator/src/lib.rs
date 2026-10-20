@@ -1557,6 +1557,112 @@ mod tests {
     }
 
     #[test]
+    fn references_to_cpp_objects_are_cpp_references_and_options_are_pointers() {
+        let b = cpp(&["a", "B"]);
+        let a = Some(Lifetime("a".to_owned()));
+        let r = |m, constness, l: &Option<Lifetime>| {
+            RustType::Ref(
+                m,
+                l.clone(),
+                Box::new(RustType::cpp_object(constness, b.clone())),
+            )
+        };
+        let option = |t: RustType| {
+            RustType::Adt(RustPathAndGenerics {
+                path: vec!["std".to_owned(), "option".to_owned(), "Option".to_owned()],
+                generics: vec![t],
+                ..Default::default()
+            })
+        };
+        let spec = ZngurSpec {
+            types: vec![minimal_ref_type(b.clone())],
+            // C++ functions that Rust calls.
+            cpp_funcs: vec![ZngurCppFn {
+                lifetimes: vec![Lifetime("a".to_owned())],
+                namespace: vec!["a".to_owned()],
+                cpp_name: "f".to_owned(),
+                template_args: vec![],
+                rust_name: None,
+                inputs: vec![option(r(Mutability::Not, CppConstness::Const, &a))],
+                output: option(r(Mutability::Not, CppConstness::Var, &a)),
+                is_safe: true,
+            }],
+            // Functions that Rust calls and C++ implements.
+            extern_cpp_funcs: vec![ZngurExternCppFn {
+                name: "g".to_owned(),
+                lifetimes: vec![Lifetime("a".to_owned())],
+                inputs: vec![
+                    r(Mutability::Not, CppConstness::Var, &a),
+                    option(r(Mutability::Not, CppConstness::Const, &a)),
+                ],
+                output: r(Mutability::Not, CppConstness::Const, &a),
+                is_safe: true,
+            }],
+            // Rust functions that C++ calls.
+            funcs: vec![ZngurFn {
+                path: RustPathAndGenerics {
+                    path: vec!["crate".to_owned(), "h".to_owned()],
+                    ..Default::default()
+                },
+                lifetimes: vec![],
+                inputs: vec![
+                    option(r(Mutability::Mut, CppConstness::Var, &None)),
+                    r(Mutability::Mut, CppConstness::Var, &None),
+                ],
+                output: r(Mutability::Not, CppConstness::Const, &None),
+            }],
+            ..Default::default()
+        };
+        let (rust_code, h, cpp_code) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let cpp_code = cpp_code.expect("C++ functions need a C++ file");
+        let b = "::rust::cpp::a::B";
+        let const_b = format!("::rust::CppConst< {b} >");
+
+        // C++ functions: Rust sees `Option<&'a ...>` (with the implicit-`const` generic), and the
+        // C++ function takes and returns pointers.
+        assert!(rust_code.contains(
+            "pub fn __zngur_cpp_fn__a__f<'a, __C1: ::zngur_lib::Constness>(i0: \
+             ::std::option::Option<&'a a::B::<__C1>>, ) -> ::std::option::Option::<&'a a::B>"
+        ));
+        assert!(
+            cpp_code.contains(&format!(
+                "::rust::CppPtr< {b} > __zngur_o = ::a::f(::rust::__zngur_internal_move_from_rust< \
+                 ::rust::CppPtr< {const_b} > >(i0));"
+            )),
+            "{cpp_code}"
+        );
+        assert!(cpp_code.contains(&format!("), ::rust::CppPtr< {b} > >::value")));
+
+        // `extern "C++"` functions: the C++ definition takes and returns C++ references and
+        // pointers.
+        assert!(rust_code.contains(
+            "pub fn g<'a, __C1: ::zngur_lib::Constness>(i0: &'a a::B, i1: \
+             ::std::option::Option<&'a a::B::<__C1>>, ) -> &'a a::B::<::zngur_lib::Const>"
+        ));
+        assert!(
+            h.contains(&format!(
+                "::rust::CppRef< {const_b} > g(\n    ::rust::CppRef< {b} >, ::rust::CppPtr< {const_b} >"
+            )),
+            "{h}"
+        );
+        assert!(cpp_code.contains(&format!(
+            "::rust::__zngur_internal_move_to_rust< ::rust::CppRef< {const_b} > >(o, oo);"
+        )));
+
+        // Rust functions called from C++: C++ passes and gets back C++ references and pointers,
+        // and references cross as pointers.
+        assert!(
+            h.contains(&format!(
+                "inline ::rust::CppRef< {const_b} > h(::rust::CppPtr< {b} > i0, ::rust::CppRef< {b} \
+                 > i1) noexcept {{"
+            )),
+            "{h}"
+        );
+        assert!(h.contains(&format!("::rust::CppPtr< {b} > __zngur_i1 = &i1;")));
+        assert!(h.contains("return *o;"));
+    }
+    #[test]
     fn cpp_functions_move_imported_by_value_types_like_local_ones() {
         let point = cpp(&["geo", "Point"]);
         let spec = ZngurSpec {

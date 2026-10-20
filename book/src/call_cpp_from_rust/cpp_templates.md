@@ -8,7 +8,7 @@ type c++::std::unique_ptr<c++::geo::Point> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
 
-    safe fn get(&const self) -> c++::geo::Point*;
+    safe fn get<'a>(&'a const self) -> ::std::option::Option<&'a var c++::geo::Point>;
 }
 
 type c++::std::map<i32, const c++::geo::Point*> {
@@ -28,7 +28,7 @@ Rust code names instantiations the way C++ code does:
 
 ```rust
 let p: generated::std::unique_ptr<generated::geo::Point> = make_point();
-let raw: *mut generated::geo::Point = p.get();
+let point: Option<&generated::geo::Point> = p.get();
 ```
 
 `generated::std::unique_ptr<T>` is an alias, and each instantiation is its own Rust struct, with
@@ -55,7 +55,7 @@ type<T> c++::std::unique_ptr<T> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
 
-    safe fn get(&const self) -> T*;
+    safe fn get<'a>(&'a const self) -> ::std::option::Option<&'a var T>;
 }
 
 // Both get the layout, `#trivially_relocatable` and `get()`.
@@ -82,7 +82,7 @@ home.
 type<T> c++::std::unique_ptr<T> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
-    safe fn get(&const self) -> T*;
+    safe fn get<'a>(&'a const self) -> ::std::option::Option<&'a var T>;
 }
 ```
 

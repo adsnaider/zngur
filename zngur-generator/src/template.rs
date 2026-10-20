@@ -88,6 +88,65 @@ impl<'a> CppHeaderTemplate<'a> {
             "".to_owned()
         }
     }
+    /// The body of a C++ function that calls the Rust function `link_name` with its parameters
+    /// `i0`, `i1`, ... (of the C++ types `inputs`) and returns the result (an `out`). C++
+    /// references (`CppRef<W>`) cross as pointers, so they're passed through a local pointer, and
+    /// a returned one comes back as a pointer.
+    fn call_rust_body(
+        &self,
+        link_name: &str,
+        inputs: &[crate::cpp::CppType],
+        out: &crate::cpp::CppType,
+    ) -> String {
+        let namespace = self.namespace;
+        let mut prologue = String::new();
+        let mut args = String::new();
+        for (n, ty) in inputs.iter().enumerate() {
+            match ty.native_ref_as_ptr() {
+                Some(ptr) => {
+                    prologue.push_str(&format!("{ptr} __zngur_i{n} = &i{n}; "));
+                    args.push_str(&format!(
+                        "::{namespace}::__zngur_internal_data_ptr(__zngur_i{n}), "
+                    ));
+                }
+                None => {
+                    prologue.push_str(&format!(
+                        "::{namespace}::__zngur_internal_assume_deinit(i{n}); "
+                    ));
+                    args.push_str(&format!("::{namespace}::__zngur_internal_data_ptr(i{n}), "));
+                }
+            }
+        }
+        let (storage, ret) = match out.native_ref_as_ptr() {
+            Some(ptr) => (ptr.to_string(), "return *o;".to_owned()),
+            None => (
+                out.to_string(),
+                format!("::{namespace}::__zngur_internal_assume_init(o);\n      return o;"),
+            ),
+        };
+        format!(
+            r#"{storage} o{{}};
+      {prologue}
+      {link_name} (
+        {args}
+        ::{namespace}::__zngur_internal_data_ptr(o)
+      );
+      {panic_handler}
+      {ret}"#,
+            panic_handler = self.panic_handler()
+        )
+    }
+
+    /// How a wrapper forwards its parameter `i{n}` (of the C++ type `ty`): moved, unless it's a
+    /// C++ reference.
+    fn forward_arg(ty: &crate::cpp::CppType, n: usize) -> String {
+        if ty.native_ref_as_ptr().is_some() {
+            format!(", i{n}")
+        } else {
+            format!(", ::std::move(i{n})")
+        }
+    }
+
     pub fn render_type_methods(&self, td: &crate::cpp::CppTypeDefinition) -> String {
         use itertools::Itertools;
         use zngur_def::{Mutability, ZngurMethodReceiver};
@@ -116,46 +175,13 @@ impl<'a> CppHeaderTemplate<'a> {
                 .map(|(n, ty)| format!("{ty} i{n}"))
                 .join(", ");
 
-            let mut assume_deinit_str = String::new();
-            for n in 0..inputs.len() {
-                assume_deinit_str.push_str(&format!(
-                    "::{}::__zngur_internal_assume_deinit(i{n}); ",
-                    self.namespace
-                ));
-            }
-
-            let mut rust_args = String::new();
-            if !inputs.is_empty() {
-                rust_args = inputs
-                    .iter()
-                    .enumerate()
-                    .map(|(n, _)| format!("::{}::__zngur_internal_data_ptr(i{n})", self.namespace))
-                    .join(", ")
-                    + ", ";
-            }
-
+            let body = self.call_rust_body(&method.sig.rust_link_name, inputs, out);
             s.push_str(&format!(
                 r#"
     inline {out} {fn_name} ({splat_inputs}) noexcept {{
-      {out} o{{}};
-      {assume_deinit_str}
-      {rust_link_name} (
-        {rust_args}
-        ::{namespace}::__zngur_internal_data_ptr(o)
-      );
-      {panic_handler}
-      ::{namespace}::__zngur_internal_assume_init(o);
-      return o;
+      {body}
     }}
 "#,
-                out = out,
-                fn_name = fn_name,
-                splat_inputs = splat_inputs,
-                assume_deinit_str = assume_deinit_str,
-                rust_link_name = method.sig.rust_link_name,
-                rust_args = rust_args,
-                namespace = self.namespace,
-                panic_handler = self.panic_handler()
             ));
 
             if let ZngurMethodReceiver::Ref(m) = method.kind {
@@ -168,8 +194,11 @@ impl<'a> CppHeaderTemplate<'a> {
                     Mutability::Not => &["FieldOwned", "FieldRefMut", "FieldRef"],
                 };
 
-                let move_args = (0..(inputs.len().saturating_sub(1)))
-                    .map(|n| format!(", ::std::move(i{n})"))
+                let move_args = inputs
+                    .iter()
+                    .skip(1)
+                    .enumerate()
+                    .map(|(n, ty)| Self::forward_arg(ty, n))
                     .join("");
 
                 for field_kind in field_kinds {
@@ -234,8 +263,11 @@ impl<'a> CppHeaderTemplate<'a> {
                 } else {
                     ""
                 };
-                let move_args = (0..(inputs.len().saturating_sub(1)))
-                    .map(|n| format!(", ::std::move(i{n})"))
+                let move_args = inputs
+                    .iter()
+                    .skip(1)
+                    .enumerate()
+                    .map(|(n, ty)| Self::forward_arg(ty, n))
                     .join("");
 
                 s.push_str(&format!(
@@ -407,50 +439,15 @@ impl<'a> CppHeaderTemplate<'a> {
                 .map(|(n, ty)| format!("{ty} i{n}"))
                 .join(", ");
 
-            let mut assume_deinit_str = String::new();
-            for n in 0..inputs.len() {
-                assume_deinit_str.push_str(&format!(
-                    "::{}::__zngur_internal_assume_deinit(i{n}); ",
-                    self.namespace
-                ));
-            }
-
-            let mut rust_args = String::new();
-            if !inputs.is_empty() {
-                rust_args = inputs
-                    .iter()
-                    .enumerate()
-                    .map(|(n, _)| format!("::{}::__zngur_internal_data_ptr(i{n})", self.namespace))
-                    .join(", ")
-                    + ", ";
-            }
-
+            let body = self.call_rust_body(&fd.sig.rust_link_name, inputs, out);
             s.push_str(&format!(
                 r#"
 {open_ns}
     inline {out} {name}({splat_inputs}) noexcept {{
-      {out} o{{}};
-      {assume_deinit_str}
-      {rust_link_name} (
-        {rust_args}
-        ::{namespace}::__zngur_internal_data_ptr(o)
-      );
-      {panic_handler}
-      ::{namespace}::__zngur_internal_assume_init(o);
-      return o;
+      {body}
     }}
 {close_ns}
 "#,
-                open_ns = open_ns,
-                out = out,
-                name = name,
-                splat_inputs = splat_inputs,
-                assume_deinit_str = assume_deinit_str,
-                rust_link_name = fd.sig.rust_link_name,
-                rust_args = rust_args,
-                namespace = self.namespace,
-                panic_handler = self.panic_handler(),
-                close_ns = close_ns
             ));
         }
         s

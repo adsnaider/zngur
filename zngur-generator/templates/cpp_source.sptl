@@ -16,7 +16,7 @@ extern "C" {
         {{ method.output }} oo = data_typed->{{ method.name }}(
           {{ method.render_inputs(self.cpp_namespace) }}
         );
-        ::{{ self.cpp_namespace }}::__zngur_internal_move_to_rust(o, oo);
+        ::{{ self.cpp_namespace }}::__zngur_internal_move_to_rust< {{ method.output }} >(o, oo);
       }
     {% endfor %}
   {% endif %}
@@ -29,7 +29,7 @@ extern "C" {
     {{ func.sig.output }} oo = ::{{ self.cpp_namespace }}::exported_functions::{{ func.name }}(
       {{ func.sig.render_inputs(self.cpp_namespace) }}
     );
-    ::{{ self.cpp_namespace }}::__zngur_internal_move_to_rust(o, oo);
+    ::{{ self.cpp_namespace }}::__zngur_internal_move_to_rust< {{ func.sig.output }} >(o, oo);
   }
 {% endfor %}
 
@@ -41,7 +41,7 @@ extern "C" {
       {{ sig.output }} oo = ::{{ self.cpp_namespace }}::Impl< {{ imp.ty }}, {{ imp.render_tr(self.cpp_namespace) }} >::{{ name }}(
         {{ sig.render_inputs(self.cpp_namespace) }}
       );
-      ::{{ self.cpp_namespace }}::__zngur_internal_move_to_rust(o, oo);
+      ::{{ self.cpp_namespace }}::__zngur_internal_move_to_rust< {{ sig.output }} >(o, oo);
     }
   {% endfor %}
 {% endfor %}

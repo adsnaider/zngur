@@ -18,8 +18,7 @@ impl Processor {
         stats: &mut aggregation::StatsAccumulator,
         config: &unique_ptr<RunConfig, Const>,
     ) {
-        // SAFETY: `config` owns a valid `RunConfig`, which outlives this call.
-        let config = unsafe { config.get().as_ref() }.expect("null");
+        let config = config.get().expect("no run config");
         let packets = config.packets().get();
         for _ in 0..packets {
             let packet = receiver.next_packet();

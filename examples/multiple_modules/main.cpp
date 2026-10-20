@@ -20,8 +20,9 @@ int main() {
 
   std::cout << "Starting LatencyAnalysis simulation..." << std::endl;
 
-  // `stats` is a `std::unique_ptr`; Rust takes a reference to the object it owns.
-  processor.unwrap().run(receiver.unwrap(), *stats.cpp(), config);
+  // `stats` is a `std::unique_ptr`; Rust takes a C++ reference to the object it owns, and to the
+  // `std::unique_ptr<RunConfig>` (the C++ object in `config`).
+  processor.unwrap().run(receiver.unwrap(), *stats.cpp(), config.cpp());
 
   rust::Impl<rust::cpp::cpp_stats::StatsAccumulator, rust::Inherent>::print_report(
       *stats.cpp());

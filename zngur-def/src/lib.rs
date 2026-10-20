@@ -732,11 +732,40 @@ impl RustType {
         }
     }
 
+    /// For a nullable reference to a C++ object (`::std::option::Option<&'a const T>`,
+    /// `::core::option::Option<&'a unique var T>`, ...), the reference: whether it's `unique`
+    /// (`Mut`), its lifetime and what it refers to (a [`RustType::CppConst`] or a
+    /// [`RustType::CppVar`]). It's a `const T*` or a `T*` in C++.
+    pub fn as_nullable_cpp_ref(&self) -> Option<(Mutability, Option<&Lifetime>, &RustType)> {
+        let RustType::Adt(pg) = self else {
+            return None;
+        };
+        let is_option = matches!(
+            pg.path
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .as_slice(),
+            ["std" | "core", "option", "Option"]
+        );
+        match pg.generics.as_slice() {
+            [RustType::Ref(m, lifetime, pointee)]
+                if is_option
+                    && pg.named_generics.is_empty()
+                    && pointee.as_cpp_object().is_some() =>
+            {
+                Some((*m, lifetime.as_ref(), pointee))
+            }
+            _ => None,
+        }
+    }
+
     /// How `self` crosses to C++ in a C++ function's signature: references are C++ references,
     /// which cross as pointers like the raw C++-style ones. A reference to a C++ object keeps its
     /// constness (`&'a const T` and `&'a unique const T` are `const T&`, `&'a var T` and
     /// `&'a unique var T` are `T&`), and a reference to a Rust value is a `const T&` if it's
-    /// shared (`&'a i32` is `const int32_t&`) and a `T&` otherwise.
+    /// shared (`&'a i32` is `const int32_t&`) and a `T&` otherwise. A nullable reference to a C++
+    /// object (`Option<&'a const T>`) is a C++ pointer (`const T*`).
     pub fn cpp_bridge_type(&self) -> RustType {
         match self {
             RustType::Ref(_, _, inner) if inner.as_cpp_object().is_some() => {
@@ -745,7 +774,13 @@ impl RustType {
             RustType::Ref(m, _, inner) => {
                 RustType::cpp_ptr(*m, CppIndirection::Reference, (**inner).clone())
             }
-            ty => ty.clone(),
+            // A nullable reference to a C++ object is a C++ pointer.
+            ty => match ty.as_nullable_cpp_ref() {
+                Some((_, _, pointee)) => {
+                    RustType::CppPtr(CppIndirection::Pointer, Box::new(pointee.clone()))
+                }
+                None => ty.clone(),
+            },
         }
     }
 
@@ -1128,6 +1163,11 @@ impl RustType {
                 };
                 Some(format!("*const {}", Generic(inner, constness)))
             }
+            // `Option<&'a const T>` is `Option<&'a T<C1>>`.
+            RustType::Adt(pg) if self.as_nullable_cpp_ref().is_some() => {
+                let reference = pg.generics[0].generic_const_input(constness)?;
+                Some(format!("::{}<{reference}>", pg.path.join("::")))
+            }
             _ => None,
         }
     }
@@ -1210,6 +1250,54 @@ mod tests {
             cpp_fn_inputs(&[], &[i32]),
             (String::new(), vec!["i32".to_owned()])
         );
+    }
+
+    #[test]
+    fn test_nullable_cpp_refs() {
+        let a_b = RustType::Cpp(vec!["a".to_owned(), "B".to_owned()].into());
+        let lt = Some(Lifetime("a".to_owned()));
+        let option = |root: &str, constness| {
+            RustType::Adt(RustPathAndGenerics {
+                path: vec![root.to_owned(), "option".to_owned(), "Option".to_owned()],
+                generics: vec![RustType::Ref(
+                    Mutability::Not,
+                    lt.clone(),
+                    Box::new(RustType::cpp_object(constness, a_b.clone())),
+                )],
+                ..Default::default()
+            })
+        };
+        let const_b = option("std", CppConstness::Const);
+        assert!(const_b.as_nullable_cpp_ref().is_some());
+        assert!(
+            option("core", CppConstness::Var)
+                .as_nullable_cpp_ref()
+                .is_some()
+        );
+        // A C++ pointer in C++ functions' signatures.
+        assert_eq!(
+            const_b.cpp_bridge_type(),
+            RustType::cpp_ptr(Mutability::Not, CppIndirection::Pointer, a_b.clone())
+        );
+        assert_eq!(
+            const_b.generic_const_input("__C1").as_deref(),
+            Some("::std::option::Option<&'a a::B::<__C1>>")
+        );
+        assert_eq!(
+            option("std", CppConstness::Var).generic_const_input("__C1"),
+            None
+        );
+        // `Option<&i32>` is a Rust value.
+        let rust_ref = RustType::Adt(RustPathAndGenerics {
+            path: vec!["std".to_owned(), "option".to_owned(), "Option".to_owned()],
+            generics: vec![RustType::Ref(
+                Mutability::Not,
+                None,
+                Box::new(RustType::Primitive(PrimitiveRustType::Int(32))),
+            )],
+            ..Default::default()
+        });
+        assert!(rust_ref.as_nullable_cpp_ref().is_none());
     }
 
     #[test]

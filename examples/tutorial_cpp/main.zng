@@ -33,7 +33,10 @@ type c++::std::unique_ptr<c++::cpp_inventory::Inventory> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
 
-    unsafe fn get(&const self) -> c++::cpp_inventory::Inventory*;
+    // `get()` returns a C++ pointer, which is null if the `unique_ptr` is empty: a nullable
+    // reference (`Option<&Inventory>`), which lives as long as the borrow of the `unique_ptr`.
+    safe fn get<'a>(&'a const self) -> ::std::option::Option<&'a var c++::cpp_inventory::Inventory>;
+    safe fn get<'a>(&'a unique var self) -> ::std::option::Option<&'a unique var c++::cpp_inventory::Inventory> as get_mut;
 }
 
 type c++::std::unique_ptr<c++::cpp_inventory::Item> {

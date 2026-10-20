@@ -10,18 +10,18 @@ fn main() {
     let mut c = MyCppWrapper::new(5, 6);
     c.print();
 
-    // C++ functions taking and returning C++-style pointers and references, which are raw
-    // pointers in Rust: `*const MyCppWrapper<Const>` for `const T&` / `const T*`, `*mut T` for
-    // `T&` / `T*`, and `*mut Cpp<i32>` for `int32_t*`. Rust references coerce to them, and
-    // `Cpp::from_mut` makes a Rust `i32` a C++ object.
+    // C++ functions taking and returning references to C++ objects, which are safe: Rust
+    // references in Rust (`Cpp::from_mut` makes a Rust `i32` a C++ object), C++ references in C++.
     let mut sum = 0;
-    unsafe { generated::sum_into(&c, Cpp::from_mut(&mut sum)) };
+    generated::sum_into(&c, Cpp::from_mut(&mut sum));
     println!("sum = {sum}");
+    // A C++-style pointer, which is a raw pointer in Rust (`*mut T`): Rust references coerce to it,
+    // but calling the function is `unsafe`.
     unsafe { generated::swap_xy(&mut c) };
     c.print();
     let d = MyCppWrapper::new(1, 2);
-    let larger = unsafe { generated::larger_x(&c, &d) };
-    assert_eq!(larger, c.as_const() as *const _);
+    let larger: &MyCppWrapper<Const> = generated::larger_x(&c, &d);
+    assert!(std::ptr::eq(larger, c.as_const()));
 
     // C++ member functions, which are methods: `&self` for `const` member functions and
     // `&mut self` for the others. A C++ `const T&` is a `&T<Const>`, and a `const int32_t&` a
@@ -73,10 +73,14 @@ fn main() {
     let doubles = generated::Pair::<f64>::new(1.5, 2.25).build();
     ints.first_mut().set(30);
     println!("pairs = {} {}", ints.sum(), doubles.sum());
-    let boxed: generated::std::unique_ptr<generated::Pair<i32>> = generated::pairs::boxed(5, 6);
-    // `get()` returns a C++ pointer, which may be null: dereferencing it is `unsafe`.
-    let pair = unsafe { boxed.get().as_ref() }.expect("null");
+    let mut boxed: generated::std::unique_ptr<generated::Pair<i32>> = generated::pairs::boxed(5, 6);
+    // `get()` returns the owned object, or `None` if the `unique_ptr` is empty (a null C++
+    // pointer), borrowed from the `unique_ptr`.
+    let pair = boxed.get().expect("empty std::unique_ptr");
     println!("boxed = {}", pair.sum());
+    if let Some(pair) = boxed.get_mut() {
+        pair.first_mut().set(50);
+    }
 
     // Fields of pointer type.
     let mut first = generated::Node::new(1).build();

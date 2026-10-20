@@ -1,18 +1,23 @@
 # C++ references and pointers
 
 C++ functions often take or return references and pointers. In a `.zng` file, C++ references
-whose lifetime you know are written as references to C++ objects, and the others the C++ way,
-which makes them raw pointers in Rust:
+whose lifetime you know are written as references to C++ objects, C++ pointers whose lifetime you
+know (and which may be null) as `Option`s of them, and the others the C++ way, which makes them raw
+pointers in Rust:
 
-| `.zng`                    | C++                           | Rust                                           |
-| ------------------------- | ----------------------------- | ---------------------------------------------- |
-| `&'a const T`             | `const T&`                    | `&'a T<Const>` (`&'a Cpp<i32, Const>`)         |
-| `&'a var T`               | `T&`, shared                  | `&'a T` (`&'a Cpp<i32>`)                       |
-| `&'a unique var T`        | `T&`, unique                  | `&'a mut T` (`&'a mut Cpp<i32>`)               |
-| `&'a unique const T`      | `const T&`, unique            | `&'a mut T<Const>` (`&'a mut Cpp<i32, Const>`) |
-| `const T&` / `const T*`   | `const T&` / `const T*`       | `*const T<Const>` (`*const Cpp<i32, Const>`)   |
-| `T&` / `T*`               | `T&` / `T*`                   | `*mut T` (`*mut Cpp<i32>`)                     |
-| `&'a i32` / `&'a mut i32` | `const int32_t&` / `int32_t&` | `&'a i32` / `&'a mut i32`                      |
+| `.zng`                       | C++                           | Rust                                           |
+| ---------------------------- | ----------------------------- | ---------------------------------------------- |
+| `&'a const T`                | `const T&`                    | `&'a T<Const>` (`&'a Cpp<i32, Const>`)         |
+| `&'a var T`                  | `T&`, shared                  | `&'a T` (`&'a Cpp<i32>`)                       |
+| `&'a unique var T`           | `T&`, unique                  | `&'a mut T` (`&'a mut Cpp<i32>`)               |
+| `&'a unique const T`         | `const T&`, unique            | `&'a mut T<Const>` (`&'a mut Cpp<i32, Const>`) |
+| `Option<&'a const T>`        | `const T*`                    | `Option<&'a T<Const>>`                         |
+| `Option<&'a var T>`          | `T*`, shared                  | `Option<&'a T>`                                |
+| `Option<&'a unique var T>`   | `T*`, unique                  | `Option<&'a mut T>`                            |
+| `Option<&'a unique const T>` | `const T*`, unique            | `Option<&'a mut T<Const>>`                     |
+| `const T&` / `const T*`      | `const T&` / `const T*`       | `*const T<Const>` (`*const Cpp<i32, Const>`)   |
+| `T&` / `T*`                  | `T&` / `T*`                   | `*mut T` (`*mut Cpp<i32>`)                     |
+| `&'a i32` / `&'a mut i32`    | `const int32_t&` / `int32_t&` | `&'a i32` / `&'a mut i32`                      |
 
 `T` is a `c++::` type, a builtin like `i32` (the Rust type in parentheses) or a C++ pointer. The
 last row is a reference to a Rust value rather than to a C++ object, which C++ must treat with
@@ -69,6 +74,41 @@ Shared references are the default: `&'a var T` is a `T&` that others may share, 
 member functions that aren't `const` can still be called (see
 [C++ objects vs Rust values](./cpp_objects.md)).
 
+## Nullable references
+
+A C++ pointer that is either null or valid for a known lifetime is a nullable reference:
+`Option<&'a const T>` / `Option<&'a var T>` / `Option<&'a unique var T>` (`Option` is
+`::std::option::Option` or `::core::option::Option`). It's a `const T*` / `T*` in C++, and an
+`Option<&'a T<Const>>` / `Option<&'a T>` / `Option<&'a mut T>` in Rust, so functions that take or
+return one can be `safe`, like those with references: `None` is null. The same promises apply (the
+lifetime, and uniqueness for `unique`), and so does implicit `const` for arguments: an
+`Option<&'a const T>` argument takes `Some(&x)` whether `x` is `const` or not, which also means
+that a bare `None` needs a type (`None::<&T>`).
+
+For example, `std::unique_ptr::get()` returns a pointer that's null if the `unique_ptr` is empty,
+and otherwise valid while the `unique_ptr` is borrowed:
+
+```zng
+type<T> c++::std::unique_ptr<T> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+
+    safe fn get<'a>(&'a const self) -> ::std::option::Option<&'a var T>;
+    safe fn get<'a>(&'a unique var self) -> ::std::option::Option<&'a unique var T> as get_mut;
+}
+```
+
+```rust
+let mut canvas = make_canvas(640, 480);
+if let Some(canvas) = canvas.get_mut() {
+    canvas.Draw(&point);
+}
+let points = canvas.get().map_or(0, |c| c.Points());
+```
+
+Nullable references only describe C++ pointers, so they can't be declared as types
+(`type ::std::option::Option<&var c++::T>` is an error); they're used in signatures directly.
+
 ## Raw pointers
 
 C++-style references and pointers, without a lifetime, are raw pointers in Rust. They can be null
@@ -90,21 +130,32 @@ unsafe { generated::geo::bounds(&p, Cpp::from_mut(&mut lo), Cpp::from_mut(&mut h
 
 ## In C++
 
+Each side sees its own language's form: Rust sees `&'a T` / `Option<&'a T>`, and C++ sees `T&` /
+`T*`, whichever side calls and whichever implements.
+
 C++ functions that zngur calls directly ([member functions](./cpp_methods.md),
 [free functions](./cpp_functions.md), ...) get references or pointers, as declared: references
-(to C++ objects or to Rust values) and C++-style references are C++ references, and pointers are
-pointers.
+(to C++ objects or to Rust values) and C++-style references are C++ references, and nullable
+references and pointers are pointers. They're ordinary C++ calls, with arguments of exactly the
+declared types.
 
-Functions in `extern "C++"` blocks, which you write in C++ for Rust, get raw pointers as plain C++
-pointers. The generated code spells them `rust::CppPtr<W>` and `rust::CppPtr<rust::CppConst<W>>`,
-which are aliases for `T*` and `const T*`, where `W` is the Rust wrapper (e.g.
-`rust::cpp::geo::Point`) and `T` the C++ type it stands for (`::geo::Point`):
+Functions in `extern "C++"` blocks, which you write in C++ for Rust, and Rust functions that C++
+calls, take and return references to C++ objects as C++ references, and nullable references and raw
+pointers as C++ pointers. The generated code spells them `rust::CppRef<W>` /
+`rust::CppRef<rust::CppConst<W>>` and `rust::CppPtr<W>` / `rust::CppPtr<rust::CppConst<W>>`, which
+are aliases for `T&` / `const T&` and `T*` / `const T*`, where `W` is the Rust wrapper (e.g.
+`rust::cpp::geo::Point`) and `T` the C++ type it stands for (`::geo::Point`). The receivers of
+`extern "C++"` impls of `c++::` types (`&self`, `&mut self`) are `T&`:
 
 ```cpp
-double rust::exported_functions::distance(const ::geo::Point* a, const ::geo::Point* b) {
-  return std::hypot(a->x - b->x, a->y - b->y);
+// `safe fn distance<'a>(&'a const c++::geo::Point, &'a const c++::geo::Point) -> f64;`
+double rust::exported_functions::distance(const ::geo::Point& a, const ::geo::Point& b) {
+  return std::hypot(a.x - b.x, a.y - b.y);
 }
+
+// `safe fn first<'a>(::std::option::Option<&'a const c++::geo::Point>) -> i32;`
+int32_t rust::exported_functions::first(const ::geo::Point* p) { return p ? p->x : 0; }
 ```
 
-They get references (to C++ objects or not) as `rust::Ref<W>` / `rust::RefMut<W>`, whose
-constness isn't part of their C++ type.
+References to Rust values (`&crate::Foo`, `&str`, `Option<&crate::Foo>`) are still
+`rust::Ref<T>` / `rust::RefMut<T>` (see [name mapping](../call_rust_from_cpp/name_mapping.md)).

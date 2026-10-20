@@ -77,7 +77,10 @@ type c++::std::unique_ptr<c++::Pair<i32>> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
 
-    safe fn get(&const self) -> c++::Pair<i32>*;
+    // The owned object, if any (a C++ pointer, null if the `unique_ptr` is empty), borrowed from
+    // the `unique_ptr`.
+    safe fn get<'a>(&'a const self) -> ::std::option::Option<&'a var c++::Pair<i32>>;
+    safe fn get<'a>(&'a unique var self) -> ::std::option::Option<&'a unique var c++::Pair<i32>> as get_mut;
 }
 
 mod c++::pairs {
@@ -123,9 +126,11 @@ extern "C++" {
         safe fn print(&self);
     }
 
-    // C++-style pointers and references are raw pointers in Rust (`*const T<Const>` for
-    // `const T&`, `*mut T` for `T*`, `*mut Cpp<i32>` for `i32*`), and plain pointers in C++.
-    unsafe fn sum_into(const c++::MyCppWrapper&, i32*);
+    // References to C++ objects are Rust references in Rust and C++ references in C++ (`const
+    // CppType&`, `int32_t&`), so functions taking and returning them can be safe.
+    safe fn sum_into<'a>(&'a const c++::MyCppWrapper, &'a unique var i32);
+    safe fn larger_x<'a>(&'a const c++::MyCppWrapper, &'a const c++::MyCppWrapper) -> &'a const c++::MyCppWrapper;
+    // C++-style pointers and references are raw pointers in Rust (`*mut T` for `T*`), which may be
+    // null or invalid, and plain pointers in C++.
     unsafe fn swap_xy(c++::MyCppWrapper*);
-    unsafe fn larger_x(const c++::MyCppWrapper&, const c++::MyCppWrapper&) -> const c++::MyCppWrapper*;
 }

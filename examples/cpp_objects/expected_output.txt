@@ -6,3 +6,6 @@ copies = 14 14 (1, -1) (1, -1)
 sum = 114
 count = 20
 peek = 20
+count_or = 20 -1
+next count = 20
+bumped in Rust = 40 -1

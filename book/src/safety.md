@@ -44,6 +44,8 @@ Their C++ references and pointers come with these guarantees:
   (`&'a unique var T`, a Rust `&'a mut T`) also promises that nothing else accesses it meanwhile.
 - A reference to a Rust value (`&'a i32`, `&'a mut i32`) promises what Rust references always do:
   the value isn't mutated (or, for `&mut`, accessed by anything else) meanwhile.
+- A nullable reference (`Option<&'a const T>`, a C++ `const T*`) promises the same as a reference
+  when it isn't null ([Nullable references](./call_cpp_from_rust/cpp_pointers.md#nullable-references)).
 - zngur can't check any of that against C++: the `.zng` file promises it, so name the lifetimes
   carefully ([Lifetimes](./lifetimes.md)).
 - A raw pointer (a C++-style `const T&` / `T*` in the `.zng` file) has no guarantee.

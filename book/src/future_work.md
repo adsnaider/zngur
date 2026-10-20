@@ -4,8 +4,6 @@ Ideas and known gaps, mostly in calling C++ from Rust. None of these is designed
 
 ## Calling C++ from Rust
 
-- **References in `extern "C++"` functions.** Functions written in C++ for Rust get Rust references
-  as `rust::Ref<W>` / `rust::RefMut<W>`. For `c++::` types, plain C++ references would be nicer.
 - **Checking Rust signatures.** Lifetimes on Rust functions that C++ calls are only documentation;
   a generated check (coercing the function to a `fn` pointer with the declared signature) could
   verify them.

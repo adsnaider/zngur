@@ -401,7 +401,10 @@ type c++::std::unique_ptr<c++::cpp_inventory::Inventory> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
 
-    unsafe fn get() const -> c++::cpp_inventory::Inventory*;
+    // `get()` returns a C++ pointer, which is null if the `unique_ptr` is empty: a nullable
+    // reference (`Option<&Inventory>`), which lives as long as the borrow of the `unique_ptr`.
+    safe fn get<'a>(&'a const self) -> ::std::option::Option<&'a var c++::cpp_inventory::Inventory>;
+    safe fn get<'a>(&'a unique var self) -> ::std::option::Option<&'a unique var c++::cpp_inventory::Inventory> as get_mut;
 }
 
 type c++::std::unique_ptr<c++::cpp_inventory::Item> {
@@ -525,13 +528,14 @@ InventoryPtr Impl<Inventory>::new_empty(uint32_t space) {
   return InventoryPtr::build(new ::cpp_inventory::Inventory(space));
 }
 
-Unit Impl<Inventory>::add_banana(RefMut<Inventory> self, uint32_t count) {
-  self.cpp().add_banana(count);
+// The receivers are C++ references to the C++ objects.
+Unit Impl<Inventory>::add_banana(::cpp_inventory::Inventory &self, uint32_t count) {
+  self.add_banana(count);
   return {};
 }
 
-Unit Impl<Inventory>::add_item(RefMut<Inventory> self, ItemPtr item) {
-  self.cpp().add_item(::std::move(*item.cpp()));
+Unit Impl<Inventory>::add_item(::cpp_inventory::Inventory &self, ItemPtr item) {
+  self.add_item(::std::move(*item.cpp()));
   return {};
 }
 
@@ -616,12 +620,12 @@ static Ref<Str> rust_str_from_c_str(const char* input) {
   return CStr::from_ptr(reinterpret_cast<const int8_t*>(input)).to_str().expect("invalid_utf8"_rs);
 }
 
-Result Impl<Inventory, Debug>::fmt(Ref<Inventory> self, RefMut<Formatter> f) {
+Result Impl<Inventory, Debug>::fmt(::cpp_inventory::Inventory &self, RefMut<Formatter> f) {
   ::std::string result = "Inventory { remaining_space: ";
-  result += ::std::to_string(self.cpp().remaining_space);
+  result += ::std::to_string(self.remaining_space);
   result += ", items: [";
   bool is_first = true;
-  for (const auto &item : self.cpp().items) {
+  for (const auto &item : self.items) {
     if (!is_first) {
       result += ", ";
     } else {
@@ -641,7 +645,8 @@ Result Impl<Inventory, Debug>::fmt(Ref<Inventory> self, RefMut<Formatter> f) {
 ```
 
 So now we can write the main function. `std::unique_ptr<Inventory>` owns the inventory, and
-implementing `Deref` and `DerefMut` with its `get()` makes it work like a `Box<Inventory>`:
+implementing `Deref` and `DerefMut` with its `get()` and `get_mut()` makes it work like a
+`Box<Inventory>`:
 
 ```Rust
 use generated::cpp_inventory::{Inventory, Item};
@@ -651,23 +656,13 @@ impl std::ops::Deref for unique_ptr<Inventory> {
     type Target = Inventory;
 
     fn deref(&self) -> &Inventory {
-        // SAFETY: The `unique_ptr` owns a valid object, which lives as long as it does.
-        unsafe {
-            unique_ptr::<Inventory>::get(self.as_ref())
-                .as_ref()
-                .unwrap()
-        }
+        self.get().expect("empty std::unique_ptr")
     }
 }
 
 impl std::ops::DerefMut for unique_ptr<Inventory> {
     fn deref_mut(&mut self) -> &mut Inventory {
-        // SAFETY: As above, and `&mut self` makes the access exclusive.
-        unsafe {
-            unique_ptr::<Inventory>::get(self.as_ref())
-                .as_mut()
-                .unwrap()
-        }
+        self.get_mut().expect("empty std::unique_ptr")
     }
 }
 
@@ -682,7 +677,7 @@ fn main() {
 and run it:
 
 ```
-[examples/tutorial_cpp/src/main.rs:38:5] &*inventory = Inventory { remaining_space: 974, items: [Item { name: "banana", size: 7 }, Item { name: "banana", size: 7 }, Item { name: "banana", size: 7 }, Item { name: "apple", size: 5 }] }
+[examples/tutorial_cpp/src/main.rs:28:5] &*inventory = Inventory { remaining_space: 974, items: [Item { name: "banana", size: 7 }, Item { name: "banana", size: 7 }, Item { name: "banana", size: 7 }, Item { name: "apple", size: 5 }] }
 ```
 
 You can see the full code at [`examples/tutorial_cpp`](https://github.com/HKalbasi/zngur/blob/main/examples/tutorial_cpp)

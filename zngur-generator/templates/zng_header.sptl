@@ -121,6 +121,13 @@ namespace {{ self.cpp_namespace }} {
   template<typename W>
   using CppPtr = typename CppTypeOf<W>::type*;
 
+  // A C++ reference to the C++ type that `W` stands for, e.g. `CppRef<rust::cpp::ns::Bar>` is
+  // `::ns::Bar&` and `CppRef<CppConst<rust::cpp::ns::Bar>>` is `const ::ns::Bar&`. It's how C++
+  // sees the references to C++ objects of Rust-facing items (`&'a var c++::ns::Bar` in the `.zng`
+  // file), which cross the boundary as pointers.
+  template<typename W>
+  using CppRef = typename CppTypeOf<W>::type&;
+
   // Whether a C++ function returning `Actual` matches a `.zng` declaration returning `Declared`
   // (both C++ types): the same type, or an arithmetic type of the same size and kind (e.g. `long
   // long` for `int64_t`), so that nothing is converted implicitly.
@@ -160,18 +167,44 @@ namespace {{ self.cpp_namespace }} {
     return __zngur_internal<T>::size_of();
   }
 
+  // Moves a value between C++ and Rust. C++ references (`T&`, the C++ form of Rust references to
+  // C++ objects) cross as pointers.
+  template<typename T>
+  struct __zngur_internal_move {
+    static inline void to_rust(uint8_t* dst, T& t) noexcept {
+      __zng_memcpy(dst, ::{{ self.cpp_namespace }}::__zngur_internal_data_ptr(t), ::{{ self.cpp_namespace }}::__zngur_internal_size_of<T>());
+      ::{{ self.cpp_namespace }}::__zngur_internal_assume_deinit(t);
+    }
+    static inline T from_rust(uint8_t* src) noexcept {
+      T t;
+      ::{{ self.cpp_namespace }}::__zngur_internal_assume_init(t);
+      __zng_memcpy(::{{ self.cpp_namespace }}::__zngur_internal_data_ptr(t), src, ::{{ self.cpp_namespace }}::__zngur_internal_size_of<T>());
+      return t;
+    }
+  };
+
+  template<typename T>
+  struct __zngur_internal_move<T&> {
+    static inline void to_rust(uint8_t* dst, T& t) noexcept {
+      T* p = &t;
+      __zng_memcpy(dst, &p, sizeof(p));
+    }
+    static inline T& from_rust(uint8_t* src) noexcept {
+      T* p;
+      __zng_memcpy(&p, src, sizeof(p));
+      return *p;
+    }
+  };
+
+  // `T` is explicit for C++ references (`__zngur_internal_move_to_rust<CppRef<W>>(o, r)`).
   template<typename T>
   inline void __zngur_internal_move_to_rust(uint8_t* dst, T& t) noexcept {
-    __zng_memcpy(dst, ::{{ self.cpp_namespace }}::__zngur_internal_data_ptr(t), ::{{ self.cpp_namespace }}::__zngur_internal_size_of<T>());
-    ::{{ self.cpp_namespace }}::__zngur_internal_assume_deinit(t);
+    __zngur_internal_move<T>::to_rust(dst, t);
   }
 
   template<typename T>
   inline T __zngur_internal_move_from_rust(uint8_t* src) noexcept {
-    T t;
-    ::{{ self.cpp_namespace }}::__zngur_internal_assume_init(t);
-    __zng_memcpy(::{{ self.cpp_namespace }}::__zngur_internal_data_ptr(t), src, ::{{ self.cpp_namespace }}::__zngur_internal_size_of<T>());
-    return t;
+    return __zngur_internal_move<T>::from_rust(src);
   }
 
   template<typename T>

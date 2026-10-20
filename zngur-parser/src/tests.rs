@@ -2352,6 +2352,45 @@ type c++::B {
 }
 
 #[test]
+fn nullable_references_to_cpp_objects_are_safe_in_signatures() {
+    // No `safe_raw_pointer` warning: they aren't raw pointers.
+    check_warnings(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe fn next<'a>(&'a const self) -> ::std::option::Option<&'a const c++::B>;
+    safe constructor<'a>(::core::option::Option<&'a unique var c++::B>) as from_option;
+}
+mod c++::ns {
+    safe fn f<'a>(::std::option::Option<&'a var c++::B>, ::std::option::Option<&'a const i32>);
+}
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn nullable_references_to_cpp_objects_cant_be_declared_as_types() {
+    check_fail(
+        r#"
+type ::std::option::Option<&var c++::B> {
+    #layout(size = 8, align = 8);
+}
+"#,
+        expect![[r#"
+            Error: a nullable reference to a C++ object (`Option<&'a const T>`, `Option<&'a var T>`, ...) is a C++ pointer in C++ (here to `c++::B`), not a type to declare: use it in signatures directly
+               ╭─[ test.zng:2:6 ]
+               │
+             2 │ type ::std::option::Option<&var c++::B> {
+               │      ─────────────────┬────────────────  
+               │                       ╰────────────────── a nullable reference to a C++ object (`Option<&'a const T>`, `Option<&'a var T>`, ...) is a C++ pointer in C++ (here to `c++::B`), not a type to declare: use it in signatures directly
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
 fn cpp_constructor_on_cpp_ref_type_is_rejected() {
     check_fail(
         r#"

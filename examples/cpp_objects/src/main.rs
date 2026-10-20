@@ -61,4 +61,35 @@ fn main() {
     generated::objects::double_step(&mut second);
     second.bump();
     println!("peek = {}", generated::objects::peek(&mut second));
+
+    // Nullable references (C++ pointers that may be null): `Some(&c)` or `None`, a `Counter*` in
+    // C++. `first.next` points to `second`.
+    let fallback = -1;
+    println!(
+        "count_or = {} {}",
+        generated::objects::count_or(Some(&first), fallback),
+        // `const` inputs take both constnesses, so a bare `None` needs a type.
+        generated::objects::count_or(None::<&Counter>, fallback)
+    );
+    if let Some(next) = generated::objects::next_of(&first) {
+        println!("next count = {}", next.count().get());
+    }
+    assert!(generated::objects::next_of(&second).is_none());
+    // C++ calls `bump_chain` (below) with the pointer.
+    println!(
+        "bumped in Rust = {} {}",
+        generated::objects::bump_in_rust(Some(&second)),
+        generated::objects::bump_in_rust(None)
+    );
+}
+
+/// Called from C++, with a nullable reference to a C++ object (a `Counter*` in C++).
+pub fn bump_chain(counter: Option<&Counter>) -> i32 {
+    match counter {
+        Some(counter) => {
+            counter.bump();
+            counter.count().get()
+        }
+        None => -1,
+    }
 }

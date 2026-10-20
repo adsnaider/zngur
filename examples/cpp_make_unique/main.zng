@@ -25,7 +25,10 @@ type<T> c++::std::unique_ptr<T> {
     #layout(size = 8, align = 8);
     #trivially_relocatable;
 
-    safe fn get(&const self) -> T*;
+    // The owned object, or `None` if the `unique_ptr` is empty (a null C++ pointer), borrowed from
+    // the `unique_ptr`.
+    safe fn get<'a>(&'a const self) -> ::std::option::Option<&'a var T>;
+    safe fn get<'a>(&'a unique var self) -> ::std::option::Option<&'a unique var T> as get_mut;
 }
 
 type c++::std::unique_ptr<c++::shapes::Point> {}
