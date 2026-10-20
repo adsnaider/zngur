@@ -4030,12 +4030,99 @@ fn unknown_allow_is_rejected() {
 #allow(everything)
 "#,
         expect![[r#"
-            Error: unknown warning `everything` (known ones: elided_lifetimes, safe_raw_pointer)
+            Error: unknown warning `everything` (known ones: elided_lifetimes, safe_raw_pointer, layout_without_relocatable)
                ╭─[ test.zng:2:1 ]
                │
              2 │ #allow(everything)
                │ ─────────┬────────  
-               │          ╰────────── unknown warning `everything` (known ones: elided_lifetimes, safe_raw_pointer)
+               │          ╰────────── unknown warning `everything` (known ones: elided_lifetimes, safe_raw_pointer, layout_without_relocatable)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn layout_without_relocatable_warns() {
+    check_warnings(
+        r#"
+type c++::A {
+    #layout(size = 8, align = 4);
+}
+// Relocatable, or without a layout: no warning.
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+}
+type c++::C {}
+"#,
+        expect![[r#"
+            Warning: this layout is only checked in C++: Rust holds `c++::A` by value only if it's also `#trivially_relocatable`, so it only refers to it (a zero-sized type); silence this with `#allow(layout_without_relocatable)`
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     #layout(size = 8, align = 4);
+               │     ──────────────┬─────────────  
+               │                   ╰─────────────── this layout is only checked in C++: Rust holds `c++::A` by value only if it's also `#trivially_relocatable`, so it only refers to it (a zero-sized type); silence this with `#allow(layout_without_relocatable)`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn layout_without_relocatable_can_be_allowed() {
+    check_warnings(
+        r#"
+#allow(layout_without_relocatable)
+type c++::A {
+    #layout(size = 8, align = 4);
+}
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn layout_without_relocatable_is_checked_after_merging() {
+    // `#trivially_relocatable` in another file: no warning.
+    let resolver = MockFilesystem::new(vec![(
+        "./a.zng",
+        r#"
+type c++::A {
+    #trivially_relocatable;
+}
+"#,
+    )]);
+    let mut warnings = String::new();
+    let _ = parse_str_with_resolver(
+        r#"
+merge "./a.zng";
+type c++::A {
+    #layout(size = 8, align = 4);
+}
+"#,
+        NullCfg,
+        &resolver,
+        |w| warnings.push_str(w),
+    );
+    assert_eq!(warnings, "");
+}
+
+#[test]
+fn layout_without_relocatable_of_a_template_warns_once() {
+    check_warnings(
+        r#"
+type<T> c++::Box<T> {
+    #layout(size = 8, align = 8);
+}
+type c++::Box<i32> {}
+type c++::Box<i64> {}
+"#,
+        expect![[r#"
+            Warning: this layout is only checked in C++: Rust holds `c++::Box<T>` by value only if it's also `#trivially_relocatable`, so it only refers to it (a zero-sized type); silence this with `#allow(layout_without_relocatable)`
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     #layout(size = 8, align = 8);
+               │     ──────────────┬─────────────  
+               │                   ╰─────────────── this layout is only checked in C++: Rust holds `c++::Box<T>` by value only if it's also `#trivially_relocatable`, so it only refers to it (a zero-sized type); silence this with `#allow(layout_without_relocatable)`
             ───╯
         "#]],
     );

@@ -1275,6 +1275,15 @@ impl ProcessedItem<'_> {
                                 &l.into_span_key_with(rust_ty.clone()),
                                 span.into_range(),
                             );
+                            // Reported once the type is merged, if it isn't `#trivially_relocatable`.
+                            if matches!(rust_ty, RustType::Cpp(_))
+                                && !ctx.allows("layout_without_relocatable")
+                            {
+                                ctx.record_span(
+                                    &PartialSpanKey::UncheckedCppLayout(rust_ty.clone()),
+                                    span.into_range(),
+                                );
+                            }
                             layout = Some(l);
                             match layout_span {
                                 Some(_) => {
@@ -2250,6 +2259,10 @@ enum PartialSpanKey {
     /// a [`LayoutPolicy`](zngur_def::LayoutPolicy)
     /// outer_ty
     Layout(RustType),
+    /// the `#layout(...)` of a `c++::` type, in a file that doesn't silence
+    /// `layout_without_relocatable`
+    /// outer_ty
+    UncheckedCppLayout(RustType),
     /// a [`Constructor`](zngur_def::ZngurConstructor)
     /// outer_ty, constructor_sig?
     Constructor(RustType, Option<Vec<(String, RustType)>>),
@@ -2658,6 +2671,23 @@ impl<'this, 'source, 'cfg> ParseContext<'this, 'source, 'cfg> {
     /// Record a fatal report from the passed message and span
     fn add_error_str(&mut self, error: &str, span: Span) {
         self.add_errors([Rich::custom(span, error)].into_iter());
+    }
+
+    /// Records a non-fatal warning pointing at `span`, which may be in another file than the
+    /// current one (e.g. a recorded span).
+    fn add_warning_at(&mut self, warning: &str, span: ReportSpan) {
+        let report = Report::build(ReportKind::Warning, span.clone())
+            .with_message(warning)
+            .with_label(
+                Label::new(span)
+                    .with_message(warning)
+                    .with_color(Color::Yellow),
+            )
+            .finish();
+        self.sink_report(ReportEntry {
+            fatal: false,
+            report,
+        });
     }
 
     /// Records a non-fatal warning as an ariadne diagnostic pointing at `span`.
@@ -3239,6 +3269,7 @@ impl ZngurSpecBuilder {
             imports: _,
             module_import_spans,
         } = self;
+        let mut reported_layouts: HashSet<ReportSpan> = HashSet::new();
         for ty in &mut spec.types {
             let mut template_locations = Vec::new();
             for template in &templates {
@@ -3332,6 +3363,40 @@ impl ZngurSpecBuilder {
                     "`#trivially_relocatable` needs a `#layout(...)` or `#layout_conservative(...)`, \
                      which Rust needs to hold the C++ type by value",
                 );
+            }
+            // A layout without `#trivially_relocatable` (after merging, so either may come from
+            // another file or a template) is only checked in C++. Reported at each `#layout` (the
+            // type's, or its template's) once, unless its file silences it.
+            if is_cpp && ty.layout.is_some() && !ty.trivially_relocatable.is_relocatable() {
+                let mut layouts: Vec<(ReportSpan, RustType)> = ctx
+                    .fetch_spans_global(&PartialSpanKey::UncheckedCppLayout(ty.ty.clone()))
+                    .into_iter()
+                    .map(|span| (span.clone(), ty.ty.clone()))
+                    .collect();
+                for template in &templates {
+                    if try_match_template(&ty.ty, &template.ty).is_some() {
+                        let key = PartialSpanKey::UncheckedCppLayout(template.ty.ty.clone());
+                        layouts.extend(
+                            ctx.fetch_spans_global(&key)
+                                .into_iter()
+                                .map(|span| (span.clone(), template.ty.ty.clone())),
+                        );
+                    }
+                }
+                for (span, layout_ty) in layouts {
+                    if reported_layouts.insert(span.clone()) {
+                        let t = zng_spelling(&layout_ty);
+                        ctx.add_warning_at(
+                            &format!(
+                                "this layout is only checked in C++: Rust holds `{t}` by value only \
+                                 if it's also `#trivially_relocatable`, so it only refers to it (a \
+                                 zero-sized type); silence this with \
+                                 `#allow(layout_without_relocatable)`"
+                            ),
+                            span,
+                        );
+                    }
+                }
             }
             // Checked after merging, since the C++ member functions may be declared in a
             // different file than the type's layout.
@@ -4943,7 +5008,11 @@ fn extern_cpp_item<'a>()
 }
 
 /// The warnings that `#allow(...)` can silence.
-const KNOWN_LINTS: &[&str] = &["elided_lifetimes", "safe_raw_pointer"];
+const KNOWN_LINTS: &[&str] = &[
+    "elided_lifetimes",
+    "safe_raw_pointer",
+    "layout_without_relocatable",
+];
 
 fn allow_item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngParserExtra<'a>> + Clone
 {

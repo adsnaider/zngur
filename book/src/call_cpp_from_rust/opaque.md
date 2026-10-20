@@ -44,8 +44,32 @@ You can also write `impl` and `impl trait` blocks for the Rust type `Way` inside
 [`examples/osmium`](https://github.com/HKalbasi/zngur/blob/main/examples/osmium) for a full working
 example.
 
+### Layouts of types that aren't trivially relocatable
+
 You can give a reference-only type a layout anyway (`#layout(...)` or `#layout_conservative(...)`).
-Rust still only refers to it, but the generated C++ code checks the size and alignment.
+Rust still only refers to it, but the generated C++ code checks the size and alignment. zngur warns
+about such layouts (`layout_without_relocatable`), since they look like they make the type a value:
+
+```zng
+// Rust only refers to `c++::Canvas`: the layout is only checked in C++.
+type c++::Canvas {
+    #layout(size = 24, align = 8);
+}
+```
+
+A C++ type that isn't trivially relocatable stays reference-only even with a layout, because Rust
+values must be movable with `memcpy`, which would break a type whose move constructor does more
+(e.g. one that points to itself). Rust moves values freely, including out of a `&mut T` with
+`std::mem::swap` or `std::mem::replace`; for reference-only types, that's sound only because their
+Rust wrappers are zero-sized, so such a move doesn't touch the C++ object.
+
+To own such an object in Rust, hold it through a `std::unique_ptr`, constructed in C++ (e.g. with a
+`std::make_unique<T>` instantiation, see [free C++ functions](./cpp_functions.md)). If the layout is
+there on purpose, as a check, silence the warning with `#allow(layout_without_relocatable)` at the
+top of the `.zng` file.
+
+This may change once Rust supports immovable types natively, e.g. with a `Move` trait or pinning
+ergonomics like `&pin mut`.
 
 ### Semantics of reference-only types
 
@@ -160,12 +184,13 @@ Just like with C++ opaque objects, we can define functions on an `extern C++` bl
 
 ```zng
 extern "C++" {
-    fn create_cpp_type(i32, i32) -> c++::MyCppWrapper;
-    fn print_cpp_type(&c++::MyCppWrapper);
+    safe fn create_cpp_type(i32, i32) -> c++::MyCppWrapper;
+    safe fn print_cpp_type<'a>(&'a const c++::MyCppWrapper);
 }
 ```
 
-The C++ code has access to the `.cpp()` method used to access the inner type.
+The C++ implementation of `print_cpp_type` gets a `const CppType&` (see
+[C++ references and pointers](./cpp_pointers.md#in-c)).
 
 ```rust
 // main.rs
