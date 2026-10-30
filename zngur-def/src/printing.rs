@@ -17,12 +17,10 @@ pub enum IDLItem {
     ExternImpl,
 }
 
-/// prints the zng IDL to an output writer
-/// uses it's own trait `WriteIDL` over `std::fmt::Display` to control:
+/// Prints the `.zng` IDL to an output writer.
+/// Uses its own trait `WriteIDL` over `std::fmt::Display` to control:
 ///   - the output of item types
 ///   - formatting
-///   -  and the path to core/std items like `Box`
-
 #[derive(Debug)]
 pub struct IDLPrinter<'a, W: Write> {
     enabled_items: Vec<IDLItem>,
@@ -106,6 +104,7 @@ impl<'a, W: Write> IDLPrinter<'a, W> {
         self.out.write_fmt(args)
     }
 
+    /// Retained for API compatibility; not used by built-in `WriteIDL` implementations.
     pub fn std_path(&self) -> &'static str {
         if self.no_std { "::core" } else { "::std" }
     }
@@ -169,7 +168,7 @@ impl WriteIDL for crate::RustType {
                 p.write_idl(ty)
             }
             Self::Boxed(ty) => {
-                write!(p, "{}::box::Box<", p.std_path())?;
+                write!(p, "Box<")?;
                 p.write_idl(ty)?;
                 write!(p, ">")
             }
@@ -182,7 +181,7 @@ impl WriteIDL for crate::RustType {
                 write!(p, "dyn ")?;
                 p.write_idl(trt)?;
                 for bound in marker_bounds {
-                    write!(p, "+ {bound}")?;
+                    write!(p, " + {bound}")?;
                 }
                 Ok(())
             }
@@ -190,7 +189,7 @@ impl WriteIDL for crate::RustType {
                 write!(p, "impl ")?;
                 p.write_idl(trt)?;
                 for bound in marker_bounds {
-                    write!(p, "+ {bound}")?;
+                    write!(p, " + {bound}")?;
                 }
                 Ok(())
             }
@@ -279,61 +278,97 @@ impl WriteIDL for crate::TypeVar {
 
 impl WriteIDL for crate::ZngurSpec {
     fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
-        if self.convert_panic_to_exception.0 {
-            writeln!(p, "#convert_panic_to_exception")?;
-        }
-        if !self.types.is_empty() {
-            if self.convert_panic_to_exception.0 {
+        // Each top-level section is separated from the previous one by a blank line.
+        let mut need_separator = false;
+        let mut separate = |p: &mut IDLPrinter<W>| -> std::io::Result<()> {
+            if need_separator {
                 writeln!(p)?;
             }
+            need_separator = true;
+            Ok(())
+        };
+        if !self.imported_modules.is_empty() {
+            separate(p)?;
+            for import in &self.imported_modules {
+                writeln!(p, r#"import "{}";"#, import.path.display())?;
+            }
+        }
+        if self.convert_panic_to_exception.0 {
+            separate(p)?;
+            writeln!(p, "#convert_panic_to_exception")?;
+        }
+        if !self.additional_includes.0.is_empty() {
+            separate(p)?;
+            let includes = &self.additional_includes.0;
+            // The lexer has no escapes, so use a raw string with enough `#`s
+            // that its terminator can't appear in the contents.
+            let hashes = "#".repeat(
+                (0..)
+                    .find(|&n| !includes.contains(&format!("\"{}", "#".repeat(n))))
+                    .unwrap(),
+            );
+            writeln!(
+                p,
+                "#cpp_additional_includes r{hashes}\"{includes}\"{hashes}"
+            )?;
+        }
+        if !self.types.is_empty() && p.enabled(&IDLItem::Type) {
+            separate(p)?;
             for (i, ty) in self.types.iter().enumerate() {
-                if i > 0 && i < self.types.len() {
+                if i > 0 {
                     writeln!(p)?;
                 }
                 p.write_indent()?;
                 p.write_idl(ty)?;
             }
         }
-        if !self.funcs.is_empty() {
-            if !self.types.is_empty() || self.convert_panic_to_exception.0 {
-                writeln!(p)?;
-            }
+        if !self.funcs.is_empty() && p.enabled(&IDLItem::Function) {
+            separate(p)?;
+            // Consecutive functions in the same module share a `mod` block.
+            let mut open_mod: Option<&[String]> = None;
             for func in &self.funcs {
-                p.write_idl(func)?;
+                let Some((name, parent)) = func.path.path.split_last() else {
+                    // A function with an empty path can't be expressed.
+                    continue;
+                };
+                if open_mod != Some(parent) {
+                    if let Some(prev) = open_mod {
+                        write_mod_close(p, prev)?;
+                    }
+                    write_mod_open(p, parent)?;
+                    open_mod = Some(parent);
+                }
+                write_fn_decl(p, name, func)?;
+            }
+            if let Some(prev) = open_mod {
+                write_mod_close(p, prev)?;
             }
         }
-        if !self.traits.is_empty() {
-            if !self.funcs.is_empty() || !self.types.is_empty() || self.convert_panic_to_exception.0
-            {
-                writeln!(p)?;
-            }
+        if !self.traits.is_empty() && p.enabled(&IDLItem::Trait) {
+            separate(p)?;
             for (i, trt) in self.traits.values().enumerate() {
-                if i > 0 && i < self.traits.len() {
+                if i > 0 {
                     writeln!(p)?;
                 }
                 p.write_idl(trt)?;
             }
         }
-        if !self.extern_cpp_funcs.is_empty() || !self.extern_cpp_impls.is_empty() {
-            if !self.traits.is_empty()
-                || !self.funcs.is_empty()
-                || !self.types.is_empty()
-                || self.convert_panic_to_exception.0
-            {
-                writeln!(p)?;
-            }
+        let has_extern_fns = !self.extern_cpp_funcs.is_empty() && p.enabled(&IDLItem::ExternFn);
+        let has_extern_impls = !self.extern_cpp_impls.is_empty() && p.enabled(&IDLItem::ExternImpl);
+        if has_extern_fns || has_extern_impls {
+            separate(p)?;
             p.write_indent()?;
             writeln!(p, r#"extern "C++" {{"#)?;
             p.indent();
-            if !self.extern_cpp_funcs.is_empty() {
+            if has_extern_fns {
                 writeln!(p)?;
                 for extern_fn in &self.extern_cpp_funcs {
                     p.write_indent()?;
                     p.write_idl(extern_fn)?;
                 }
             }
-            if !self.extern_cpp_impls.is_empty() {
-                if !self.extern_cpp_funcs.is_empty() {
+            if has_extern_impls {
+                if has_extern_fns {
                     writeln!(p)?;
                 }
                 for extern_impl in &self.extern_cpp_impls {
@@ -350,24 +385,76 @@ impl WriteIDL for crate::ZngurSpec {
     }
 }
 
+/// Opens `mod <parent> {` for free functions. An empty `parent` (a function
+/// path with a single segment) needs no `mod` block.
+fn write_mod_open<W: Write>(p: &mut IDLPrinter<W>, parent: &[String]) -> std::io::Result<()> {
+    if parent.is_empty() {
+        return Ok(());
+    }
+    p.write_indent()?;
+    write!(p, "mod ")?;
+    // An empty `generics` list means just the path is printed.
+    p.write_idl(&crate::RustPathAndGenerics {
+        path: parent.to_vec(),
+        generics: vec![],
+        named_generics: vec![],
+    })?;
+    writeln!(p, " {{")?;
+    p.indent();
+    Ok(())
+}
+
+/// Closes a block opened by [`write_mod_open`] with the same `parent`.
+fn write_mod_close<W: Write>(p: &mut IDLPrinter<W>, parent: &[String]) -> std::io::Result<()> {
+    if parent.is_empty() {
+        return Ok(());
+    }
+    p.dedent();
+    p.write_indent()?;
+    writeln!(p, "}}")
+}
+
+/// Writes `[safe|unsafe] fn <name>(..) -> ..;`, i.e. the part of a free function that goes
+/// inside its `mod` block.
+fn write_fn_decl<W: Write>(
+    p: &mut IDLPrinter<W>,
+    name: &str,
+    func: &crate::ZngurFn,
+) -> std::io::Result<()> {
+    p.write_indent()?;
+    let safety = match func.is_safe {
+        Some(true) => "safe ",
+        Some(false) => "unsafe ",
+        None => "",
+    };
+    write!(p, "{safety}fn {name}")?;
+    if !func.path.generics.is_empty() {
+        write!(p, "<")?;
+        p.write_idl(&func.path.generics)?;
+        write!(p, ">")?;
+    }
+    write!(p, "(")?;
+    p.write_idl(&func.inputs)?;
+    write!(p, ")")?;
+    if func.output != crate::RustType::UNIT {
+        write!(p, " -> ")?;
+        p.write_idl(&func.output)?;
+    }
+    writeln!(p, ";")
+}
+
 impl WriteIDL for crate::ZngurFn {
+    /// Free functions can only be declared by name inside a `mod`, so
+    /// `crate::a::f` is printed as `mod crate::a { fn f(..); }`.
     fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
         if p.enabled(&IDLItem::Function) {
-            let safety = match self.is_safe {
-                Some(true) => "safe ",
-                Some(false) => "unsafe ",
-                None => "",
+            let Some((name, parent)) = self.path.path.split_last() else {
+                // A function with an empty path can't be expressed.
+                return Ok(());
             };
-            write!(p, "{safety}fn ")?;
-            p.write_idl(&self.path)?;
-            write!(p, "(")?;
-            p.write_idl(&self.inputs)?;
-            write!(p, ")")?;
-            if self.output != crate::RustType::UNIT {
-                write!(p, " -> ")?;
-                p.write_idl(&self.output)?;
-            }
-            writeln!(p, ";")?;
+            write_mod_open(p, parent)?;
+            write_fn_decl(p, name, self)?;
+            write_mod_close(p, parent)?;
         }
         Ok(())
     }
@@ -381,8 +468,12 @@ impl WriteIDL for crate::ZngurType {
             writeln!(p, " {{")?;
             p.indent();
 
-            // don't duplicate layout info
-            if self.cpp_ref.is_none() {
+            // Don't duplicate layout info: `#cpp_ref` and `?Sized` both imply a
+            // layout, and restating it is a parse error.
+            let is_unsized = self
+                .wellknown_traits
+                .contains(&crate::ZngurWellknownTrait::Unsized);
+            if self.cpp_ref.is_none() && !is_unsized {
                 p.write_indent()?;
                 p.write_idl(&self.layout)?;
             }
@@ -400,15 +491,17 @@ impl WriteIDL for crate::ZngurType {
             }
 
             if p.enabled(&IDLItem::TypeWellknownTrait) {
+                // `Drop` is implied by the parser and isn't valid in `wellknown_traits`.
                 let drop_filtered: Vec<_> = self
                     .wellknown_traits
                     .iter()
                     .filter(|wk| !matches!(wk, crate::ZngurWellknownTrait::Drop))
+                    .copied()
                     .collect();
                 if !drop_filtered.is_empty() {
                     p.write_indent()?;
                     write!(p, "wellknown_traits(")?;
-                    p.write_idl(&self.wellknown_traits)?;
+                    p.write_idl(&drop_filtered)?;
                     writeln!(p, ");")?;
                 }
             }
@@ -470,6 +563,7 @@ impl WriteIDL for crate::ZngurTrait {
                         None => {}
                     }
                     p.write_idl(method)?;
+                    writeln!(p, ";")?;
                 }
                 p.dedent();
             }
@@ -540,7 +634,7 @@ impl WriteIDL for crate::LayoutPolicy {
                     writeln!(p, "layout_conservative(size = {size}, align = {align});")?;
                 }
                 Self::HeapAllocated => {
-                    writeln!(p, "heap_allocate;")?;
+                    writeln!(p, "heap_allocated;")?;
                 }
                 Self::OnlyByRef => {
                     writeln!(p, "only_by_ref;")?;
@@ -584,7 +678,7 @@ impl WriteIDL for crate::ZngurWellknownTrait {
         match self {
             Self::Debug => write!(p, "Debug"),
             Self::Drop => write!(p, "Drop"),
-            Self::Unsized => write!(p, "Unsized"),
+            Self::Unsized => write!(p, "?Sized"),
             Self::Copy => write!(p, "Copy"),
         }
     }
@@ -713,12 +807,7 @@ impl WriteIDL for crate::ZngurMethod {
         write!(p, "fn {name}")?;
         if self.generics.len() > 0 {
             write!(p, "<")?;
-            for (i, generic) in self.generics.iter().enumerate() {
-                p.write_idl(generic)?;
-                if i < self.generics.len() {
-                    write!(p, ", ")?;
-                }
-            }
+            p.write_idl(&self.generics)?;
             write!(p, ">")?;
         }
         write!(p, "({receiver}{rec_sep}")?;
@@ -824,7 +913,119 @@ fn print_spec() {
     safe fn foo_bar(&self) as fooBar;
 }
 
-safe fn crate::do_w_example(&crate::Example) -> bool;
+mod crate {
+    safe fn do_w_example(&crate::Example) -> bool;
+}
+",
+        idl
+    );
+}
+
+#[test]
+fn print_funcs_grouped_by_mod() {
+    let func = |path: &[&str]| crate::ZngurFn {
+        path: crate::RustPathAndGenerics {
+            path: path.iter().map(|s| s.to_string()).collect(),
+            generics: vec![],
+            named_generics: vec![],
+        },
+        inputs: vec![],
+        output: crate::RustType::UNIT,
+        is_safe: None,
+    };
+    let spec = crate::ZngurSpec {
+        funcs: vec![
+            func(&["top1"]),
+            func(&["crate", "a"]),
+            func(&["crate", "b"]),
+            func(&["top2"]),
+            func(&["crate", "m", "c"]),
+            func(&["crate", "m", "d"]),
+            func(&["crate", "e"]),
+        ],
+        ..Default::default()
+    };
+
+    let mut buf = Vec::new();
+    crate::printing::IDLPrinter::new(&mut buf)
+        .write_idl(&spec)
+        .expect("write error");
+    let idl = String::from_utf8(buf).expect("utf8 error");
+
+    // Consecutive functions share a `mod`; single-segment functions emit at top level;
+    // the printer never reorders them.
+    assert_eq!(
+        "fn top1();
+mod crate {
+    fn a();
+    fn b();
+}
+fn top2();
+mod crate::m {
+    fn c();
+    fn d();
+}
+mod crate {
+    fn e();
+}
+",
+        idl
+    );
+
+    // Standalone `ZngurFn::write_idl` handles both single-segment and `mod`-scoped paths.
+    let mut buf = Vec::new();
+    crate::printing::IDLPrinter::new(&mut buf)
+        .write_idl(&func(&["standalone"]))
+        .expect("write error");
+    assert_eq!("fn standalone();\n", String::from_utf8(buf).unwrap());
+
+    let mut buf = Vec::new();
+    crate::printing::IDLPrinter::new(&mut buf)
+        .write_idl(&func(&["crate", "m", "f"]))
+        .expect("write error");
+    assert_eq!(
+        "mod crate::m {\n    fn f();\n}\n",
+        String::from_utf8(buf).unwrap()
+    );
+}
+
+#[test]
+fn disabled_section_does_not_emit_blank_separator() {
+    let spec = crate::ZngurSpec {
+        convert_panic_to_exception: crate::ConvertPanicToException(true),
+        funcs: vec![crate::ZngurFn {
+            path: crate::RustPathAndGenerics {
+                path: vec!["crate".into(), "f".into()],
+                generics: vec![],
+                named_generics: vec![],
+            },
+            inputs: vec![],
+            output: crate::RustType::UNIT,
+            is_safe: None,
+        }],
+        extern_cpp_funcs: vec![crate::ZngurExternCppFn {
+            name: "ext".into(),
+            inputs: vec![],
+            output: crate::RustType::UNIT,
+            is_safe: true,
+        }],
+        ..Default::default()
+    };
+
+    let mut buf = Vec::new();
+    let mut printer = crate::printing::IDLPrinter::new(&mut buf);
+    printer.disable_item(&IDLItem::Function);
+    printer.write_idl(&spec).expect("write error");
+    let idl = String::from_utf8(buf).expect("utf8 error");
+
+    assert_eq!(
+        "#convert_panic_to_exception
+
+extern \"C++\" {
+
+    safe fn ext();
+
+}
 ",
         idl
     );

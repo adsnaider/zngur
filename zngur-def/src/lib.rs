@@ -335,21 +335,21 @@ pub struct ZngurTrait {
     pub methods: Vec<ZngurMethod>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct AdditionalIncludes(pub String);
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct ConvertPanicToException(pub bool);
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Import(pub std::path::PathBuf);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleImport {
     pub path: std::path::PathBuf,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq)]
 pub struct ZngurSpec {
     pub imported_modules: Vec<ModuleImport>,
     pub types: Vec<ZngurType>,
