@@ -98,31 +98,22 @@ fn check_round_trip_with_resolver(
         error_sink.assert_no_errors(Some(zng));
         ret
     };
-    let mut buf = std::io::BufWriter::new(Vec::new());
-    let mut printer = IDLPrinter::new(&mut buf);
-    printer.write_idl(&parsed.spec).expect("printing failure");
-    let bytes = buf.into_inner().expect("buffer flush error");
-    let idl = str::from_utf8(&bytes).expect("utf8 error");
-    expected_output.assert_eq(idl);
+    let idl = print_spec(&parsed.spec);
+    expected_output.assert_eq(&idl);
     let reparsed = {
         let mut error_sink = ErrorSink::default();
         let ret = ParsedZngFile::parse_str_with_resolver(
-            idl,
+            &idl,
             "test.zng",
             NullCfg,
             &resolver,
             &mut error_sink,
         );
-        error_sink.assert_no_errors(Some(idl));
+        error_sink.assert_no_errors(Some(&idl));
         ret
     };
 
-    assert_eq!(parsed.spec.types, reparsed.spec.types);
-    assert_eq!(parsed.spec.traits, reparsed.spec.traits);
-    assert_eq!(parsed.spec.funcs, reparsed.spec.funcs);
-    assert_eq!(parsed.spec.extern_cpp_funcs, reparsed.spec.extern_cpp_funcs);
-    assert_eq!(parsed.spec.extern_cpp_impls, reparsed.spec.extern_cpp_impls);
-    assert_eq!(parsed.spec.crate_name, reparsed.spec.crate_name);
+    assert_eq!(parsed.spec, reparsed.spec);
 
     (parsed.spec, reparsed.spec)
 }
@@ -432,6 +423,209 @@ extern "C++" {
 }
 
 #[test]
+fn reparse_top_level_and_mod_funcs() {
+    let _ = check_round_trip(
+        r#"
+fn top_before();
+mod crate::m {
+    fn in_mod_a(i32) -> bool;
+    safe fn in_mod_b<u32, u64>();
+}
+unsafe fn top_after(u8);
+        "#,
+        expect![[r#"
+            fn ::top_before();
+            fn crate::m::in_mod_a(i32) -> bool;
+            safe fn crate::m::in_mod_b<u32, u64>();
+            unsafe fn ::top_after(u8);
+        "#]],
+    );
+}
+
+#[test]
+fn reparse_cpp_additional_includes_hash_escalation() {
+    let _ = check_round_trip(
+        r###"
+#cpp_additional_includes r##"#include "foo.h" // contains "# inside"##
+        "###,
+        expect![[r####"
+            #cpp_additional_includes r##"#include "foo.h" // contains "# inside"##
+        "####]],
+    );
+
+    let _ = check_round_trip(
+        r##"
+#cpp_additional_includes r#"#include "trailing.h""#
+        "##,
+        expect![[r###"
+            #cpp_additional_includes r#"#include "trailing.h""#
+        "###]],
+    );
+}
+
+#[test]
+fn reparse_misc_printer_fixes() {
+    let _ = check_round_trip(
+        r#"
+import "./dep.zng";
+
+type str {
+    wellknown_traits(?Sized);
+}
+
+type crate::HeapThing {
+    #heap_allocated;
+    wellknown_traits(Debug);
+    fn generic_method<u32, i64>(&self, Box<dyn crate::MyTrait + Send>);
+}
+
+trait crate::MyTrait {
+    fn step(&mut self, i32) -> bool;
+}
+        "#,
+        expect![[r#"
+            import "./dep.zng";
+
+            type str {
+                wellknown_traits(?Sized);
+            }
+
+            type crate::HeapThing {
+                #heap_allocated;
+                wellknown_traits(Debug);
+
+                fn generic_method<u32, i64>(&self, Box<dyn crate::MyTrait + Send>);
+            }
+
+            trait crate::MyTrait {
+                fn step(&mut self, i32) -> bool;
+            }
+        "#]],
+    );
+}
+
+/// Recursively collects every `.zng` file under `dir`.
+fn collect_zng_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            collect_zng_files(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "zng") {
+            out.push(path);
+        }
+    }
+}
+
+fn print_spec(spec: &ZngurSpec) -> String {
+    let mut buf = Vec::new();
+    IDLPrinter::new(&mut buf)
+        .write_idl(spec)
+        .expect("printing failure");
+    String::from_utf8(buf).expect("utf8 error")
+}
+
+/// Every `.zng` file in `examples/` must survive parse -> print -> parse unchanged.
+///
+/// `merge`d files are flattened into the printed output, so the reparse needs
+/// no import resolution.
+#[test]
+fn reparse_all_examples() {
+    let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples");
+    let mut files = vec![];
+    collect_zng_files(&examples, &mut files);
+    assert!(!files.is_empty(), "no example .zng files found");
+
+    let mut failures = vec![];
+    for path in &files {
+        let mut sink = ErrorSink::default();
+        let parsed = ParsedZngFile::parse(path, NullCfg, &mut sink);
+        if parsed.errors > 0 {
+            failures.push(format!(
+                "{}: original failed to parse:\n{}",
+                path.display(),
+                String::from_utf8_lossy(&sink.error_buffer)
+            ));
+            continue;
+        }
+        let printed = print_spec(&parsed.spec);
+        let mut sink = ErrorSink::default();
+        let reparsed = ParsedZngFile::parse_str_with_resolver(
+            &printed,
+            &path.to_string_lossy(),
+            NullCfg,
+            &DefaultImportResolver,
+            &mut sink,
+        );
+        if reparsed.errors > 0 {
+            failures.push(format!(
+                "{}: printed output failed to parse:\n{}\n--- printed ---\n{printed}",
+                path.display(),
+                strip_ansi_escapes::strip_str(String::from_utf8_lossy(&sink.error_buffer)),
+            ));
+            continue;
+        }
+        let (a, b) = (&parsed.spec, &reparsed.spec);
+        macro_rules! check_fields {
+            ($($field:ident),*) => {
+                $(
+                    if a.$field != b.$field {
+                        let before = format!("{:#?}", a.$field);
+                        let after = format!("{:#?}", b.$field);
+                        let first_diff = before
+                            .lines()
+                            .zip(after.lines())
+                            .position(|(x, y)| x != y)
+                            .unwrap_or(0);
+                        let context = |s: &str| {
+                            s.lines()
+                                .skip(first_diff.saturating_sub(3))
+                                .take(8)
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        };
+                        failures.push(format!(
+                            "{}: `{}` changed after round trip\n--- before ---\n{}\n--- after ---\n{}",
+                            path.display(),
+                            stringify!($field),
+                            context(&before),
+                            context(&after),
+                        ));
+                    }
+                )*
+            };
+        }
+        if a != b {
+            let before_len = failures.len();
+            check_fields!(
+                types,
+                traits,
+                funcs,
+                extern_cpp_funcs,
+                extern_cpp_impls,
+                imported_modules,
+                additional_includes,
+                convert_panic_to_exception,
+                crate_name
+            );
+            if failures.len() == before_len {
+                failures.push(format!("{}: spec changed after round trip", path.display(),));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} example round trips failed:\n\n{}",
+        failures.len(),
+        files.len(),
+        failures.join("\n\n========\n\n")
+    );
+}
+
+#[test]
 fn reparse_crate_directive() {
     let _ = check_round_trip(
         r#"
@@ -447,4 +641,51 @@ type c++::ns::Bar {
             }
         "#]],
     );
+}
+
+#[test]
+fn reparse_resolved_module_imports_including_nested_merge_rebasing() {
+    let resolver = MockFilesystem::new(vec![
+        (
+            "./sub/part.zng",
+            "import \"./bar.zng\";\nimport \"../other/baz.zng\";\n",
+        ),
+        (
+            "./sub/bar.zng",
+            "#crate bar_bindings\ntype c++::ns::Bar {}\n",
+        ),
+        (
+            "./other/baz.zng",
+            "#crate baz_bindings\ntype c++::ns::Baz {\n    #layout(size = 8, align = 4);\n    #trivially_relocatable;\n}\n",
+        ),
+    ]);
+    let (parsed, reparsed) = check_round_trip_with_resolver(
+        r#"
+#crate app_crate
+merge "./sub/part.zng";
+
+mod crate {
+    fn use_imported(&c++::ns::Bar, c++::ns::Baz);
+}
+    "#,
+        Some(Box::new(resolver)),
+        expect![[r#"
+            import "./sub/bar.zng";
+            import "./other/baz.zng";
+
+            #crate app_crate
+
+            fn crate::use_imported(&c++::ns::Bar, c++::ns::Baz);
+        "#]],
+    );
+    assert_eq!(parsed.imported_modules.len(), 2);
+    assert_eq!(
+        parsed.imported_modules[0].crate_name.as_deref(),
+        Some("bar_bindings")
+    );
+    assert_eq!(
+        parsed.imported_modules[1].crate_name.as_deref(),
+        Some("baz_bindings")
+    );
+    assert_eq!(parsed.imported_modules, reparsed.imported_modules);
 }

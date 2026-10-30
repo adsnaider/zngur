@@ -17,12 +17,10 @@ pub enum IDLItem {
     ExternImpl,
 }
 
-/// prints the zng IDL to an output writer
-/// uses it's own trait `WriteIDL` over `std::fmt::Display` to control:
+/// Prints the `.zng` IDL to an output writer.
+/// Uses its own trait `WriteIDL` over `std::fmt::Display` to control:
 ///   - the output of item types
 ///   - formatting
-///   -  and the path to core/std items like `Box`
-
 #[derive(Debug)]
 pub struct IDLPrinter<'a, W: Write> {
     enabled_items: Vec<IDLItem>,
@@ -106,6 +104,7 @@ impl<'a, W: Write> IDLPrinter<'a, W> {
         self.out.write_fmt(args)
     }
 
+    /// Retained for API compatibility; not used by built-in `WriteIDL` implementations.
     pub fn std_path(&self) -> &'static str {
         if self.no_std { "::core" } else { "::std" }
     }
@@ -169,7 +168,7 @@ impl WriteIDL for crate::RustType {
                 p.write_idl(ty)
             }
             Self::Boxed(ty) => {
-                write!(p, "{}::box::Box<", p.std_path())?;
+                write!(p, "Box<")?;
                 p.write_idl(ty)?;
                 write!(p, ">")
             }
@@ -182,7 +181,7 @@ impl WriteIDL for crate::RustType {
                 write!(p, "dyn ")?;
                 p.write_idl(trt)?;
                 for bound in marker_bounds {
-                    write!(p, "+ {bound}")?;
+                    write!(p, " + {bound}")?;
                 }
                 Ok(())
             }
@@ -190,7 +189,7 @@ impl WriteIDL for crate::RustType {
                 write!(p, "impl ")?;
                 p.write_idl(trt)?;
                 for bound in marker_bounds {
-                    write!(p, "+ {bound}")?;
+                    write!(p, " + {bound}")?;
                 }
                 Ok(())
             }
@@ -228,24 +227,28 @@ impl WriteIDL for crate::RustTrait {
     }
 }
 
+fn write_rust_path<W: Write>(p: &mut IDLPrinter<W>, path: &[String]) -> std::io::Result<()> {
+    let [first, rest @ ..] = path else {
+        return Ok(());
+    };
+    if first != "crate" {
+        write!(p, "::")?;
+    }
+    write!(p, "{first}")?;
+    for segment in rest {
+        write!(p, "::{segment}")?;
+    }
+    Ok(())
+}
+
 impl WriteIDL for crate::RustPathAndGenerics {
     fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
-        let (first, rest): (_, &[String]) = match &self.path[..] {
-            [first] => (first, &[]),
-            [first, rest @ ..] => (first, rest),
-            _ => {
-                // probably an error, a path with no segments
-                // return early to not print any generics because that would not be valid
-                return Ok(());
-            }
-        };
-        if first != "crate" {
-            write!(p, "::")?;
+        if self.path.is_empty() {
+            // probably an error, a path with no segments
+            // return early to not print any generics because that would not be valid
+            return Ok(());
         }
-        write!(p, "{first}")?;
-        for segment in rest {
-            write!(p, "::{segment}")?;
-        }
+        write_rust_path(p, &self.path)?;
 
         if (self.generics.len() + self.named_generics.len()) > 0 {
             write!(p, "<")?;
@@ -279,74 +282,89 @@ impl WriteIDL for crate::TypeVar {
 
 impl WriteIDL for crate::ZngurSpec {
     fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
+        // Each top-level section is separated from the previous one by a blank line.
+        let mut need_separator = false;
+        let mut separate = |p: &mut IDLPrinter<W>| -> std::io::Result<()> {
+            if need_separator {
+                writeln!(p)?;
+            }
+            need_separator = true;
+            Ok(())
+        };
+        if !self.imported_modules.is_empty() {
+            separate(p)?;
+            for import in &self.imported_modules {
+                writeln!(p, r#"import "{}";"#, import.path.display())?;
+            }
+        }
         if self.convert_panic_to_exception.0 {
+            separate(p)?;
             writeln!(p, "#convert_panic_to_exception")?;
         }
         if let Some(crate_name) = &self.crate_name {
-            if self.convert_panic_to_exception.0 {
-                writeln!(p)?;
-            }
+            separate(p)?;
             writeln!(p, "#crate {crate_name}")?;
         }
-        if !self.types.is_empty() {
-            if self.convert_panic_to_exception.0 || self.crate_name.is_some() {
-                writeln!(p)?;
-            }
+        if !self.additional_includes.0.is_empty() {
+            separate(p)?;
+            let includes = &self.additional_includes.0;
+            // The lexer has no escapes, so use a raw string with enough `#`s
+            // that its terminator can't appear in the contents.
+            let hashes = "#".repeat(
+                (0..)
+                    .find(|&n| !includes.contains(&format!("\"{}", "#".repeat(n))))
+                    .unwrap(),
+            );
+            writeln!(
+                p,
+                "#cpp_additional_includes r{hashes}\"{includes}\"{hashes}"
+            )?;
+        }
+        if !self.types.is_empty() && p.enabled(&IDLItem::Type) {
+            separate(p)?;
             for (i, ty) in self.types.iter().enumerate() {
-                if i > 0 && i < self.types.len() {
+                if i > 0 {
                     writeln!(p)?;
                 }
                 p.write_indent()?;
                 p.write_idl(ty)?;
             }
         }
-        if !self.funcs.is_empty() {
-            if !self.types.is_empty()
-                || self.convert_panic_to_exception.0
-                || self.crate_name.is_some()
-            {
-                writeln!(p)?;
-            }
+        if self.funcs.iter().any(|f| !f.path.path.is_empty()) && p.enabled(&IDLItem::Function) {
+            separate(p)?;
             for func in &self.funcs {
+                if func.path.path.is_empty() {
+                    continue;
+                }
+                p.write_indent()?;
                 p.write_idl(func)?;
             }
         }
-        if !self.traits.is_empty() {
-            if !self.funcs.is_empty()
-                || !self.types.is_empty()
-                || self.convert_panic_to_exception.0
-                || self.crate_name.is_some()
-            {
-                writeln!(p)?;
-            }
+        if !self.traits.is_empty() && p.enabled(&IDLItem::Trait) {
+            separate(p)?;
             for (i, trt) in self.traits.values().enumerate() {
-                if i > 0 && i < self.traits.len() {
+                if i > 0 {
                     writeln!(p)?;
                 }
                 p.write_idl(trt)?;
             }
         }
-        if !self.extern_cpp_funcs.is_empty() || !self.extern_cpp_impls.is_empty() {
-            if !self.traits.is_empty()
-                || !self.funcs.is_empty()
-                || !self.types.is_empty()
-                || self.convert_panic_to_exception.0
-                || self.crate_name.is_some()
-            {
-                writeln!(p)?;
-            }
+        let has_extern_fns = !self.extern_cpp_funcs.is_empty() && p.enabled(&IDLItem::ExternFn);
+        let has_extern_impls = !self.extern_cpp_impls.is_empty() && p.enabled(&IDLItem::ExternImpl);
+        if has_extern_fns || has_extern_impls {
+            separate(p)?;
             p.write_indent()?;
             writeln!(p, r#"extern "C++" {{"#)?;
             p.indent();
-            if !self.extern_cpp_funcs.is_empty() {
+            if has_extern_fns {
                 writeln!(p)?;
                 for extern_fn in &self.extern_cpp_funcs {
                     p.write_indent()?;
                     p.write_idl(extern_fn)?;
                 }
             }
-            if !self.extern_cpp_impls.is_empty() {
-                if !self.extern_cpp_funcs.is_empty() {
+            if has_extern_impls {
+                if has_extern_fns {
                     writeln!(p)?;
                 }
                 for extern_impl in &self.extern_cpp_impls {
@@ -365,14 +383,19 @@ impl WriteIDL for crate::ZngurSpec {
 
 impl WriteIDL for crate::ZngurFn {
     fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
-        if p.enabled(&IDLItem::Function) {
+        if p.enabled(&IDLItem::Function) && !self.path.path.is_empty() {
             let safety = match self.is_safe {
                 Some(true) => "safe ",
                 Some(false) => "unsafe ",
                 None => "",
             };
             write!(p, "{safety}fn ")?;
-            p.write_idl(&self.path)?;
+            write_rust_path(p, &self.path.path)?;
+            if !self.path.generics.is_empty() {
+                write!(p, "<")?;
+                p.write_idl(&self.path.generics)?;
+                write!(p, ">")?;
+            }
             write!(p, "(")?;
             p.write_idl(&self.inputs)?;
             write!(p, ")")?;
@@ -394,30 +417,38 @@ impl WriteIDL for crate::ZngurType {
             writeln!(p, " {{")?;
             p.indent();
 
-            if self.layout.is_some() {
-                p.write_indent()?;
-                p.write_idl(&self.layout)?;
-            }
-            if self.trivially_relocatable {
-                p.write_indent()?;
-                writeln!(p, "#trivially_relocatable;")?;
+            if p.enabled(&IDLItem::TypeLayout) {
+                // `?Sized` implies a layout, and restating it is a parse error.
+                let is_unsized = self
+                    .wellknown_traits
+                    .contains(&crate::ZngurWellknownTrait::Unsized);
+                if self.layout.is_some() && !is_unsized {
+                    p.write_indent()?;
+                    p.write_idl(&self.layout)?;
+                }
+                if self.trivially_relocatable {
+                    p.write_indent()?;
+                    writeln!(p, "#trivially_relocatable;")?;
+                }
             }
 
             if p.enabled(&IDLItem::TypeWellknownTrait) {
+                // `Drop` is implied by the parser and isn't valid in `wellknown_traits`.
                 let drop_filtered: Vec<_> = self
                     .wellknown_traits
                     .iter()
                     .filter(|wk| !matches!(wk, crate::ZngurWellknownTrait::Drop))
+                    .copied()
                     .collect();
                 if !drop_filtered.is_empty() {
                     p.write_indent()?;
                     write!(p, "wellknown_traits(")?;
-                    p.write_idl(&self.wellknown_traits)?;
+                    p.write_idl(&drop_filtered)?;
                     writeln!(p, ");")?;
                 }
             }
 
-            if self.constructor.is_some() {
+            if self.constructor.is_some() && p.enabled(&IDLItem::TypeConstructor) {
                 p.write_indent()?;
                 p.write_idl(&self.constructor)?;
             }
@@ -433,7 +464,7 @@ impl WriteIDL for crate::ZngurType {
                 }
             }
 
-            if !self.fields.is_empty() {
+            if !self.fields.is_empty() && p.enabled(&IDLItem::TypeField) {
                 writeln!(p)?;
                 for field in &self.fields {
                     p.write_indent()?;
@@ -441,7 +472,7 @@ impl WriteIDL for crate::ZngurType {
                 }
             }
 
-            if !self.methods.is_empty() {
+            if !self.methods.is_empty() && p.enabled(&IDLItem::TypeMethod) {
                 writeln!(p)?;
                 for method in &self.methods {
                     p.write_indent()?;
@@ -474,6 +505,7 @@ impl WriteIDL for crate::ZngurTrait {
                         None => {}
                     }
                     p.write_idl(method)?;
+                    writeln!(p, ";")?;
                 }
                 p.dedent();
             }
@@ -544,7 +576,7 @@ impl WriteIDL for crate::LayoutPolicy {
                     writeln!(p, "layout_conservative(size = {size}, align = {align});")?;
                 }
                 Self::HeapAllocated => {
-                    writeln!(p, "heap_allocate;")?;
+                    writeln!(p, "heap_allocated;")?;
                 }
                 Self::OnlyByRef => {
                     writeln!(p, "only_by_ref;")?;
@@ -560,7 +592,7 @@ impl WriteIDL for crate::ZngurWellknownTrait {
         match self {
             Self::Debug => write!(p, "Debug"),
             Self::Drop => write!(p, "Drop"),
-            Self::Unsized => write!(p, "Unsized"),
+            Self::Unsized => write!(p, "?Sized"),
             Self::Copy => write!(p, "Copy"),
         }
     }
@@ -689,12 +721,7 @@ impl WriteIDL for crate::ZngurMethod {
         write!(p, "fn {name}")?;
         if self.generics.len() > 0 {
             write!(p, "<")?;
-            for (i, generic) in self.generics.iter().enumerate() {
-                p.write_idl(generic)?;
-                if i < self.generics.len() {
-                    write!(p, ", ")?;
-                }
-            }
+            p.write_idl(&self.generics)?;
             write!(p, ">")?;
         }
         write!(p, "({receiver}{rec_sep}")?;
@@ -799,6 +826,104 @@ fn print_spec() {
 }
 
 safe fn crate::do_w_example(&crate::Example) -> bool;
+",
+        idl
+    );
+}
+
+#[test]
+fn print_funcs_flat() {
+    let func = |path: &[&str]| crate::ZngurFn {
+        path: crate::RustPathAndGenerics {
+            path: path.iter().map(|s| s.to_string()).collect(),
+            generics: vec![],
+            named_generics: vec![],
+        },
+        inputs: vec![],
+        output: crate::RustType::UNIT,
+        is_safe: None,
+    };
+    let spec = crate::ZngurSpec {
+        funcs: vec![
+            func(&["top1"]),
+            func(&["crate", "a"]),
+            func(&["crate", "b"]),
+            func(&["top2"]),
+            func(&["crate", "m", "c"]),
+            func(&["crate", "m", "d"]),
+            func(&["crate", "e"]),
+        ],
+        ..Default::default()
+    };
+
+    let mut buf = Vec::new();
+    crate::printing::IDLPrinter::new(&mut buf)
+        .write_idl(&spec)
+        .expect("write error");
+    let idl = String::from_utf8(buf).expect("utf8 error");
+
+    assert_eq!(
+        "fn ::top1();
+fn crate::a();
+fn crate::b();
+fn ::top2();
+fn crate::m::c();
+fn crate::m::d();
+fn crate::e();
+",
+        idl
+    );
+
+    let mut buf = Vec::new();
+    crate::printing::IDLPrinter::new(&mut buf)
+        .write_idl(&func(&["standalone"]))
+        .expect("write error");
+    assert_eq!("fn ::standalone();\n", String::from_utf8(buf).unwrap());
+
+    let mut buf = Vec::new();
+    crate::printing::IDLPrinter::new(&mut buf)
+        .write_idl(&func(&["crate", "m", "f"]))
+        .expect("write error");
+    assert_eq!("fn crate::m::f();\n", String::from_utf8(buf).unwrap());
+}
+
+#[test]
+fn disabled_section_does_not_emit_blank_separator() {
+    let spec = crate::ZngurSpec {
+        convert_panic_to_exception: crate::ConvertPanicToException(true),
+        funcs: vec![crate::ZngurFn {
+            path: crate::RustPathAndGenerics {
+                path: vec!["crate".into(), "f".into()],
+                generics: vec![],
+                named_generics: vec![],
+            },
+            inputs: vec![],
+            output: crate::RustType::UNIT,
+            is_safe: None,
+        }],
+        extern_cpp_funcs: vec![crate::ZngurExternCppFn {
+            name: "ext".into(),
+            inputs: vec![],
+            output: crate::RustType::UNIT,
+            is_safe: true,
+        }],
+        ..Default::default()
+    };
+
+    let mut buf = Vec::new();
+    let mut printer = crate::printing::IDLPrinter::new(&mut buf);
+    printer.disable_item(&IDLItem::Function);
+    printer.write_idl(&spec).expect("write error");
+    let idl = String::from_utf8(buf).expect("utf8 error");
+
+    assert_eq!(
+        "#convert_panic_to_exception
+
+extern \"C++\" {
+
+    safe fn ext();
+
+}
 ",
         idl
     );
