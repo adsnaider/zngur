@@ -1884,3 +1884,36 @@ fn entity_path_rust_reference_formats_rust_paths_and_rejects_empty_or_cpp() {
     assert_eq!(EntityPath::Cpp(Vec::new()).rust_reference(), None);
     assert_eq!(EntityPath::cpp(["a", "Foo"]).rust_reference(), None);
 }
+
+#[test]
+fn files_with_only_comments_parse() {
+    for text in [
+        "",
+        "   \n\t\n",
+        "// Only a comment.",
+        "// Only a comment, with a final newline.\n",
+        "\n// Two comments,\n// and no items, with an apostrophe: isn't it?\n\n",
+    ] {
+        let parsed = parse_str(text, NullCfg, |e| {
+            panic!("unexpected diagnostic for {text:?}: {e}")
+        });
+        assert_eq!(parsed.errors, 0, "{text:?}");
+        assert_eq!(parsed.warnings, 0, "{text:?}");
+        assert!(parsed.spec.types.is_empty(), "{text:?}");
+    }
+}
+
+#[test]
+fn comments_after_the_last_item_parse() {
+    for text in [
+        "type c++::a::B {\n    #cpp_ref \"::a::B\";\n}\n// A trailing comment.\n",
+        "type c++::a::B {\n    #cpp_ref \"::a::B\";\n}\n// A trailing comment.",
+    ] {
+        let parsed = parse_str(text, NullCfg, |e| {
+            panic!("unexpected diagnostic for {text:?}: {e}")
+        });
+        assert_eq!(parsed.errors, 0, "{text:?}");
+        assert_eq!(parsed.warnings, 0, "{text:?}");
+        assert_eq!(parsed.spec.types.len(), 1, "{text:?}");
+    }
+}

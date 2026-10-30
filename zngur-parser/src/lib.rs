@@ -2842,13 +2842,17 @@ fn lexer<'src>()
     let comment = just("//")
         .then(any().and_is(just('\n').not()).repeated())
         .padded();
+    let padding = comment.repeated().padded();
 
-    token
-        .map_with(|tok, extra| (tok, extra.span()))
-        .padded_by(comment.repeated())
-        .padded()
-        .repeated()
-        .collect()
+    padding
+        .clone()
+        .ignore_then(
+            token
+                .map_with(|tok, extra| (tok, extra.span()))
+                .then_ignore(padding)
+                .repeated()
+                .collect(),
+        )
         .boxed()
 }
 
