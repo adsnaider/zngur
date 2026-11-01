@@ -33,7 +33,8 @@ type c++::geo::Point {
     safe fn x_ref<'a>(&'a const self) -> &'a const i32;
 }
 
-extern "C++" {
+mod c++::geo {
+    safe fn origin() -> c++::geo::Point;
     safe fn distance<'a>(&'a const c++::geo::Point, &'a const c++::geo::Point) -> f64;
     safe fn normalize<'a>(&'a unique var c++::geo::Point);
     unsafe fn bounds<'a>(&'a const c++::geo::Point, i32*, i32*);
@@ -67,7 +68,8 @@ A reference in a `.zng` file is a promise from the person who writes it: the C++
 valid for that lifetime, and, for `unique` references, nothing else accesses the object meanwhile.
 zngur can't check it against C++, so name the lifetimes explicitly ([Lifetimes](../lifetimes.md)).
 References without a lifetime are elided like in Rust, with a warning (`elided_lifetimes`) on C++
-member functions, which `#allow(elided_lifetimes)` at the top of a `.zng` file silences.
+functions that zngur calls directly (member functions, free functions, and constructors), which
+`#allow(elided_lifetimes)` at the top of a `.zng` file silences.
 
 Shared references are the default: `&'a var T` is a `T&` that others may share, through which C++
 member functions that aren't `const` can still be called (see
@@ -95,14 +97,16 @@ can pass `&x` / `&mut x` directly (for a `const T&`, whether `x` is `const` or n
 `Cpp::from_mut(&mut n)` for a Rust `i32`.
 
 Whether a function is `safe` is up to the `.zng` file: functions that dereference raw pointers
-should be `unsafe`, and zngur warns (`safe_raw_pointer`) when a `safe` C++ member function takes a
-raw pointer, which `#allow(safe_raw_pointer)` silences.
+should be `unsafe`, and zngur warns (`safe_raw_pointer`) when a `safe` C++ function that zngur
+calls directly (member function, free function, or constructor) takes a raw pointer, which
+`#allow(safe_raw_pointer)` silences.
 
 ```rust
-generated::normalize(&mut p);
-let d = generated::distance(&p, &p);
+let mut p: Point = generated::geo::origin();
+generated::geo::normalize(&mut p);
+let d = generated::geo::distance(&p, &p);
 let (mut lo, mut hi) = (0, 0);
-unsafe { generated::bounds(&p, Cpp::from_mut(&mut lo), Cpp::from_mut(&mut hi)) };
+unsafe { generated::geo::bounds(&p, Cpp::from_mut(&mut lo), Cpp::from_mut(&mut hi)) };
 ```
 
 ## In C++
@@ -110,11 +114,18 @@ unsafe { generated::bounds(&p, Cpp::from_mut(&mut lo), Cpp::from_mut(&mut hi)) }
 Each side sees its own language's form: Rust sees `&'a T` / `Option<&'a T>`, and C++ sees `T&` /
 `T*`, whichever side calls and whichever implements.
 
-C++ [member functions](./cpp_methods.md) get references or pointers, as declared: references (to
-C++ objects or to builtin Rust values) and C++-style references are C++ references, nullable
-references and pointers are pointers, and references to other Rust values (`&crate::Foo`, `&str`,
-...) are `rust::Ref<T>` / `rust::RefMut<T>`. They're ordinary C++ calls, with arguments of those
-types.
+C++ functions that zngur calls directly ([member functions](./cpp_methods.md),
+[free functions](./cpp_functions.md), [constructors](./cpp_constructors.md)) get references or
+pointers, as declared: references (to C++ objects or to builtin Rust values) and C++-style
+references are C++ references, nullable references and pointers are pointers, and references to
+other Rust values (`&crate::Foo`, `&str`, ...) are `rust::Ref<T>` / `rust::RefMut<T>`. They're
+ordinary C++ calls, with arguments of those types:
+
+```cpp
+namespace geo {
+double distance(const Point& a, const Point& b);
+}
+```
 
 Functions in `extern "C++"` blocks, which you write in C++ for Rust, and Rust functions that C++
 calls, take and return references to C++ objects as C++ references, and nullable references and raw
@@ -125,9 +136,11 @@ are aliases for `T&` / `const T&` and `T*` / `const T*`, where `W` is the Rust w
 `extern "C++"` impls of `c++::` types (`&self`, `&mut self`) are `T&`:
 
 ```cpp
-// `safe fn distance<'a>(&'a const c++::geo::Point, &'a const c++::geo::Point) -> f64;`
-double rust::exported_functions::distance(const ::geo::Point& a, const ::geo::Point& b) {
-  return std::hypot(a.x - b.x, a.y - b.y);
+// In `extern "C++"`:
+// `safe fn midpoint<'a>(&'a const c++::geo::Point, &'a const c++::geo::Point) -> c++::geo::Point;`
+::geo::Point rust::exported_functions::midpoint(
+    const ::geo::Point& a, const ::geo::Point& b) {
+  return ::geo::Point{(a.x + b.x) / 2, (a.y + b.y) / 2};
 }
 
 // `safe fn first<'a>(::std::option::Option<&'a const c++::geo::Point>) -> i32;`

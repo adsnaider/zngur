@@ -406,6 +406,13 @@ impl WriteIDL for crate::ZngurSpec {
                 p.write_idl(func)?;
             }
         }
+        if !self.cpp_funcs.is_empty() && p.enabled(&IDLItem::Function) {
+            separate(p)?;
+            for func in &self.cpp_funcs {
+                p.write_indent()?;
+                p.write_idl(func)?;
+            }
+        }
         if !self.traits.is_empty() && p.enabled(&IDLItem::Trait) {
             separate(p)?;
             for (i, trt) in self.traits.values().enumerate() {
@@ -488,6 +495,33 @@ impl WriteIDL for crate::ZngurFn {
             if self.output != crate::RustType::UNIT {
                 write!(p, " -> ")?;
                 p.write_idl(&self.output)?;
+            }
+            writeln!(p, ";")?;
+        }
+        Ok(())
+    }
+}
+
+impl WriteIDL for crate::ZngurCppFn {
+    fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
+        if p.enabled(&IDLItem::Function) && !self.namespace.is_empty() {
+            let safety = if self.is_safe { "safe" } else { "unsafe" };
+            write!(
+                p,
+                "{safety} fn c++::{}::{}",
+                self.namespace.join("::"),
+                self.cpp_name
+            )?;
+            write_lifetimes_and_generics(p, &self.lifetimes, &[])?;
+            write!(p, "(")?;
+            p.write_idl(&self.inputs)?;
+            write!(p, ")")?;
+            if self.output != crate::RustType::UNIT {
+                write!(p, " -> ")?;
+                p.write_idl(&self.output)?;
+            }
+            if let Some(rust_name) = &self.rust_name {
+                write!(p, " as {rust_name}")?;
             }
             writeln!(p, ";")?;
         }

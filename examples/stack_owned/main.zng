@@ -43,6 +43,21 @@ type c++::MyCppWrapper {
     unsafe constructor(const c++::MyCppWrapper*, i32) as shifted;
 }
 
+// Free C++ functions, in their C++ namespace. Rust calls them directly, as
+// `generated::geometry::dot(...)`; `as` names C++ overloads.
+mod c++::geometry {
+    type Tag {}
+    safe fn read_tag(&const Tag) -> i32 as Tag;
+    safe fn dot(&const c++::MyCppWrapper, &const c++::MyCppWrapper) -> i32;
+    safe fn origin() -> c++::MyCppWrapper;
+    safe fn pick_first<'a>(
+        &'a const c++::MyCppWrapper,
+        &const c++::MyCppWrapper,
+    ) -> &'a const c++::MyCppWrapper;
+    unsafe fn sum_from_ptr(const c++::MyCppWrapper*) -> i32;
+    safe fn twice(i64) -> i64;
+    safe fn twice(f64) -> f64 as twice_f64;
+}
 type c++::BoxedInt {
     #trivially_relocatable;
     #layout(size = 8, align = 8);

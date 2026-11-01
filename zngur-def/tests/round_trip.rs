@@ -613,6 +613,7 @@ fn reparse_all_examples() {
                 types,
                 traits,
                 funcs,
+                cpp_funcs,
                 extern_cpp_funcs,
                 extern_cpp_impls,
                 imported_modules,
@@ -901,6 +902,53 @@ type crate::Foo {
 }
 
 #[test]
+fn reparse_cpp_functions() {
+    let parsed = check_round_trip(
+        r#"
+#crate my_crate
+mod c++::a {
+    type B {
+        #layout(size = 8, align = 4);
+        #trivially_relocatable;
+    }
+    unsafe fn f(const B&) -> i32;
+    safe fn g(i32) -> B as make_b;
+    safe fn type(i32) -> i32 as get_type;
+    safe fn b::j();
+    mod b {
+        safe fn h();
+    }
+}
+safe fn c++::a::b::k(i32) -> i32;
+        "#,
+        expect![[r#"
+            #crate my_crate
+
+            type c++::a::B {
+                #layout(size = 8, align = 4);
+                #trivially_relocatable;
+            }
+
+            unsafe fn c++::a::f(const c++::a::B&) -> i32;
+            safe fn c++::a::g(i32) -> c++::a::B as make_b;
+            safe fn c++::a::type(i32) -> i32 as get_type;
+            safe fn c++::a::b::j();
+            safe fn c++::a::b::h();
+            safe fn c++::a::b::k(i32) -> i32;
+        "#]],
+    );
+
+    let mut standalone = Vec::new();
+    zngur_def::printing::IDLPrinter::new(&mut standalone)
+        .write_idl(&parsed.0.cpp_funcs[1])
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(standalone).unwrap(),
+        "safe fn c++::a::g(i32) -> c++::a::B as make_b;\n"
+    );
+}
+
+#[test]
 fn reparse_cpp_receivers() {
     let _ = check_round_trip(
         r#"
@@ -912,6 +960,10 @@ type c++::a::B {
     unsafe fn raw_get(const self*) -> i32;
     unsafe fn raw_set(self&, i32);
     safe constructor<'a>(&'a const c++::a::B) as copy;
+}
+
+mod c++::a {
+    safe fn pick<'a>(&'a const c++::a::B, &'a const c++::a::B) -> &'a const c++::a::B;
 }
 "#,
         expect![[r#"
@@ -926,6 +978,8 @@ type c++::a::B {
                 unsafe fn raw_get(const self*) -> i32;
                 unsafe fn raw_set(self&, i32);
             }
+
+            safe fn c++::a::pick<'a>(&'a const c++::a::B, &'a const c++::a::B) -> &'a const c++::a::B;
         "#]],
     );
 }
@@ -946,6 +1000,10 @@ type c++::a::B {
 type crate::Foo {
     #layout(size = 0, align = 1);
     fn f(&self, &const c++::a::B, &unique var c++::a::B, &i32);
+}
+
+mod c++::a {
+    safe fn pick<'a>(&'a const c++::a::B, &'a var c++::a::B) -> &'a unique var c++::a::B;
 }
 
 extern "C++" {
@@ -971,6 +1029,8 @@ extern "C++" {
 
                 fn f(&self, &const c++::a::B, &unique var c++::a::B, &i32);
             }
+
+            safe fn c++::a::pick<'a>(&'a const c++::a::B, &'a var c++::a::B) -> &'a unique var c++::a::B;
 
             extern "C++" {
 

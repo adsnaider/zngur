@@ -54,3 +54,15 @@ struct OpaqueRef {
 // The `.zng` file names C++ types by their C++ path, so these aliases give them the names it uses.
 using MyCppWrapper = CppType;
 using BoxedInt = std::unique_ptr<int>;
+
+// Free functions that Rust calls directly (declared in `main.zng`).
+namespace geometry {
+inline int dot(const CppType &a, const CppType &b) { return a.x * b.x + a.y * b.y; }
+inline CppType origin() { return CppType(0, 0); }
+inline const CppType &pick_first(const CppType &a, const CppType &) { return a; }
+inline int sum_from_ptr(const CppType *p) { return p->x + p->y; }
+struct Tag {};
+inline int read_tag(const Tag &) { return 9; }
+inline int64_t twice(int64_t v) { return 2 * v; }
+inline double twice(double v) { return 2 * v; }
+} // namespace geometry
