@@ -12,6 +12,7 @@
 #include <functional>
 #include <math.h>
 #include <memory>
+#include <new>
 #include <type_traits>
 
 {% if self.panic_to_exception %}
@@ -136,6 +137,40 @@ namespace {{ self.cpp_namespace }} {
   // file), which cross the boundary as pointers.
   template<typename W>
   using CppRef = typename CppTypeOf<W>::type&;
+
+  // Whether `Actual` and `Expected` have the same representation across the FFI boundary:
+  // identical types, or arithmetic types of the same sign/floating-point category and size
+  // (e.g. `long` and `long long` on LP64, or `int` and `int32_t`). `bool` must match `bool`
+  // (`std::is_integral<bool>` is true in C++, so exclude `bool` from integer matching).
+  template<typename Actual, typename Expected>
+  struct __zngur_same_arithmetic_props : ::std::integral_constant<
+      bool,
+      ::std::is_floating_point<Actual>::value == ::std::is_floating_point<Expected>::value
+          && ::std::is_signed<Actual>::value == ::std::is_signed<Expected>::value
+          && sizeof(Actual) == sizeof(Expected) && alignof(Actual) == alignof(Expected)
+  > {};
+
+  template<typename Actual, typename Expected, typename = void>
+  struct __zngur_same_arithmetic_repr : ::std::false_type {};
+
+  template<typename Actual, typename Expected>
+  struct __zngur_same_arithmetic_repr<
+      Actual,
+      Expected,
+      typename ::std::enable_if<
+          !::std::is_reference<Actual>::value && !::std::is_reference<Expected>::value
+          && !::std::is_same<typename ::std::remove_cv<Actual>::type, bool>::value
+          && !::std::is_same<typename ::std::remove_cv<Expected>::type, bool>::value
+          && ::std::is_arithmetic<Actual>::value && ::std::is_arithmetic<Expected>::value
+      >::type
+  > : __zngur_same_arithmetic_props<Actual, Expected> {};
+
+  template<typename Actual, typename Expected>
+  struct __zngur_same_repr : ::std::conditional<
+      ::std::is_same<Actual, Expected>::value,
+      ::std::true_type,
+      __zngur_same_arithmetic_repr<Actual, Expected>
+  >::type {};
 
   template<typename T>
   inline uint8_t* __zngur_internal_data_ptr(const T& t) noexcept {

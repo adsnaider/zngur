@@ -5,19 +5,19 @@ whose lifetime you know are written as references to C++ objects, C++ pointers w
 know (and which may be null) as `Option`s of them, and the others the C++ way, which makes them raw
 pointers in Rust:
 
-| `.zng`                       | C++                                            | Rust                                           |
-| ---------------------------- | ---------------------------------------------- | ---------------------------------------------- |
-| `&'a const T`                | `const T&`                                     | `&'a T<Const>` (`&'a Cpp<i32, Const>`)         |
-| `&'a var T`                  | `T&`, shared                                   | `&'a T` (`&'a Cpp<i32>`)                       |
-| `&'a unique var T`           | `T&`, unique                                   | `&'a mut T` (`&'a mut Cpp<i32>`)               |
-| `&'a unique const T`         | `const T&`, unique                             | `&'a mut T<Const>` (`&'a mut Cpp<i32, Const>`) |
-| `Option<&'a const T>`        | `const T*`                                     | `Option<&'a T<Const>>`                         |
-| `Option<&'a var T>`          | `T*`, shared                                   | `Option<&'a T>`                                |
-| `Option<&'a unique var T>`   | `T*`, unique                                   | `Option<&'a mut T>`                            |
-| `Option<&'a unique const T>` | `const T*`, unique                             | `Option<&'a mut T<Const>>`                     |
-| `const T&` / `const T*`      | `const T&` / `const T*`                        | `*const T<Const>` (`*const Cpp<i32, Const>`)   |
-| `T&` / `T*`                  | `T&` / `T*`                                    | `*mut T` (`*mut Cpp<i32>`)                     |
-| `&'a i32` / `&'a mut i32`    | `rust::Ref<int32_t>` / `rust::RefMut<int32_t>` | `&'a i32` / `&'a mut i32`                      |
+| `.zng`                       | C++                                                                                                 | Rust                                           |
+| ---------------------------- | --------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| `&'a const T`                | `const T&`                                                                                          | `&'a T<Const>` (`&'a Cpp<i32, Const>`)         |
+| `&'a var T`                  | `T&`, shared                                                                                        | `&'a T` (`&'a Cpp<i32>`)                       |
+| `&'a unique var T`           | `T&`, unique                                                                                        | `&'a mut T` (`&'a mut Cpp<i32>`)               |
+| `&'a unique const T`         | `const T&`, unique                                                                                  | `&'a mut T<Const>` (`&'a mut Cpp<i32, Const>`) |
+| `Option<&'a const T>`        | `const T*`                                                                                          | `Option<&'a T<Const>>`                         |
+| `Option<&'a var T>`          | `T*`, shared                                                                                        | `Option<&'a T>`                                |
+| `Option<&'a unique var T>`   | `T*`, unique                                                                                        | `Option<&'a mut T>`                            |
+| `Option<&'a unique const T>` | `const T*`, unique                                                                                  | `Option<&'a mut T<Const>>`                     |
+| `const T&` / `const T*`      | `const T&` / `const T*`                                                                             | `*const T<Const>` (`*const Cpp<i32, Const>`)   |
+| `T&` / `T*`                  | `T&` / `T*`                                                                                         | `*mut T` (`*mut Cpp<i32>`)                     |
+| `&'a i32` / `&'a mut i32`    | `const int32_t&` / `int32_t&` (or `rust::Ref<int32_t>` / `rust::RefMut<int32_t>` in `extern "C++"`) | `&'a i32` / `&'a mut i32`                      |
 
 `T` is a `c++::` type, a builtin like `i32` (the Rust type in parentheses) or a C++ pointer, and
 `Option` in `.zng` stands for `::std::option::Option` or `::core::option::Option`. The last row is
@@ -29,6 +29,8 @@ Rust type of builtins that are C++ objects.
 type c++::geo::Point {
     #trivially_relocatable;
     #layout(size = 8, align = 4);
+
+    safe fn x_ref<'a>(&'a const self) -> &'a const i32;
 }
 
 extern "C++" {
@@ -44,6 +46,9 @@ Every C++ class gets a constness parameter in Rust, which defaults to non-`const
 `Point<NonConst>` (a C++ `Point`), and `Point<Const>` is a `const Point` (`zngur_lib::Const` and
 `zngur_lib::NonConst`).
 
+- `const` [member functions](./cpp_methods.md) are available on both, and the others only on
+  `Point<NonConst>`. So a `&Point<Const>` (a C++ `const Point&`) can only call `const` member
+  functions, even through a `&mut Point<Const>`.
 - Going from a `Point` to a `Point<Const>` is explicit, and there's no way back: `p.as_const()`
   (`&Point` to `&Point<Const>`), `p.as_const_mut()` (`&mut Point` to `&mut Point<Const>`, unique
   access to a `const` object), and `p.into_const()` (by value).
@@ -61,9 +66,11 @@ Every C++ class gets a constness parameter in Rust, which defaults to non-`const
 A reference in a `.zng` file is a promise from the person who writes it: the C++ reference is
 valid for that lifetime, and, for `unique` references, nothing else accesses the object meanwhile.
 zngur can't check it against C++, so name the lifetimes explicitly ([Lifetimes](../lifetimes.md)).
-References without a lifetime are elided like in Rust.
+References without a lifetime are elided like in Rust, with a warning (`elided_lifetimes`) on C++
+member functions, which `#allow(elided_lifetimes)` at the top of a `.zng` file silences.
 
-Shared references are the default: `&'a var T` is a `T&` that others may share (see
+Shared references are the default: `&'a var T` is a `T&` that others may share, through which C++
+member functions that aren't `const` can still be called (see
 [C++ objects vs Rust values](./cpp_objects.md)).
 
 ## Nullable references
@@ -88,7 +95,8 @@ can pass `&x` / `&mut x` directly (for a `const T&`, whether `x` is `const` or n
 `Cpp::from_mut(&mut n)` for a Rust `i32`.
 
 Whether a function is `safe` is up to the `.zng` file: functions that dereference raw pointers
-should be `unsafe`.
+should be `unsafe`, and zngur warns (`safe_raw_pointer`) when a `safe` C++ member function takes a
+raw pointer, which `#allow(safe_raw_pointer)` silences.
 
 ```rust
 generated::normalize(&mut p);
@@ -101,6 +109,12 @@ unsafe { generated::bounds(&p, Cpp::from_mut(&mut lo), Cpp::from_mut(&mut hi)) }
 
 Each side sees its own language's form: Rust sees `&'a T` / `Option<&'a T>`, and C++ sees `T&` /
 `T*`, whichever side calls and whichever implements.
+
+C++ [member functions](./cpp_methods.md) get references or pointers, as declared: references (to
+C++ objects or to builtin Rust values) and C++-style references are C++ references, nullable
+references and pointers are pointers, and references to other Rust values (`&crate::Foo`, `&str`,
+...) are `rust::Ref<T>` / `rust::RefMut<T>`. They're ordinary C++ calls, with arguments of those
+types.
 
 Functions in `extern "C++"` blocks, which you write in C++ for Rust, and Rust functions that C++
 calls, take and return references to C++ objects as C++ references, and nullable references and raw

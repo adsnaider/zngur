@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use zngur_def::{
-    CppConstness, Lifetime, Merge, RustPathAndGenerics, RustTrait, RustType, TypeVar,
-    ZngurConstructor, ZngurField, ZngurMethod, ZngurMethodDetails, ZngurType, ZngurVariant,
+    CppConstness, CppMethodReceiver, Lifetime, Merge, RustPathAndGenerics, RustTrait, RustType,
+    TypeVar, ZngurConstructor, ZngurCppMethod, ZngurField, ZngurMethod, ZngurMethodDetails,
+    ZngurMethodReceiver, ZngurType, ZngurVariant,
 };
 
 fn match_lifetime<'a, 'b>(
@@ -404,73 +405,95 @@ fn substitute_vars(
     substitute_type(ty, ctx, fresh_avoid, in_scope_lts)
 }
 
+struct ItemSubst<'a> {
+    ctx: SubstCtx<'a>,
+    local_avoid: HashSet<Lifetime>,
+    in_scope: HashSet<Lifetime>,
+    renames: Vec<(Lifetime, Lifetime)>,
+    new_lifetimes: Vec<Lifetime>,
+}
+
+impl<'a> ItemSubst<'a> {
+    fn new(
+        item_lifetimes: &[Lifetime],
+        ctx: SubstCtx<'a>,
+        fresh_avoid: &HashSet<Lifetime>,
+        outer_in_scope: &HashSet<Lifetime>,
+    ) -> Self {
+        let mut local_avoid = fresh_avoid.clone();
+        local_avoid.extend(item_lifetimes.iter().cloned());
+        let mut renames: Vec<(Lifetime, Lifetime)> = Vec::new();
+        let new_lifetimes: Vec<Lifetime> = item_lifetimes
+            .iter()
+            .map(|ml| {
+                if ctx.target_lts.contains(ml) || outer_in_scope.contains(ml) {
+                    let fresh = ml.fresh(&mut local_avoid);
+                    renames.push((ml.clone(), fresh.clone()));
+                    fresh
+                } else {
+                    ml.clone()
+                }
+            })
+            .collect();
+        let mut in_scope = outer_in_scope.clone();
+        in_scope.extend(new_lifetimes.iter().cloned());
+        Self {
+            ctx,
+            local_avoid,
+            in_scope,
+            renames,
+            new_lifetimes,
+        }
+    }
+
+    fn rename_lt(&self, l: &Lifetime) -> Lifetime {
+        self.renames
+            .iter()
+            .find(|(old, _)| old == l)
+            .map(|(_, new)| new.clone())
+            .unwrap_or_else(|| l.clone())
+    }
+
+    fn sub_ty(&self, ty: &RustType) -> Result<RustType, SubstitutionError> {
+        let pre: std::borrow::Cow<'_, RustType> = if self.renames.is_empty() {
+            std::borrow::Cow::Borrowed(ty)
+        } else {
+            std::borrow::Cow::Owned(ty.map_free_lifetimes(&mut |l| self.rename_lt(l)))
+        };
+        substitute_vars(&pre, self.ctx, &self.local_avoid, &self.in_scope)
+    }
+
+    fn sub_opt_lt(&self, lt: Option<&Lifetime>) -> Option<Lifetime> {
+        let rl = lt?;
+        let renamed = self.rename_lt(rl);
+        if self.new_lifetimes.contains(&renamed) {
+            Some(renamed)
+        } else {
+            match self.ctx.lt_mapping.get(&renamed) {
+                Some(bound) => (*bound).cloned(),
+                None => Some(renamed),
+            }
+        }
+    }
+}
+
 fn substitute_method_vars(
     m: &ZngurMethodDetails,
     ctx: SubstCtx<'_>,
     fresh_avoid: &HashSet<Lifetime>,
     outer_in_scope: &HashSet<Lifetime>,
 ) -> Result<ZngurMethodDetails, SubstitutionError> {
-    let mut local_avoid = fresh_avoid.clone();
-    local_avoid.extend(m.data.lifetimes.iter().cloned());
-    let mut method_renames: Vec<(Lifetime, Lifetime)> = Vec::new();
-    let new_method_lts: Vec<Lifetime> = m
-        .data
-        .lifetimes
-        .iter()
-        .map(|ml| {
-            if ctx.target_lts.contains(ml) || outer_in_scope.contains(ml) {
-                let fresh = ml.fresh(&mut local_avoid);
-                method_renames.push((ml.clone(), fresh.clone()));
-                fresh
-            } else {
-                ml.clone()
-            }
-        })
-        .collect();
-
-    let mut method_in_scope = outer_in_scope.clone();
-    method_in_scope.extend(new_method_lts.iter().cloned());
-
-    let rename_method_lt = |l: &Lifetime| -> Lifetime {
-        method_renames
-            .iter()
-            .find(|(old, _)| old == l)
-            .map(|(_, new)| new.clone())
-            .unwrap_or_else(|| l.clone())
-    };
-    let sub_ty = |ty: &RustType| -> Result<RustType, SubstitutionError> {
-        let pre: std::borrow::Cow<'_, RustType> = if method_renames.is_empty() {
-            std::borrow::Cow::Borrowed(ty)
-        } else {
-            std::borrow::Cow::Owned(ty.map_free_lifetimes(&mut { rename_method_lt }))
-        };
-        substitute_vars(&pre, ctx, &local_avoid, &method_in_scope)
-    };
-
-    let receiver_lifetime = match &m.data.receiver_lifetime {
-        Some(rl) => {
-            let renamed = rename_method_lt(rl);
-            if new_method_lts.contains(&renamed) {
-                Some(renamed)
-            } else {
-                match ctx.lt_mapping.get(&renamed) {
-                    Some(bound) => (*bound).cloned(),
-                    None => Some(renamed),
-                }
-            }
-        }
-        None => None,
-    };
-
+    let sub = ItemSubst::new(&m.data.lifetimes, ctx, fresh_avoid, outer_in_scope);
+    let receiver_lifetime = sub.sub_opt_lt(m.data.receiver_lifetime.as_ref());
     Ok(ZngurMethodDetails {
         data: ZngurMethod {
             name: m.data.name.clone(),
-            lifetimes: new_method_lts,
+            lifetimes: sub.new_lifetimes.clone(),
             generics: m
                 .data
                 .generics
                 .iter()
-                .map(&sub_ty)
+                .map(|ty| sub.sub_ty(ty))
                 .collect::<Result<_, _>>()?,
             receiver: m.data.receiver,
             receiver_lifetime,
@@ -478,17 +501,58 @@ fn substitute_method_vars(
                 .data
                 .inputs
                 .iter()
-                .map(&sub_ty)
+                .map(|ty| sub.sub_ty(ty))
                 .collect::<Result<_, _>>()?,
-            output: sub_ty(&m.data.output)?,
+            output: sub.sub_ty(&m.data.output)?,
             is_safe: m.data.is_safe,
         },
         use_path: m.use_path.clone(),
         deref: match &m.deref {
-            Some((ty, mutability)) => Some((sub_ty(ty)?, *mutability)),
+            Some((ty, mutability)) => Some((sub.sub_ty(ty)?, *mutability)),
             None => None,
         },
         cpp_name: m.cpp_name.clone(),
+    })
+}
+
+fn substitute_cpp_method_vars(
+    m: &ZngurCppMethod,
+    ctx: SubstCtx<'_>,
+    fresh_avoid: &HashSet<Lifetime>,
+    outer_in_scope: &HashSet<Lifetime>,
+) -> Result<ZngurCppMethod, SubstitutionError> {
+    let sub = ItemSubst::new(&m.lifetimes, ctx, fresh_avoid, outer_in_scope);
+    let receiver = match &m.receiver {
+        CppMethodReceiver::Static => CppMethodReceiver::Static,
+        CppMethodReceiver::Ref {
+            mutability,
+            constness,
+            lifetime,
+        } => CppMethodReceiver::Ref {
+            mutability: *mutability,
+            constness: *constness,
+            lifetime: sub.sub_opt_lt(lifetime.as_ref()),
+        },
+        CppMethodReceiver::Raw {
+            constness,
+            indirection,
+        } => CppMethodReceiver::Raw {
+            constness: *constness,
+            indirection: *indirection,
+        },
+    };
+    Ok(ZngurCppMethod {
+        cpp_name: m.cpp_name.clone(),
+        lifetimes: sub.new_lifetimes.clone(),
+        rust_name: m.rust_name.clone(),
+        receiver,
+        inputs: m
+            .inputs
+            .iter()
+            .map(|ty| sub.sub_ty(ty))
+            .collect::<Result<_, _>>()?,
+        output: sub.sub_ty(&m.output)?,
+        is_safe: m.is_safe,
     })
 }
 
@@ -538,6 +602,7 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
         wellknown_traits,
         exhaustive,
         methods,
+        cpp_methods,
         constructor,
         variants,
         fields,
@@ -549,6 +614,52 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
         target.ty.canonicalize_lifetimes(&target.lifetimes)
     );
     let ty = &target.ty;
+    let mut new_cpp_methods: Vec<ZngurCppMethod> = cpp_methods
+        .iter()
+        .map(|method| {
+            match substitute_cpp_method_vars(method, ctx, &fresh_avoid, &outer_in_scope) {
+                Ok(m) => m,
+                Err(SubstitutionError::UnboundVar(var)) => unreachable!(
+                    "Unbound type variable {} in C++ method {} in template {} for type {}",
+                    var.0,
+                    method.rust_name(),
+                    template.ty,
+                    ty
+                ),
+            }
+        })
+        .collect();
+    let mut new_methods: Vec<ZngurMethodDetails> = Vec::new();
+    for method in methods {
+        let m = match substitute_method_vars(method, ctx, &fresh_avoid, &outer_in_scope) {
+            Ok(m) => m,
+            Err(SubstitutionError::UnboundVar(var)) => unreachable!(
+                "Unbound type variable {} in method {} in template {} for type {}",
+                var.0, method.data.name, template.ty, ty
+            ),
+        };
+        if matches!(ty, RustType::Cpp(_))
+            && let Some(is_safe) = m.data.is_safe
+            && m.data.receiver == ZngurMethodReceiver::Static
+            && m.data.generics.is_empty()
+            && m.use_path.is_none()
+            && m.deref.is_none()
+        {
+            let cpp_name = m.data.name;
+            let rust_name = m.cpp_name.filter(|n| n != &cpp_name);
+            new_cpp_methods.push(ZngurCppMethod {
+                cpp_name,
+                lifetimes: m.data.lifetimes,
+                rust_name,
+                receiver: CppMethodReceiver::Static,
+                inputs: m.data.inputs,
+                output: m.data.output,
+                is_safe,
+            });
+        } else {
+            new_methods.push(m);
+        }
+    }
     let new_ty = ZngurType {
         ty: ty.clone(),
         lifetimes: target.lifetimes.clone(),
@@ -556,18 +667,8 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
         trivially_relocatable: *trivially_relocatable,
         wellknown_traits: wellknown_traits.clone(),
         exhaustive: *exhaustive,
-        methods: methods
-            .iter()
-            .map(|method| {
-                match substitute_method_vars(method, ctx, &fresh_avoid, &outer_in_scope) {
-                    Ok(m) => m,
-                    Err(SubstitutionError::UnboundVar(var)) => unreachable!(
-                        "Unbound type variable {} in method {} in template {} for type {}",
-                        var.0, method.data.name, template.ty, ty
-                    ),
-                }
-            })
-            .collect(),
+        cpp_methods: new_cpp_methods,
+        methods: new_methods,
         constructor: constructor.as_ref().map(|constructor| {
             match constructor
                 .inputs
@@ -633,7 +734,7 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
 }
 
 // Represents a ZngurType created from a template type
-pub struct TemplateMatch(ZngurType);
+pub struct TemplateMatch(pub(crate) ZngurType);
 
 impl Merge<ZngurType> for TemplateMatch {
     fn merge(self, into: &mut ZngurType) -> zngur_def::MergeResult {

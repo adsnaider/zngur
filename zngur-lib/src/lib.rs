@@ -11,9 +11,10 @@ pub unsafe trait ZngCppObject: Sized {}
 /// and `Foo<Const>` is a `const Foo`.
 ///
 /// So a C++ `const Foo&` is a `&Foo<Const>` in Rust, and a `Foo&` a `&Foo` (shared, `&'a var Foo`
-/// in the `.zng` file) or a `&mut Foo` (unique, `&'a unique var Foo`). Going from a `Foo` to a
-/// `Foo<Const>` is explicit (`as_const()`), and there's no way back. Builtins have the same
-/// parameter through [`Cpp<T, C>`](Cpp).
+/// in the `.zng` file) or a `&mut Foo` (unique, `&'a unique var Foo`). `const` member functions
+/// are implemented for `Foo<C>` (both constnesses), and the others only for `Foo` (`Foo<NonConst>`).
+/// Going from a `Foo` to a `Foo<Const>` is explicit (`as_const()`), and there's no way back.
+/// Builtins have the same parameter through [`Cpp<T, C>`](Cpp).
 ///
 /// Like in C++, passing a non-`const` object where C++ takes a `const` one is implicit: the
 /// arguments of C++ functions that are `const` objects are generic over their constness, e.g.

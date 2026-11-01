@@ -4,6 +4,12 @@
 #include <type_traits>
 #include <zngur.h>
 
+namespace rust {
+namespace crate {
+struct RustTag;
+} // namespace crate
+} // namespace rust
+
 struct CppType {
   int x;
   int y;
@@ -14,6 +20,28 @@ struct CppType {
   CppType(int x, int y) : x(x), y(y) {
     std::cout << "Constructed CppType " << x << " " << y << std::endl;
   }
+
+  // Member functions that Rust calls directly (declared in `main.zng`).
+  int sum() const { return x + y; }
+  void scale(int factor) {
+    x *= factor;
+    y *= factor;
+  }
+  void add(const CppType &other) {
+    x += other.x;
+    y += other.y;
+  }
+  const int &x_ref() const { return x; }
+  int &x_ref() { return x; }
+  void bump_x(int delta) { x += delta; }
+  bool is_positive(bool strict) const {
+    return strict ? (x > 0 && y > 0) : (x >= 0 && y >= 0);
+  }
+  int with_rust_tag(rust::Ref<rust::crate::RustTag> tag) const;
+  CppType swapped() const { return CppType(y, x); }
+  static CppType diagonal(int v) { return CppType(v, v); }
+  // Takes a stack-owned type by value.
+  int total_with(CppType other) const { return x + y + other.x + other.y; }
 };
 
 struct OpaqueRef {

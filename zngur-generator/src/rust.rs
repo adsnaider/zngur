@@ -1225,6 +1225,87 @@ pub {}fn {rust_name}{params}("#,
         mangled_name
     }
 
+    /// Adds the Rust function for a C++ member function of `owner`, which calls the C++ bridge
+    /// function whose (mangled) name is returned. `const` member functions are in an `impl<C>
+    /// T<C>` block, so both constnesses have them, and the others in an `impl T` (`T<NonConst>`)
+    /// block. `inputs` and `output` are their Rust types.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_cpp_method(
+        &mut self,
+        owner: &RustType,
+        rust_name: &str,
+        lifetimes: &[Lifetime],
+        receiver: &CppMethodReceiver,
+        inputs: &[RustType],
+        output: &RustType,
+        is_safe: bool,
+    ) -> String {
+        let mangled_name = self.mangle_name(&format!("_c++::{owner}=cpp_method={rust_name}"));
+        let has_this = !matches!(receiver, CppMethodReceiver::Static);
+        let n_args = inputs.len() + usize::from(has_this);
+        w!(
+            self,
+            r#"
+unsafe extern "C" {{ fn {mangled_name}("#
+        );
+        for n in 0..n_args {
+            w!(self, "i{n}: *mut u8, ");
+        }
+        wln!(self, r#"o: *mut u8); }}"#);
+        let target = owner.to_string();
+        let impl_header = if receiver.is_const() {
+            format!("impl<__C0: ::zngur_lib::Constness> {target}<__C0>")
+        } else {
+            format!("impl {target}")
+        };
+        let offset = usize::from(has_this);
+        let (params, input_tys) = cpp_fn_inputs(lifetimes, inputs);
+        w!(
+            self,
+            r#"
+{impl_header} {{
+#[allow(non_snake_case, clippy::too_many_arguments)]
+pub {}fn {rust_name}{params}("#,
+            if is_safe { "" } else { "unsafe " },
+        );
+        match receiver {
+            CppMethodReceiver::Static => {}
+            CppMethodReceiver::Ref {
+                mutability,
+                lifetime,
+                ..
+            } => {
+                let lifetime = lifetime
+                    .as_ref()
+                    .map(|l| format!("{l} "))
+                    .unwrap_or_default();
+                let m = if *mutability == Mutability::Mut {
+                    "mut "
+                } else {
+                    ""
+                };
+                w!(self, "&{lifetime}{m}self, ");
+            }
+            CppMethodReceiver::Raw { constness, .. } => {
+                let ptr = match constness {
+                    CppConstness::Var => "*mut",
+                    CppConstness::Const => "*const",
+                };
+                w!(self, "i0: {ptr} Self, ");
+            }
+        }
+        for (n, ty) in input_tys.iter().enumerate() {
+            w!(self, "i{}: {ty}, ", n + offset);
+        }
+        wln!(self, ") -> {output} {{ unsafe {{");
+        if matches!(receiver, CppMethodReceiver::Ref { .. }) {
+            wln!(self, "let i0 = self;");
+        }
+        self.call_cpp_function(&format!("{mangled_name}("), n_args);
+        wln!(self, "}} }} }}");
+        mangled_name
+    }
+
     pub fn add_cpp_heap_allocated_bridge(&mut self, ty: &RustType) -> String {
         let wrapper_ref = match ty {
             RustType::Cpp(_) => ty.to_string(),
