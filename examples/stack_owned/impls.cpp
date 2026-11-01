@@ -6,25 +6,25 @@
 
 namespace rust {
 
-rust::MyCppWrapper Impl<rust::MyCppWrapper>::new_(int32_t x, int32_t y) {
-  return rust::MyCppWrapper::build(x, y);
+using cpp::MyCppWrapper;
+using crate::MyConservativeWrapper;
+
+MyCppWrapper Impl<MyCppWrapper>::new_(int32_t x, int32_t y) {
+  return MyCppWrapper::build(x, y);
 }
 
-rust::Unit
-Impl<rust::MyCppWrapper>::print(rust::Ref<rust::MyCppWrapper> c) {
+Unit Impl<MyCppWrapper>::print(Ref<MyCppWrapper> c) {
   const CppType &cpp = c.cpp();
   std::cout << "CppType " << cpp.x << " " << cpp.y << std::endl;
   return {};
 }
 
-rust::crate::MyConservativeWrapper
-Impl<rust::crate::MyConservativeWrapper>::new_(int64_t a, int32_t b) {
-  return rust::crate::MyConservativeWrapper::build(a, b);
+MyConservativeWrapper
+Impl<MyConservativeWrapper>::new_(int64_t a, int32_t b) {
+  return MyConservativeWrapper::build(a, b);
 }
 
-rust::Unit
-Impl<rust::crate::MyConservativeWrapper>::print(
-    rust::Ref<rust::crate::MyConservativeWrapper> c) {
+Unit Impl<MyConservativeWrapper>::print(Ref<MyConservativeWrapper> c) {
   const CppConservativeType &cpp = c.cpp();
   std::cout << "CppConservativeType " << cpp.a << " " << cpp.b << std::endl;
   return {};
