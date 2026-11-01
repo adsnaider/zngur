@@ -21,6 +21,7 @@
   - [Opaque C++ types](./call_cpp_from_rust/opaque.md)
   - [Trait objects](./call_cpp_from_rust/trait_object.md)
 - [Import](./import.md)
+- [Lifetimes](./lifetimes.md)
 - [Conditional Compilation](./conditional_compilation.md)
 - [Safety](./safety.md)
 - [How it compares to other tools](./how_it_compares.md)

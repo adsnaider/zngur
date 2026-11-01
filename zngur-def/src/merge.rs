@@ -1,7 +1,10 @@
+use std::collections::HashSet;
+
 use crate::{
     AdditionalIncludes, ConvertPanicToException, CppHeapAllocated, CppRef, CppStackOwned,
-    LayoutPolicy, RustType, ZngurConstructor, ZngurExternCppFn, ZngurExternCppImpl, ZngurField,
-    ZngurFn, ZngurMethod, ZngurMethodDetails, ZngurSpec, ZngurTrait, ZngurType, ZngurVariant,
+    LayoutPolicy, Lifetime, Mutability, RustTrait, RustType, ZngurConstructor, ZngurExternCppFn,
+    ZngurExternCppImpl, ZngurField, ZngurFn, ZngurMethod, ZngurMethodDetails, ZngurMethodReceiver,
+    ZngurSpec, ZngurTrait, ZngurType, ZngurVariant,
 };
 
 /// Trait for types with a partial union operation.
@@ -41,6 +44,7 @@ pub enum MergeFailure {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ConflictSource {
+    Type(RustType),
     Layout,
     Constructor(Option<Vec<(String, RustType)>>),
     CppRef,
@@ -176,21 +180,7 @@ impl Merge for ZngurType {
         merge_by_identity(self.methods, &mut into.methods, |a, b| {
             a.data.name == b.data.name
         })?;
-        if into.constructor.is_none() {
-            into.constructor = self.constructor;
-        } else if self.constructor != into.constructor {
-            return Err(MergeFailure::Conflict(
-                "Duplicate constructor found".to_string(),
-                (
-                    ConflictSource::Constructor(
-                        self.constructor.as_ref().map(|c| c.inputs.clone()),
-                    ),
-                    ConflictSource::Constructor(
-                        into.constructor.as_ref().map(|c| c.inputs.clone()),
-                    ),
-                ),
-            ));
-        }
+        self.constructor.merge(&mut into.constructor)?;
         into.exhaustive = self.exhaustive && into.exhaustive;
         merge_by_identity(self.variants, &mut into.variants, |a, b| a.name == b.name)?;
         merge_by_identity(self.fields, &mut into.fields, |a, b| a.name == b.name)?;
@@ -211,7 +201,7 @@ impl Merge for ZngurTrait {
             );
         }
 
-        inplace_union(self.methods, &mut into.methods);
+        merge_by_identity(self.methods, &mut into.methods, |a, b| a.name == b.name)?;
 
         Ok(())
     }
@@ -264,10 +254,230 @@ impl Merge for CppStackOwned {
     }
 }
 
+fn collect_method_lifetimes(
+    m: &ZngurMethod,
+    deref: Option<&(RustType, Mutability)>,
+    out: &mut HashSet<Lifetime>,
+) {
+    out.extend(m.lifetimes.iter().cloned());
+    if let Some(rl) = &m.receiver_lifetime
+        && !rl.is_builtin()
+    {
+        out.insert(rl.clone());
+    }
+    for t in m
+        .inputs
+        .iter()
+        .chain([&m.output])
+        .chain(&m.generics)
+        .chain(deref.map(|(t, _)| t))
+    {
+        out.extend(t.all_lifetimes());
+    }
+}
+
+fn align_method_lifetimes(
+    m: &mut ZngurMethod,
+    deref: Option<&mut (RustType, Mutability)>,
+    src_outer: &[Lifetime],
+    dst_outer: &[Lifetime],
+    avoid: &mut HashSet<Lifetime>,
+) {
+    collect_method_lifetimes(m, deref.as_deref(), avoid);
+    let mapping: Vec<(Lifetime, Lifetime)> = src_outer
+        .iter()
+        .cloned()
+        .zip(dst_outer.iter().cloned())
+        .collect();
+    let mut method_renames: Vec<(Lifetime, Lifetime)> = Vec::new();
+    let mut counter = 0usize;
+    for ml in &mut m.lifetimes {
+        if dst_outer.contains(ml) {
+            let fresh = loop {
+                let candidate = Lifetime(format!("{}_{counter}", ml.0));
+                counter += 1;
+                if !avoid.contains(&candidate) {
+                    break candidate;
+                }
+            };
+            avoid.insert(fresh.clone());
+            method_renames.push((ml.clone(), fresh.clone()));
+            *ml = fresh;
+        }
+    }
+    let method_bound = m.lifetimes.clone();
+    let remap_method_lt = |l: &Lifetime| -> Lifetime {
+        if let Some((_, fresh)) = method_renames.iter().find(|(old, _)| old == l) {
+            return fresh.clone();
+        }
+        if method_bound.contains(l) {
+            return l.clone();
+        }
+        mapping
+            .iter()
+            .find(|(from, _)| from == l)
+            .map(|(_, to)| to.clone())
+            .unwrap_or_else(|| l.clone())
+    };
+    if let Some(rl) = &mut m.receiver_lifetime {
+        *rl = remap_method_lt(rl);
+    }
+    let in_scope: HashSet<Lifetime> = dst_outer.iter().chain(&m.lifetimes).cloned().collect();
+    let mut remap_method_ty = |ty: &mut RustType| {
+        let remapped = ty.map_free_lifetimes(&mut |l| remap_method_lt(l));
+        *ty = if in_scope.is_empty() {
+            remapped
+        } else {
+            remapped.rename_colliding_for_binders(&in_scope, avoid)
+        };
+    };
+    m.inputs.iter_mut().for_each(&mut remap_method_ty);
+    remap_method_ty(&mut m.output);
+    m.generics.iter_mut().for_each(&mut remap_method_ty);
+    if let Some((deref_ty, _)) = deref {
+        remap_method_ty(deref_ty);
+    }
+}
+
+/// Renames `src.lifetimes` (and `src.ty`) to match `dst_lifetimes` and `dst_ty`, avoiding capture
+/// by method-level lifetime parameters or `for<...>` binders.
+fn align_type_lifetimes(src: &mut ZngurType, dst_lifetimes: &[Lifetime], dst_ty: &RustType) {
+    if src.lifetimes != dst_lifetimes {
+        let mut avoid: HashSet<Lifetime> = dst_lifetimes
+            .iter()
+            .chain(&src.lifetimes)
+            .cloned()
+            .collect();
+        avoid.extend(dst_ty.all_lifetimes());
+        avoid.extend(src.ty.all_lifetimes());
+        for m in &src.methods {
+            collect_method_lifetimes(&m.data, m.deref.as_ref(), &mut avoid);
+        }
+        for f in &src.fields {
+            avoid.extend(f.ty.all_lifetimes());
+        }
+        for v in &src.variants {
+            for f in &v.fields {
+                avoid.extend(f.ty.all_lifetimes());
+            }
+        }
+        if let Some(c) = &src.constructor {
+            for (_, t) in &c.inputs {
+                avoid.extend(t.all_lifetimes());
+            }
+        }
+
+        for m in &mut src.methods {
+            align_method_lifetimes(
+                &mut m.data,
+                m.deref.as_mut(),
+                &src.lifetimes,
+                dst_lifetimes,
+                &mut avoid,
+            );
+        }
+
+        let mapping: Vec<(Lifetime, Lifetime)> = src
+            .lifetimes
+            .iter()
+            .cloned()
+            .zip(dst_lifetimes.iter().cloned())
+            .collect();
+        let remap_lt = |l: &Lifetime| -> Lifetime {
+            mapping
+                .iter()
+                .find(|(from, _)| from == l)
+                .map(|(_, to)| to.clone())
+                .unwrap_or_else(|| l.clone())
+        };
+        let outer_in_scope: HashSet<Lifetime> = dst_lifetimes.iter().cloned().collect();
+        let mut remap_ty = |ty: &mut RustType| {
+            let remapped = ty.map_free_lifetimes(&mut |l| remap_lt(l));
+            *ty = if outer_in_scope.is_empty() {
+                remapped
+            } else {
+                remapped.rename_colliding_for_binders(&outer_in_scope, &mut avoid)
+            };
+        };
+        for field in &mut src.fields {
+            remap_ty(&mut field.ty);
+        }
+        for variant in &mut src.variants {
+            for field in &mut variant.fields {
+                remap_ty(&mut field.ty);
+            }
+        }
+        if let Some(constructor) = &mut src.constructor {
+            for (_, ty) in &mut constructor.inputs {
+                remap_ty(ty);
+            }
+        }
+    }
+    src.lifetimes = dst_lifetimes.to_vec();
+    src.ty = dst_ty.clone();
+}
+
+fn canonicalize_method(m: &ZngurMethod) -> ZngurMethod {
+    let outer = &m.lifetimes;
+    let canon_ty = |t: &RustType| t.canonicalize_lifetimes(outer);
+    let canon_lt = |l: &Lifetime| {
+        outer
+            .iter()
+            .position(|ol| ol == l)
+            .map(|i| Lifetime(format!("__outer_{i}")))
+            .unwrap_or_else(|| l.clone())
+    };
+    ZngurMethod {
+        name: m.name.clone(),
+        lifetimes: (0..outer.len())
+            .map(|i| Lifetime(format!("__outer_{i}")))
+            .collect(),
+        generics: m.generics.iter().map(canon_ty).collect(),
+        receiver: m.receiver,
+        receiver_lifetime: m.receiver_lifetime.as_ref().map(canon_lt),
+        inputs: m.inputs.iter().map(canon_ty).collect(),
+        output: canon_ty(&m.output),
+        is_safe: m.is_safe,
+    }
+}
+
+fn canonicalize_method_details(m: &ZngurMethodDetails) -> ZngurMethodDetails {
+    let outer = &m.data.lifetimes;
+    ZngurMethodDetails {
+        data: canonicalize_method(&m.data),
+        use_path: m.use_path.clone(),
+        deref: m
+            .deref
+            .as_ref()
+            .map(|(t, mu)| (t.canonicalize_lifetimes(outer), *mu)),
+        cpp_name: m.cpp_name.clone(),
+    }
+}
+
 impl Merge<ZngurSpec> for ZngurType {
     /// Merges a type into a specification's type list.
-    fn merge(self, into: &mut ZngurSpec) -> MergeResult {
-        if let Some(existing) = into.types.iter_mut().find(|t| t.ty == self.ty) {
+    fn merge(mut self, into: &mut ZngurSpec) -> MergeResult {
+        let erased = self.ty.with_erased_lifetimes();
+        if let Some(existing) = into
+            .types
+            .iter_mut()
+            .find(|t| t.ty.with_erased_lifetimes() == erased)
+        {
+            let existing_canon = existing.ty.canonicalize_lifetimes(&existing.lifetimes);
+            let self_canon = self.ty.canonicalize_lifetimes(&self.lifetimes);
+            if existing.lifetimes.len() != self.lifetimes.len() || existing_canon != self_canon {
+                return Err(MergeFailure::Conflict(
+                    format!(
+                        "Conflicting lifetime declarations `{}` and `{}` map to the same C++ type",
+                        self.ty, existing.ty
+                    ),
+                    (
+                        ConflictSource::Type(self_canon),
+                        ConflictSource::Type(existing_canon),
+                    ),
+                ));
+            }
+            align_type_lifetimes(&mut self, &existing.lifetimes, &existing.ty);
             self.merge(existing)?;
         } else {
             into.types.push(self);
@@ -276,9 +486,24 @@ impl Merge<ZngurSpec> for ZngurType {
     }
 }
 
+impl Merge for ZngurMethod {
+    fn merge(self, into: &mut Self) -> MergeResult {
+        if canonicalize_method(&self) != canonicalize_method(into) {
+            return Err(MergeFailure::Conflict(
+                "Method mismatch".to_string(),
+                (
+                    ConflictSource::Method(self),
+                    ConflictSource::Method(into.clone()),
+                ),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Merge for ZngurMethodDetails {
     fn merge(self, into: &mut Self) -> MergeResult {
-        if self != *into {
+        if canonicalize_method_details(&self) != canonicalize_method_details(into) {
             return Err(MergeFailure::Conflict(
                 "Method mismatch".to_string(),
                 (
@@ -293,7 +518,13 @@ impl Merge for ZngurMethodDetails {
 
 impl Merge for ZngurConstructor {
     fn merge(self, into: &mut Self) -> MergeResult {
-        if self != *into {
+        let canon = |c: &ZngurConstructor| -> Vec<(String, RustType)> {
+            c.inputs
+                .iter()
+                .map(|(n, t)| (n.clone(), t.canonicalize_lifetimes(&[])))
+                .collect()
+        };
+        if canon(&self) != canon(into) {
             return Err(MergeFailure::Conflict(
                 "Constructor mismatch".to_string(),
                 (
@@ -322,7 +553,10 @@ impl Merge for ZngurVariant {
 
 impl Merge for ZngurField {
     fn merge(self, into: &mut Self) -> MergeResult {
-        if self != *into {
+        if self.name != into.name
+            || self.offset != into.offset
+            || self.ty.canonicalize_lifetimes(&[]) != into.ty.canonicalize_lifetimes(&[])
+        {
             return Err(MergeFailure::Conflict(
                 "Field mismatch".to_string(),
                 (
@@ -337,31 +571,211 @@ impl Merge for ZngurField {
 
 impl Merge<ZngurSpec> for ZngurTrait {
     /// Merges a trait into a specification's trait list.
-    fn merge(self, into: &mut ZngurSpec) -> MergeResult {
-        [(self.tr.clone(), self)].merge(&mut into.traits)
+    fn merge(mut self, into: &mut ZngurSpec) -> MergeResult {
+        let erased = self.tr.with_erased_lifetimes();
+        if let Some((_, existing)) = into
+            .traits
+            .iter_mut()
+            .find(|(k, _)| k.with_erased_lifetimes() == erased)
+        {
+            let existing_canon = existing.tr.canonicalize_lifetimes(&[]);
+            let self_canon = self.tr.canonicalize_lifetimes(&[]);
+            if existing_canon != self_canon {
+                return Err(MergeFailure::Conflict(
+                    format!(
+                        "Conflicting lifetime declarations `{}` and `{}` map to the same C++ trait",
+                        self.tr, existing.tr
+                    ),
+                    (
+                        ConflictSource::Type(RustType::Dyn(self_canon, vec![])),
+                        ConflictSource::Type(RustType::Dyn(existing_canon, vec![])),
+                    ),
+                ));
+            }
+            self.tr = existing.tr.clone();
+            self.merge(existing)
+        } else {
+            into.traits.insert(self.tr.clone(), self);
+            Ok(())
+        }
+    }
+}
+
+fn canonicalize_fn(f: &ZngurFn) -> ZngurFn {
+    let outer = &f.lifetimes;
+    ZngurFn {
+        path: f.path.canonicalize_lifetimes(outer),
+        lifetimes: (0..outer.len())
+            .map(|i| Lifetime(format!("__outer_{i}")))
+            .collect(),
+        inputs: f
+            .inputs
+            .iter()
+            .map(|t| t.canonicalize_lifetimes(outer))
+            .collect(),
+        output: f.output.canonicalize_lifetimes(outer),
+        is_safe: f.is_safe,
     }
 }
 
 impl Merge<ZngurSpec> for ZngurFn {
     /// Merges a function into a specification's function list.
     fn merge(self, into: &mut ZngurSpec) -> MergeResult {
-        push_unique(self, &mut into.funcs);
+        let erased_sig = (
+            self.path.with_erased_lifetimes(),
+            self.inputs
+                .iter()
+                .map(RustType::with_erased_lifetimes)
+                .collect::<Vec<_>>(),
+        );
+        if let Some(existing) = into.funcs.iter().find(|f| {
+            f.path.with_erased_lifetimes() == erased_sig.0
+                && f.inputs
+                    .iter()
+                    .map(RustType::with_erased_lifetimes)
+                    .eq(erased_sig.1.iter().cloned())
+        }) {
+            if canonicalize_fn(&self) != canonicalize_fn(existing) {
+                return Err(MergeFailure::Conflict(
+                    format!("Function `{}` mismatch", self.path),
+                    (
+                        ConflictSource::Type(RustType::Adt(self.path)),
+                        ConflictSource::Type(RustType::Adt(existing.path.clone())),
+                    ),
+                ));
+            }
+        } else {
+            into.funcs.push(self);
+        }
         Ok(())
+    }
+}
+
+fn canonicalize_extern_cpp_fn(f: &ZngurExternCppFn) -> ZngurExternCppFn {
+    let outer = &f.lifetimes;
+    ZngurExternCppFn {
+        name: f.name.clone(),
+        lifetimes: (0..outer.len())
+            .map(|i| Lifetime(format!("__outer_{i}")))
+            .collect(),
+        inputs: f
+            .inputs
+            .iter()
+            .map(|t| t.canonicalize_lifetimes(outer))
+            .collect(),
+        output: f.output.canonicalize_lifetimes(outer),
+        is_safe: f.is_safe,
     }
 }
 
 impl Merge<ZngurSpec> for ZngurExternCppFn {
     /// Merges an extern C++ function into a specification's C++ function list.
     fn merge(self, into: &mut ZngurSpec) -> MergeResult {
-        push_unique(self, &mut into.extern_cpp_funcs);
+        if let Some(existing) = into.extern_cpp_funcs.iter().find(|f| f.name == self.name) {
+            if canonicalize_extern_cpp_fn(&self) != canonicalize_extern_cpp_fn(existing) {
+                return Err(MergeFailure::Conflict(
+                    format!("Extern C++ function `{}` mismatch", self.name),
+                    (
+                        ConflictSource::Method(ZngurMethod {
+                            name: self.name,
+                            lifetimes: self.lifetimes,
+                            generics: vec![],
+                            receiver: ZngurMethodReceiver::Static,
+                            receiver_lifetime: None,
+                            inputs: self.inputs,
+                            output: self.output,
+                            is_safe: Some(self.is_safe),
+                        }),
+                        ConflictSource::Method(ZngurMethod {
+                            name: existing.name.clone(),
+                            lifetimes: existing.lifetimes.clone(),
+                            generics: vec![],
+                            receiver: ZngurMethodReceiver::Static,
+                            receiver_lifetime: None,
+                            inputs: existing.inputs.clone(),
+                            output: existing.output.clone(),
+                            is_safe: Some(existing.is_safe),
+                        }),
+                    ),
+                ));
+            }
+        } else {
+            into.extern_cpp_funcs.push(self);
+        }
         Ok(())
     }
 }
 
 impl Merge<ZngurSpec> for ZngurExternCppImpl {
     /// Merges an extern C++ implementation into a specification's C++ implementation list.
-    fn merge(self, into: &mut ZngurSpec) -> MergeResult {
-        push_unique(self, &mut into.extern_cpp_impls);
+    fn merge(mut self, into: &mut ZngurSpec) -> MergeResult {
+        let erased_key = (
+            self.tr.as_ref().map(RustTrait::with_erased_lifetimes),
+            self.ty.with_erased_lifetimes(),
+        );
+        if let Some(existing) = into.extern_cpp_impls.iter_mut().find(|imp| {
+            (
+                imp.tr.as_ref().map(RustTrait::with_erased_lifetimes),
+                imp.ty.with_erased_lifetimes(),
+            ) == erased_key
+        }) {
+            let existing_canon = (
+                existing
+                    .tr
+                    .as_ref()
+                    .map(|tr| tr.canonicalize_lifetimes(&existing.lifetimes)),
+                existing.ty.canonicalize_lifetimes(&existing.lifetimes),
+            );
+            let self_canon = (
+                self.tr
+                    .as_ref()
+                    .map(|tr| tr.canonicalize_lifetimes(&self.lifetimes)),
+                self.ty.canonicalize_lifetimes(&self.lifetimes),
+            );
+            if existing.lifetimes.len() != self.lifetimes.len() || existing_canon != self_canon {
+                return Err(MergeFailure::Conflict(
+                    format!(
+                        "Conflicting lifetime declarations in `impl` for `{}`",
+                        self.ty
+                    ),
+                    (
+                        ConflictSource::Type(self_canon.1),
+                        ConflictSource::Type(existing_canon.1),
+                    ),
+                ));
+            }
+            if self.lifetimes != existing.lifetimes {
+                let mut avoid: HashSet<Lifetime> = existing
+                    .lifetimes
+                    .iter()
+                    .chain(&self.lifetimes)
+                    .cloned()
+                    .collect();
+                avoid.extend(existing.ty.all_lifetimes());
+                avoid.extend(self.ty.all_lifetimes());
+                if let Some(tr) = &existing.tr {
+                    avoid.extend(tr.all_lifetimes());
+                }
+                if let Some(tr) = &self.tr {
+                    avoid.extend(tr.all_lifetimes());
+                }
+                for m in &self.methods {
+                    collect_method_lifetimes(m, None, &mut avoid);
+                }
+                for m in &mut self.methods {
+                    align_method_lifetimes(
+                        m,
+                        None,
+                        &self.lifetimes,
+                        &existing.lifetimes,
+                        &mut avoid,
+                    );
+                }
+            }
+            merge_by_identity(self.methods, &mut existing.methods, |a, b| a.name == b.name)?;
+        } else {
+            into.extern_cpp_impls.push(self);
+        }
         Ok(())
     }
 }

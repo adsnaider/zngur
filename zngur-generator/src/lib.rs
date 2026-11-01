@@ -125,7 +125,14 @@ impl ZngurGenerator {
             }));
         let mut cpp_tree = CppModuleTree::default();
         cpp_file.coro_support = coro_support;
-        for ty_def in zng.types {
+        for mut ty_def in zng.types {
+            let raw_lifetimes = ty_def.lifetimes.clone();
+            let raw_ty = ty_def.ty.clone();
+            let raw_field_tys: Vec<RustType> = ty_def.fields.iter().map(|f| f.ty.clone()).collect();
+            // The glue names types with lifetime parameters (`type<'a> crate::Parser<'a>`) with
+            // `'_`, since it doesn't declare them. The same goes for the signatures of Rust
+            // methods, which zngur only calls.
+            anonymize_lifetimes(&mut ty_def);
             let ty = &ty_def.ty;
             // What Rust can do with a C++ (`c++::`) type: hold it by value if it has a layout and
             // is trivially relocatable, and otherwise only refer to it.
@@ -368,8 +375,14 @@ impl ZngurGenerator {
                     fields,
                 });
             }
-            for field in ty_def.fields {
-                let extern_mn = rust_file.add_field_assertions(&field, &ty_def.ty);
+            for (field, raw_field_ty) in ty_def.fields.into_iter().zip(&raw_field_tys) {
+                let extern_mn = rust_file.add_field_assertions(
+                    &field,
+                    &ty_def.ty,
+                    &raw_lifetimes,
+                    &raw_ty,
+                    raw_field_ty,
+                );
                 let field = ZngurFieldData {
                     name: field.name,
                     ty: field.ty,
@@ -457,13 +470,14 @@ impl ZngurGenerator {
                     if let RustType::Dyn(tr, _) = b.as_ref() {
                         if let RustTrait::Fn {
                             name,
+                            lifetimes,
                             inputs,
                             output,
                         } = tr
                         {
                             if let Entry::Vacant(e) = cpp_file.trait_defs.entry(tr.clone()) {
-                                let rust_link_name =
-                                    rust_file.add_builder_for_dyn_fn(name, inputs, output);
+                                let rust_link_name = rust_file
+                                    .add_builder_for_dyn_fn(name, lifetimes, inputs, output);
                                 e.insert(CppTraitDefinition::Fn {
                                     sig: CppFnSig {
                                         rust_link_name,
@@ -517,11 +531,18 @@ impl ZngurGenerator {
         }
         rust_file.text.push_str(&cpp_tree.render());
         for func in zng.funcs {
+            // zngur only calls Rust functions, so their lifetimes don't matter here.
+            let rust_path = func.path.with_anonymous_lifetimes().to_string();
+            let inputs: Vec<RustType> = func
+                .inputs
+                .iter()
+                .map(RustType::with_anonymous_lifetimes)
+                .collect();
             let sig = rust_file.add_function(
-                &func.path.to_string(),
-                &func.path.to_string(),
-                &func.inputs,
-                &func.output,
+                &rust_path,
+                &rust_path,
+                &inputs,
+                &func.output.with_anonymous_lifetimes(),
                 func.is_safe,
                 None,
                 None,
@@ -536,6 +557,7 @@ impl ZngurGenerator {
         for func in zng.extern_cpp_funcs {
             let rust_link_name = rust_file.add_extern_cpp_function(
                 &func.name,
+                &func.lifetimes,
                 &func.inputs,
                 &func.output,
                 func.is_safe,
@@ -555,6 +577,7 @@ impl ZngurGenerator {
         }
         for impl_block in zng.extern_cpp_impls {
             let rust_link_names = rust_file.add_extern_cpp_impl(
+                &impl_block.lifetimes,
                 &impl_block.ty,
                 impl_block.tr.as_ref(),
                 &impl_block.methods,
@@ -607,10 +630,40 @@ impl ZngHeaderGenerator {
     }
 }
 
+/// Replaces the named lifetimes in the glue-only parts of `ty_def` (the type itself, the
+/// signatures of its Rust methods, its fields and constructors) with `'_`.
+fn anonymize_lifetimes(ty_def: &mut ZngurType) {
+    let anon = |t: &mut RustType| *t = t.with_anonymous_lifetimes();
+    anon(&mut ty_def.ty);
+    for method in &mut ty_def.methods {
+        method.data.lifetimes.clear();
+        method.data.receiver_lifetime = None;
+        method.data.inputs.iter_mut().for_each(anon);
+        anon(&mut method.data.output);
+        method.data.generics.iter_mut().for_each(anon);
+        if let Some((deref, _)) = &mut method.deref {
+            anon(deref);
+        }
+    }
+    for field in &mut ty_def.fields {
+        anon(&mut field.ty);
+    }
+    for variant in &mut ty_def.variants {
+        for field in &mut variant.fields {
+            anon(&mut field.ty);
+        }
+    }
+    if let Some(constructor) = &mut ty_def.constructor {
+        for (_, t) in &mut constructor.inputs {
+            anon(t);
+        }
+    }
+}
+
 fn real_inputs_of_method(method: &ZngurMethod, ty: &RustType) -> Vec<RustType> {
     let receiver_type = match method.receiver {
         ZngurMethodReceiver::Static => None,
-        ZngurMethodReceiver::Ref(m) => Some(RustType::Ref(m, Box::new(ty.clone()))),
+        ZngurMethodReceiver::Ref(m) => Some(RustType::Ref(m, None, Box::new(ty.clone()))),
         ZngurMethodReceiver::Move => Some(ty.clone()),
     };
     let rusty_inputs = receiver_type
@@ -629,6 +682,7 @@ mod tests {
     fn minimal_heap_allocated_type(ty: RustType, cpp_path: &str) -> ZngurType {
         ZngurType {
             ty,
+            lifetimes: vec![],
             layout: Some(LayoutPolicy::HeapAllocated),
             trivially_relocatable: TriviallyRelocatable::No,
             wellknown_traits: vec![],
@@ -651,6 +705,7 @@ mod tests {
     ) -> ZngurType {
         ZngurType {
             ty,
+            lifetimes: vec![],
             layout: Some(LayoutPolicy::StackAllocated { size, align }),
             trivially_relocatable: TriviallyRelocatable::No,
             wellknown_traits: vec![],
@@ -668,6 +723,7 @@ mod tests {
     fn minimal_ref_type(ty: RustType, cpp_type: &str) -> ZngurType {
         ZngurType {
             ty,
+            lifetimes: vec![],
             layout: Some(LayoutPolicy::ZERO_SIZED_TYPE),
             trivially_relocatable: TriviallyRelocatable::No,
             wellknown_traits: vec![],
@@ -686,6 +742,7 @@ mod tests {
     fn minimal_by_value_cpp_type(ty: RustType, size: usize, align: usize) -> ZngurType {
         ZngurType {
             ty,
+            lifetimes: vec![],
             layout: Some(LayoutPolicy::StackAllocated { size, align }),
             trivially_relocatable: TriviallyRelocatable::Checked,
             wellknown_traits: vec![],
@@ -712,8 +769,7 @@ mod tests {
     fn adt(segments: &[&str]) -> RustType {
         RustType::Adt(RustPathAndGenerics {
             path: segments.iter().map(|s| s.to_string()).collect(),
-            generics: vec![],
-            named_generics: vec![],
+            ..Default::default()
         })
     }
 
@@ -728,6 +784,7 @@ mod tests {
 
         let rust_adt = |segments: &[&str], methods: Vec<ZngurMethodDetails>| ZngurType {
             ty: adt(segments),
+            lifetimes: vec![],
             layout: Some(LayoutPolicy::StackAllocated { size: 1, align: 1 }),
             trivially_relocatable: TriviallyRelocatable::No,
             wellknown_traits: vec![],
@@ -743,8 +800,10 @@ mod tests {
         let noop_method = ZngurMethodDetails {
             data: ZngurMethod {
                 name: "noop".to_owned(),
+                lifetimes: vec![],
                 generics: vec![],
                 receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+                receiver_lifetime: None,
                 inputs: vec![],
                 output: RustType::UNIT,
                 is_safe: None,
@@ -765,6 +824,7 @@ mod tests {
                 RustType::Primitive(PrimitiveRustType::Int(32)),
                 RustType::Primitive(PrimitiveRustType::Int(32)),
             ]),
+            lifetimes: vec![],
             layout: Some(LayoutPolicy::StackAllocated { size: 8, align: 4 }),
             trivially_relocatable: TriviallyRelocatable::No,
             wellknown_traits: vec![],
@@ -825,9 +885,9 @@ mod tests {
             funcs: vec![ZngurFn {
                 path: RustPathAndGenerics {
                     path: vec!["crate".to_owned(), "Unit".to_owned()],
-                    generics: vec![],
-                    named_generics: vec![],
+                    ..Default::default()
                 },
+                lifetimes: vec![],
                 inputs: vec![],
                 output: RustType::UNIT,
                 is_safe: None,
@@ -848,8 +908,7 @@ mod tests {
         let mk_trait = |name: &str| {
             let tr = RustTrait::Normal(RustPathAndGenerics {
                 path: vec!["crate".to_owned(), name.to_owned()],
-                generics: vec![],
-                named_generics: vec![],
+                ..Default::default()
             });
             (
                 tr.clone(),
@@ -893,6 +952,7 @@ mod tests {
         let spec = ZngurSpec {
             types: vec![ZngurType {
                 ty: adt(&["crate", "Way"]),
+                lifetimes: vec![],
                 layout: Some(LayoutPolicy::Conservative { size: 20, align: 8 }),
                 trivially_relocatable: TriviallyRelocatable::No,
                 wellknown_traits: vec![],
@@ -1188,8 +1248,7 @@ pub type Handle = super::Handle;
     fn cpp_std_and_core_modules_do_not_shadow_rust_prelude_paths() {
         let my_trait = RustTrait::Normal(RustPathAndGenerics {
             path: vec!["crate".to_owned(), "MyTrait".to_owned()],
-            generics: vec![],
-            named_generics: vec![],
+            ..Default::default()
         });
         let mut traits = indexmap::IndexMap::new();
         traits.insert(
@@ -1198,8 +1257,10 @@ pub type Handle = super::Handle;
                 tr: my_trait.clone(),
                 methods: vec![ZngurMethod {
                     name: "run".to_owned(),
+                    lifetimes: vec![],
                     generics: vec![],
                     receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+                    receiver_lifetime: None,
                     inputs: vec![],
                     output: RustType::UNIT,
                     is_safe: None,
@@ -1212,6 +1273,7 @@ pub type Handle = super::Handle;
                 minimal_stack_owned_type(cpp(&["core", "Widget"]), "::core::Widget", 16, 8),
                 ZngurType {
                     ty: RustType::Boxed(Box::new(RustType::Dyn(my_trait.clone(), vec![]))),
+                    lifetimes: vec![],
                     layout: Some(LayoutPolicy::StackAllocated { size: 16, align: 8 }),
                     trivially_relocatable: TriviallyRelocatable::No,
                     wellknown_traits: vec![],
@@ -1225,7 +1287,12 @@ pub type Handle = super::Handle;
                     cpp_stack_owned: None,
                 },
                 ZngurType {
-                    ty: RustType::Ref(Mutability::Not, Box::new(RustType::Dyn(my_trait, vec![]))),
+                    ty: RustType::Ref(
+                        Mutability::Not,
+                        None,
+                        Box::new(RustType::Dyn(my_trait, vec![])),
+                    ),
+                    lifetimes: vec![],
                     layout: Some(LayoutPolicy::StackAllocated { size: 16, align: 8 }),
                     trivially_relocatable: TriviallyRelocatable::No,
                     wellknown_traits: vec![],
@@ -1242,11 +1309,13 @@ pub type Handle = super::Handle;
                     ty: RustType::Boxed(Box::new(RustType::Dyn(
                         RustTrait::Fn {
                             name: "Fn".to_owned(),
+                            lifetimes: vec![],
                             inputs: vec![],
                             output: Box::new(RustType::UNIT),
                         },
                         vec![],
                     ))),
+                    lifetimes: vec![],
                     layout: Some(LayoutPolicy::StackAllocated { size: 16, align: 8 }),
                     trivially_relocatable: TriviallyRelocatable::No,
                     wellknown_traits: vec![],
@@ -1261,6 +1330,7 @@ pub type Handle = super::Handle;
                 },
                 ZngurType {
                     ty: adt(&["crate", "MyEnum"]),
+                    lifetimes: vec![],
                     layout: Some(LayoutPolicy::StackAllocated { size: 8, align: 4 }),
                     trivially_relocatable: TriviallyRelocatable::No,
                     wellknown_traits: vec![],
@@ -1314,6 +1384,7 @@ pub type Handle = super::Handle;
     fn cpp_type_wrappers_live_in_rust_cpp_namespace_and_do_not_collide_with_rust_std() {
         let rust_string = ZngurType {
             ty: adt(&["std", "string", "String"]),
+            lifetimes: vec![],
             layout: Some(LayoutPolicy::StackAllocated { size: 24, align: 8 }),
             trivially_relocatable: TriviallyRelocatable::No,
             wellknown_traits: vec![],
@@ -1464,5 +1535,319 @@ pub type Handle = super::Handle;
         assert!(!rust_code.contains("ZngCppStackObject"));
         assert!(!h.contains("sizeof(::geo::Point)"));
         assert!(h.contains("inline ::geo::Point& cpp()"));
+    }
+
+    #[test]
+    fn lifetimes_are_rendered_in_rust_glue_and_erased_in_cpp() {
+        let lt_a = Lifetime("a".to_owned());
+        let lt_b = Lifetime("b".to_owned());
+        let str_ty = RustType::Primitive(PrimitiveRustType::Str);
+        let ref_a_str = RustType::Ref(
+            Mutability::Not,
+            Some(lt_a.clone()),
+            Box::new(str_ty.clone()),
+        );
+        let ref_b_str = RustType::Ref(
+            Mutability::Not,
+            Some(lt_b.clone()),
+            Box::new(str_ty.clone()),
+        );
+        let parser_ty = RustType::Adt(RustPathAndGenerics {
+            path: vec!["crate".to_owned(), "Parser".to_owned()],
+            lifetimes: vec![lt_a.clone()],
+            ..Default::default()
+        });
+        let pair_ty = RustType::Adt(RustPathAndGenerics {
+            path: vec!["crate".to_owned(), "Pair".to_owned()],
+            lifetimes: vec![lt_a.clone(), lt_b.clone()],
+            ..Default::default()
+        });
+        let chooser_tr = RustTrait::Normal(RustPathAndGenerics {
+            path: vec!["crate".to_owned(), "Chooser".to_owned()],
+            ..Default::default()
+        });
+        let higher_ranked_fn_tr = RustTrait::Fn {
+            name: "Fn".to_owned(),
+            lifetimes: vec![lt_a.clone()],
+            inputs: vec![ref_a_str.clone()],
+            output: Box::new(ref_a_str.clone()),
+        };
+        let ref_anon_i32 = RustType::Ref(
+            Mutability::Not,
+            Some(Lifetime("_".to_owned())),
+            Box::new(RustType::Primitive(PrimitiveRustType::Int(32))),
+        );
+        let anon_fn_tr = RustTrait::Fn {
+            name: "Fn".to_owned(),
+            lifetimes: vec![],
+            inputs: vec![ref_anon_i32.clone()],
+            output: Box::new(ref_anon_i32),
+        };
+        let value_fn_tr = RustTrait::Fn {
+            name: "Fn".to_owned(),
+            lifetimes: vec![],
+            inputs: vec![RustType::Primitive(PrimitiveRustType::Int(32))],
+            output: Box::new(RustType::Primitive(PrimitiveRustType::Int(32))),
+        };
+        let borrowed_future_ty = RustType::Boxed(Box::new(RustType::Dyn(
+            RustTrait::Normal(RustPathAndGenerics {
+                path: vec!["std".to_owned(), "future".to_owned(), "Future".to_owned()],
+                named_generics: vec![("Output".to_owned(), ref_a_str.clone())],
+                ..Default::default()
+            }),
+            vec![],
+        )));
+
+        let mut traits = indexmap::IndexMap::new();
+        traits.insert(
+            chooser_tr.clone(),
+            ZngurTrait {
+                tr: chooser_tr.clone(),
+                methods: vec![ZngurMethod {
+                    name: "choose".to_owned(),
+                    lifetimes: vec![lt_a.clone()],
+                    generics: vec![],
+                    receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+                    receiver_lifetime: Some(lt_a.clone()),
+                    inputs: vec![ref_a_str.clone()],
+                    output: ref_a_str.clone(),
+                    is_safe: Some(true),
+                }],
+            },
+        );
+
+        let boxed_type = |tr: RustTrait| ZngurType {
+            ty: RustType::Boxed(Box::new(RustType::Dyn(tr, vec![]))),
+            lifetimes: vec![],
+            layout: Some(LayoutPolicy::StackAllocated { size: 16, align: 8 }),
+            trivially_relocatable: TriviallyRelocatable::No,
+            wellknown_traits: vec![ZngurWellknownTrait::Drop],
+            exhaustive: true,
+            methods: vec![],
+            constructor: None,
+            variants: vec![],
+            fields: vec![],
+            cpp_heap_allocated: None,
+            cpp_ref: None,
+            cpp_stack_owned: None,
+        };
+
+        let spec = ZngurSpec {
+            types: vec![
+                ZngurType {
+                    ty: str_ty,
+                    lifetimes: vec![],
+                    layout: Some(LayoutPolicy::OnlyByRef),
+                    trivially_relocatable: TriviallyRelocatable::No,
+                    wellknown_traits: vec![ZngurWellknownTrait::Unsized],
+                    exhaustive: true,
+                    methods: vec![],
+                    constructor: None,
+                    variants: vec![],
+                    fields: vec![],
+                    cpp_heap_allocated: None,
+                    cpp_ref: None,
+                    cpp_stack_owned: None,
+                },
+                ZngurType {
+                    ty: pair_ty,
+                    lifetimes: vec![lt_a.clone(), lt_b.clone()],
+                    layout: Some(LayoutPolicy::StackAllocated { size: 32, align: 8 }),
+                    trivially_relocatable: TriviallyRelocatable::No,
+                    wellknown_traits: vec![ZngurWellknownTrait::Drop],
+                    exhaustive: true,
+                    methods: vec![],
+                    constructor: Some(ZngurConstructor {
+                        inputs: vec![
+                            ("first".to_owned(), ref_a_str.clone()),
+                            ("second".to_owned(), ref_b_str.clone()),
+                        ],
+                    }),
+                    variants: vec![],
+                    fields: vec![
+                        ZngurField {
+                            name: "first".to_owned(),
+                            ty: ref_a_str.clone(),
+                            offset: Some(0),
+                        },
+                        ZngurField {
+                            name: "second".to_owned(),
+                            ty: ref_b_str,
+                            offset: Some(16),
+                        },
+                    ],
+                    cpp_heap_allocated: None,
+                    cpp_ref: None,
+                    cpp_stack_owned: None,
+                },
+                boxed_type(chooser_tr),
+                boxed_type(higher_ranked_fn_tr),
+                boxed_type(anon_fn_tr),
+                boxed_type(value_fn_tr),
+                ZngurType {
+                    ty: borrowed_future_ty,
+                    lifetimes: vec![lt_a.clone()],
+                    layout: Some(LayoutPolicy::StackAllocated { size: 16, align: 8 }),
+                    trivially_relocatable: TriviallyRelocatable::No,
+                    wellknown_traits: vec![ZngurWellknownTrait::Drop],
+                    exhaustive: true,
+                    methods: vec![],
+                    constructor: None,
+                    variants: vec![],
+                    fields: vec![],
+                    cpp_heap_allocated: None,
+                    cpp_ref: None,
+                    cpp_stack_owned: None,
+                },
+            ],
+            traits,
+            funcs: vec![ZngurFn {
+                path: RustPathAndGenerics {
+                    path: vec!["crate".to_owned(), "identity".to_owned()],
+                    generics: vec![ref_a_str.clone()],
+                    ..Default::default()
+                },
+                lifetimes: vec![lt_a.clone()],
+                inputs: vec![ref_a_str.clone()],
+                output: ref_a_str.clone(),
+                is_safe: None,
+            }],
+            extern_cpp_funcs: vec![ZngurExternCppFn {
+                name: "shortest".to_owned(),
+                lifetimes: vec![lt_a.clone()],
+                inputs: vec![ref_a_str.clone(), ref_a_str.clone()],
+                output: ref_a_str.clone(),
+                is_safe: true,
+            }],
+            extern_cpp_impls: vec![
+                ZngurExternCppImpl {
+                    lifetimes: vec![lt_a.clone()],
+                    tr: None,
+                    ty: parser_ty.clone(),
+                    methods: vec![ZngurMethod {
+                        name: "skip_and_rest".to_owned(),
+                        lifetimes: vec![],
+                        generics: vec![],
+                        receiver: ZngurMethodReceiver::Ref(Mutability::Mut),
+                        receiver_lifetime: Some(lt_a.clone()),
+                        inputs: vec![],
+                        output: ref_a_str.clone(),
+                        is_safe: Some(true),
+                    }],
+                },
+                ZngurExternCppImpl {
+                    lifetimes: vec![lt_a.clone()],
+                    tr: Some(RustTrait::Normal(RustPathAndGenerics {
+                        path: vec!["crate".to_owned(), "MyTrait".to_owned()],
+                        lifetimes: vec![lt_a.clone()],
+                        ..Default::default()
+                    })),
+                    ty: parser_ty,
+                    methods: vec![ZngurMethod {
+                        name: "inspect".to_owned(),
+                        lifetimes: vec![lt_b.clone()],
+                        generics: vec![],
+                        receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+                        receiver_lifetime: Some(lt_b),
+                        inputs: vec![],
+                        output: ref_a_str,
+                        is_safe: Some(true),
+                    }],
+                },
+            ],
+            ..Default::default()
+        };
+
+        let (rust_code, h, _cpp) =
+            ZngurGenerator::build_from_zng(spec, "crate".to_owned()).render(false);
+
+        // `extern "C++"` functions and `impl` blocks preserve lifetimes in Rust, erase in C++.
+        assert!(
+            rust_code.contains("pub fn shortest<'a>(i0: &'a str, i1: &'a str, ) -> &'a str"),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "impl<'a> crate::Parser::<'a> {pub fn skip_and_rest(&'a mut self, ) -> &'a str"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "impl<'a> crate::MyTrait::<'a> for crate::Parser::<'a> {fn inspect<'b>(&'b self, ) -> &'a str"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            h.contains("class Impl< ::rust::crate::Parser, ::rust::crate::MyTrait >"),
+            "{h}"
+        );
+        assert!(
+            h.contains(
+                "::rust::Ref< ::rust::Str > shortest(\n    ::rust::Ref< ::rust::Str >, ::rust::Ref< ::rust::Str >\n);"
+            ),
+            "{h}"
+        );
+
+        // Trait wrapper methods emit `<'a>` and `&'a self`.
+        assert!(
+            rust_code.contains("fn choose<'a>(&'a self, i0: &'a str) -> &'a str"),
+            "{rust_code}"
+        );
+
+        // Both higher-ranked (`for<'a> Fn`) and elided/`'_` (`Fn(&'_ i32) -> &'_ i32`) emit
+        // `__zngur_coerce`, while `Fn(i32) -> i32` uses a typed closure parameter without it.
+        assert!(
+            rust_code
+                .contains("fn __zngur_coerce<F: for<'a> Fn(&'a str) -> &'a str>(f: F) -> F { f }"),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains("fn __zngur_coerce<F: Fn(&'_ i32) -> &'_ i32>(f: F) -> F { f }"),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains("Box::new(move |i0: i32| unsafe {"),
+            "{rust_code}"
+        );
+
+        // Free function generic type arguments anonymize `'a` to `'_`.
+        assert!(
+            rust_code.contains("crate::identity::<&'_ str>("),
+            "{rust_code}"
+        );
+        assert!(
+            !rust_code.contains("crate::identity::<&'a str>"),
+            "{rust_code}"
+        );
+
+        // Multi-lifetime field assertions keep un-anonymized `'a, 'b` on `__zngur_assert_has_field!`
+        // while using `'_` for layout and offset assertions.
+        assert!(
+            rust_code.contains(
+                "__zngur_assert_has_field!(['a, 'b], crate::Pair::<'a, 'b>, &'a str, first);"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "__zngur_assert_has_field!(['a, 'b], crate::Pair::<'a, 'b>, &'b str, second);"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains("__zngur_assert_field_offset!(crate::Pair::<'_, '_>, 0, first);"),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "crate::Pair::<'_, '_> { first: ::std::ptr::read(f_first as *mut &'_ str), second: ::std::ptr::read(f_second as *mut &'_ str)"
+            ),
+            "{rust_code}"
+        );
+
+        // Borrowed `Future<Output = &'a str>` skips C++20 coroutine shim generation.
+        assert!(!rust_code.contains("struct CoroState"), "{rust_code}");
+        assert!(!h.contains("ZNGUR_CORO_SHIMS_"), "{h}");
     }
 }

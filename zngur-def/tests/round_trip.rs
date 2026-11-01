@@ -793,3 +793,152 @@ mod crate {
     );
     assert_eq!(parsed.imported_modules, reparsed.imported_modules);
 }
+
+#[test]
+fn reparse_lifetimes() {
+    let _ = check_round_trip(
+        r#"
+#unstable(template_types)
+
+type<'a, T> ::std::slice::Iter<'a, T> {
+    #layout(size = 16, align = 8);
+    fn next(&mut self) -> ::std::option::Option<&'a T>;
+}
+
+type<'a> crate::Parser<'a> {
+    #layout(size = 24, align = 8);
+    field input (offset = 0, type = &'a str);
+    fn rest(&self) -> &'a str;
+    fn peek<'b>(&'b self) -> ::std::option::Option<&'b str>;
+    fn convert<'b, i32>(&'b self, i32) -> &'b str;
+}
+
+type<'b> ::std::slice::Iter<'b, u8> {
+}
+
+type ::std::slice::Iter<'static, i32> {
+}
+
+type Box<dyn for<'a> Fn(&'a i32, &'a i32) -> &'a i32> {
+    #layout(size = 16, align = 8);
+}
+
+trait crate::Picker {
+    fn pick<'a>(&self, &'a i32, &'a i32) -> &'a i32;
+}
+
+mod crate {
+    fn longest<'a>(&'a str, &'a str) -> &'a str;
+    fn identity<'a, &'a str>(&'a str) -> &'a str;
+}
+
+extern "C++" {
+    safe fn pick<'a>(&'a crate::Foo, &'a mut crate::Foo) -> &'a i32;
+    impl<'a> crate::Parser<'a> {
+        safe fn first(&'a self) -> &'a str;
+    }
+    impl<'a> crate::MyTrait<'a> for crate::Parser<'a> {
+        safe fn inspect<'b>(&'b self) -> &'a str;
+    }
+}
+"#,
+        expect![[r#"
+            type<'a> crate::Parser<'a> {
+                #layout(size = 24, align = 8);
+
+                field input (offset = 0, type = &'a str);
+
+                fn rest(&self) -> &'a str;
+                fn peek<'b>(&'b self) -> ::std::option::Option<&'b str>;
+                fn convert<'b, i32>(&'b self, i32) -> &'b str;
+            }
+
+            type<'b> ::std::slice::Iter<'b, u8> {
+                #layout(size = 16, align = 8);
+
+                fn next(&mut self) -> ::std::option::Option<&'b u8>;
+            }
+
+            type ::std::slice::Iter<'static, i32> {
+                #layout(size = 16, align = 8);
+
+                fn next(&mut self) -> ::std::option::Option<&'static i32>;
+            }
+
+            type Box<dyn for<'a> Fn(&'a i32, &'a i32) -> &'a i32> {
+                #layout(size = 16, align = 8);
+            }
+
+            mod crate {
+                fn longest<'a>(&'a str, &'a str) -> &'a str;
+                fn identity<'a, &'a str>(&'a str) -> &'a str;
+            }
+
+            trait crate::Picker {
+                fn pick<'a>(&self, &'a i32, &'a i32) -> &'a i32;
+            }
+
+            extern "C++" {
+
+                safe fn pick<'a>(&'a crate::Foo, &'a mut crate::Foo) -> &'a i32;
+
+                impl<'a> crate::Parser<'a> {
+                    safe fn first(&'a self) -> &'a str;
+                }
+                impl<'a> crate::MyTrait<'a> for crate::Parser<'a> {
+                    safe fn inspect<'b>(&'b self) -> &'a str;
+                }
+
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn reparse_lifetime_merge_and_template_capture_avoidance() {
+    let resolver = MockFilesystem::new(vec![(
+        "./part.zng",
+        r#"
+type<'a> crate::Parser<'a> {
+    #layout(size = 40, align = 8);
+    field callback (offset = 8, type = Box<dyn for<'b> Fn(&'b str) -> &'b str>);
+    fn pair<'b, 'b_0>(&'b self, &'b_0 str) -> &'a str;
+}
+"#,
+    )]);
+    let _ = check_round_trip_with_resolver(
+        r#"
+#unstable(template_types)
+merge "./part.zng";
+
+type<'b> crate::Parser<'b> {
+    field input (offset = 0, type = &'b str);
+}
+
+type<T> crate::Holder<T> {
+    #layout(size = 16, align = 8);
+    fn invoke<'b>(&'b self, T);
+}
+
+type crate::Holder<Box<dyn for<'b> Fn(&'b str)>> {
+}
+"#,
+        Some(Box::new(resolver)),
+        expect![[r#"
+            type<'b> crate::Parser<'b> {
+                #layout(size = 40, align = 8);
+
+                field input (offset = 0, type = &'b str);
+                field callback (offset = 8, type = Box<dyn for<'b_2> Fn(&'b_2 str) -> &'b_2 str>);
+
+                fn pair<'b_1, 'b_0>(&'b_1 self, &'b_0 str) -> &'b str;
+            }
+
+            type crate::Holder<Box<dyn for<'b> Fn(&'b str)>> {
+                #layout(size = 16, align = 8);
+
+                fn invoke<'b_0>(&'b_0 self, Box<dyn for<'b> Fn(&'b str)>);
+            }
+        "#]],
+    );
+}

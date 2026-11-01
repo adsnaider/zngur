@@ -160,19 +160,70 @@ pub enum ZngurMethodReceiver {
     Move,
 }
 
+/// A Rust lifetime, without the `'`: `Lifetime("a")` is `'a`. `'static` and `'_` are
+/// `Lifetime("static")` and `Lifetime("_")`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Lifetime(pub String);
+
+impl Lifetime {
+    /// Whether it's `'static` or `'_`, which don't need to be declared.
+    pub fn is_builtin(&self) -> bool {
+        self.0 == "static" || self.0 == "_"
+    }
+}
+
+impl Display for Lifetime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "'{}", self.0)
+    }
+}
+
+/// The `<'a, 'b>` that declares `lifetimes` on a Rust item, or `""` if there are none.
+pub fn lifetime_params(lifetimes: &[Lifetime]) -> String {
+    if lifetimes.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", lifetimes.iter().join(", "))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ZngurMethod {
     pub name: String,
+    /// The lifetime parameters that the method declares (`fn get<'a>(...)`).
+    pub lifetimes: Vec<Lifetime>,
     pub generics: Vec<RustType>,
     pub receiver: ZngurMethodReceiver,
+    /// The lifetime of a `&'a self` or `&'a mut self` receiver.
+    pub receiver_lifetime: Option<Lifetime>,
     pub inputs: Vec<RustType>,
     pub output: RustType,
     pub is_safe: Option<bool>,
 }
 
+impl ZngurMethod {
+    /// The Rust receiver: `""`, `"&'a self"`, `"&mut self"` or `"self"`.
+    pub fn rust_receiver(&self) -> String {
+        let lifetime = self
+            .receiver_lifetime
+            .as_ref()
+            .map(|l| format!("{l} "))
+            .unwrap_or_default();
+        match self.receiver {
+            ZngurMethodReceiver::Static => String::new(),
+            ZngurMethodReceiver::Ref(Mutability::Not) => format!("&{lifetime}self"),
+            ZngurMethodReceiver::Ref(Mutability::Mut) => format!("&{lifetime}mut self"),
+            ZngurMethodReceiver::Move => "self".to_owned(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ZngurFn {
     pub path: RustPathAndGenerics,
+    /// The lifetime parameters that the function declares. They're only documentation: zngur
+    /// calls the function without naming them.
+    pub lifetimes: Vec<Lifetime>,
     pub inputs: Vec<RustType>,
     pub output: RustType,
     pub is_safe: Option<bool>,
@@ -181,6 +232,8 @@ pub struct ZngurFn {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ZngurExternCppFn {
     pub name: String,
+    /// The lifetime parameters of the generated Rust function.
+    pub lifetimes: Vec<Lifetime>,
     pub inputs: Vec<RustType>,
     pub output: RustType,
     pub is_safe: bool,
@@ -188,6 +241,8 @@ pub struct ZngurExternCppFn {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ZngurExternCppImpl {
+    /// The lifetime parameters of the `impl` block (`impl<'a> crate::Parser<'a>`).
+    pub lifetimes: Vec<Lifetime>,
     pub tr: Option<RustTrait>,
     pub ty: RustType,
     pub methods: Vec<ZngurMethod>,
@@ -323,6 +378,9 @@ impl Display for CppRef {
 #[derive(Debug, PartialEq)]
 pub struct ZngurType {
     pub ty: RustType,
+    /// The lifetime parameters of a Rust type (`type<'a> crate::Parser<'a>`), which its methods
+    /// can use. The generated glue names the type with `'_` in their place.
+    pub lifetimes: Vec<Lifetime>,
     /// Required for Rust types. For C++ (`c++::`) types, Rust holds them by value if they have a
     /// `StackAllocated` or `Conservative` layout and are `trivially_relocatable`, and only refers
     /// to them otherwise.
@@ -474,6 +532,8 @@ pub enum RustTrait {
     Normal(RustPathAndGenerics),
     Fn {
         name: String,
+        /// The lifetimes of a `for<'a>` binder: `for<'a> Fn(&'a i32) -> &'a i32`.
+        lifetimes: Vec<Lifetime>,
         inputs: Vec<RustType>,
         output: Box<RustType>,
     },
@@ -486,6 +546,27 @@ impl RustTrait {
             RustTrait::Fn { .. } => vec![],
         };
         (self, assocs)
+    }
+
+    /// `self`, with all lifetimes erased.
+    pub fn with_erased_lifetimes(&self) -> Self {
+        match RustType::Dyn(self.clone(), vec![]).with_erased_lifetimes() {
+            RustType::Dyn(tr, _) => tr,
+            _ => unreachable!(),
+        }
+    }
+
+    /// Canonicalizes declared `outer` lifetimes and `for<...>` binders to positional indices.
+    pub fn canonicalize_lifetimes(&self, outer: &[Lifetime]) -> Self {
+        match RustType::Dyn(self.clone(), vec![]).canonicalize_lifetimes(outer) {
+            RustType::Dyn(tr, _) => tr,
+            _ => unreachable!(),
+        }
+    }
+
+    /// Every non-builtin lifetime appearing in `self` (both free lifetimes and `for<...>` binders).
+    pub fn all_lifetimes(&self) -> Vec<Lifetime> {
+        RustType::Dyn(self.clone(), vec![]).all_lifetimes()
     }
 }
 
@@ -503,17 +584,57 @@ pub enum PrimitiveRustType {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeVar(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct RustPathAndGenerics {
     pub path: Vec<String>,
+    /// Lifetime arguments (`::std::slice::Iter<'a, i32>`), which come first.
+    pub lifetimes: Vec<Lifetime>,
     pub generics: Vec<RustType>,
     pub named_generics: Vec<(String, RustType)>,
+}
+
+impl RustPathAndGenerics {
+    /// `self`, with each named lifetime that isn't bound by a `for<...>` inside it replaced by
+    /// `'_`.
+    pub fn with_anonymous_lifetimes(&self) -> Self {
+        match RustType::Adt(self.clone()).with_anonymous_lifetimes() {
+            RustType::Adt(pg) => pg,
+            _ => unreachable!(),
+        }
+    }
+
+    /// `self`, with all lifetimes erased.
+    pub fn with_erased_lifetimes(&self) -> Self {
+        RustPathAndGenerics {
+            path: self.path.clone(),
+            lifetimes: vec![],
+            generics: self
+                .generics
+                .iter()
+                .map(RustType::with_erased_lifetimes)
+                .collect(),
+            named_generics: self
+                .named_generics
+                .iter()
+                .map(|(n, t)| (n.clone(), t.with_erased_lifetimes()))
+                .collect(),
+        }
+    }
+
+    /// Canonicalizes declared `outer` lifetimes and `for<...>` binders to positional indices.
+    pub fn canonicalize_lifetimes(&self, outer: &[Lifetime]) -> Self {
+        match RustType::Adt(self.clone()).canonicalize_lifetimes(outer) {
+            RustType::Adt(pg) => pg,
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RustType {
     Primitive(PrimitiveRustType),
-    Ref(Mutability, Box<RustType>),
+    /// `&T`, `&'a T`, `&mut T` or `&'a mut T`.
+    Ref(Mutability, Option<Lifetime>, Box<RustType>),
     Raw(Mutability, Box<RustType>),
     Boxed(Box<RustType>),
     Slice(Box<RustType>),
@@ -528,6 +649,495 @@ pub enum RustType {
 impl RustType {
     pub const UNIT: Self = RustType::Tuple(Vec::new());
 
+    /// The type variables in `self` (e.g. `T` in a template `crate::Foo<T>`), in order of
+    /// appearance, without duplicates.
+    pub fn type_vars(&self) -> Vec<&TypeVar> {
+        fn collect<'a>(ty: &'a RustType, out: &mut Vec<&'a TypeVar>) {
+            let all = |tys: &'a [RustType], out: &mut Vec<&'a TypeVar>| {
+                tys.iter().for_each(|t| collect(t, out))
+            };
+            match ty {
+                RustType::TypeVar(v) => {
+                    if !out.contains(&v) {
+                        out.push(v);
+                    }
+                }
+                RustType::Ref(_, _, t)
+                | RustType::Raw(_, t)
+                | RustType::Boxed(t)
+                | RustType::Slice(t) => collect(t, out),
+                RustType::Tuple(tys) => all(tys, out),
+                RustType::Adt(pg) => {
+                    all(&pg.generics, out);
+                    pg.named_generics.iter().for_each(|(_, t)| collect(t, out));
+                }
+                RustType::Dyn(tr, _) | RustType::Impl(tr, _) => match tr {
+                    RustTrait::Normal(pg) => {
+                        all(&pg.generics, out);
+                        pg.named_generics.iter().for_each(|(_, t)| collect(t, out));
+                    }
+                    RustTrait::Fn { inputs, output, .. } => {
+                        all(inputs, out);
+                        collect(output, out);
+                    }
+                },
+                RustType::Primitive(_) | RustType::Cpp(_) => {}
+            }
+        }
+        let mut out = vec![];
+        collect(self, &mut out);
+        out
+    }
+
+    /// The named lifetimes that `self` uses (not `'static` or `'_`), other than those bound by a
+    /// `for<...>` inside it, in order of appearance (with duplicates).
+    pub fn free_lifetimes(&self) -> Vec<Lifetime> {
+        let mut out = vec![];
+        let _ = self.map_free_lifetimes(&mut |l| {
+            out.push(l.clone());
+            l.clone()
+        });
+        out
+    }
+
+    /// Every named lifetime appearing in `self` (not `'static` or `'_`), including both free
+    /// lifetimes and `for<...>` binders, in order of appearance.
+    pub fn all_lifetimes(&self) -> Vec<Lifetime> {
+        fn push(l: &Lifetime, out: &mut Vec<Lifetime>) {
+            if !l.is_builtin() {
+                out.push(l.clone());
+            }
+        }
+        fn go_path(pg: &RustPathAndGenerics, out: &mut Vec<Lifetime>) {
+            pg.lifetimes.iter().for_each(|l| push(l, out));
+            pg.generics.iter().for_each(|t| go(t, out));
+            pg.named_generics.iter().for_each(|(_, t)| go(t, out));
+        }
+        fn go_trait(tr: &RustTrait, out: &mut Vec<Lifetime>) {
+            match tr {
+                RustTrait::Normal(pg) => go_path(pg, out),
+                RustTrait::Fn {
+                    lifetimes,
+                    inputs,
+                    output,
+                    ..
+                } => {
+                    lifetimes.iter().for_each(|l| push(l, out));
+                    inputs.iter().for_each(|t| go(t, out));
+                    go(output, out);
+                }
+            }
+        }
+        fn go(ty: &RustType, out: &mut Vec<Lifetime>) {
+            match ty {
+                RustType::Ref(_, l, t) => {
+                    if let Some(l) = l {
+                        push(l, out);
+                    }
+                    go(t, out);
+                }
+                RustType::Raw(_, t) | RustType::Boxed(t) | RustType::Slice(t) => go(t, out),
+                RustType::Tuple(tys) => tys.iter().for_each(|t| go(t, out)),
+                RustType::Adt(pg) => go_path(pg, out),
+                RustType::Dyn(tr, _) | RustType::Impl(tr, _) => go_trait(tr, out),
+                RustType::Primitive(_) | RustType::TypeVar(_) | RustType::Cpp(_) => {}
+            }
+        }
+        let mut out = Vec::new();
+        go(self, &mut out);
+        out
+    }
+
+    /// Alpha-renames any `for<...>` binder in `self` whose lifetime name is in `outer_in_scope`
+    /// (or an enclosing `for<...>` binder), avoiding all lifetimes in `avoid` and recording newly
+    /// chosen lifetimes in `avoid`.
+    pub fn rename_colliding_for_binders(
+        &self,
+        outer_in_scope: &std::collections::HashSet<Lifetime>,
+        avoid: &mut std::collections::HashSet<Lifetime>,
+    ) -> RustType {
+        fn go_path(
+            pg: &RustPathAndGenerics,
+            in_scope: &std::collections::HashSet<Lifetime>,
+            avoid: &mut std::collections::HashSet<Lifetime>,
+        ) -> RustPathAndGenerics {
+            RustPathAndGenerics {
+                path: pg.path.clone(),
+                lifetimes: pg.lifetimes.clone(),
+                generics: pg.generics.iter().map(|t| go(t, in_scope, avoid)).collect(),
+                named_generics: pg
+                    .named_generics
+                    .iter()
+                    .map(|(n, t)| (n.clone(), go(t, in_scope, avoid)))
+                    .collect(),
+            }
+        }
+        fn go_trait(
+            tr: &RustTrait,
+            in_scope: &std::collections::HashSet<Lifetime>,
+            avoid: &mut std::collections::HashSet<Lifetime>,
+        ) -> RustTrait {
+            match tr {
+                RustTrait::Normal(pg) => RustTrait::Normal(go_path(pg, in_scope, avoid)),
+                RustTrait::Fn {
+                    name,
+                    lifetimes,
+                    inputs,
+                    output,
+                } => {
+                    let mut local_avoid = avoid.clone();
+                    local_avoid.extend(in_scope.iter().cloned());
+                    local_avoid.extend(lifetimes.iter().cloned());
+                    for t in inputs.iter().chain([output.as_ref()]) {
+                        local_avoid.extend(t.all_lifetimes());
+                    }
+                    let mut next_in_scope = in_scope.clone();
+                    let mut renames: Vec<(Lifetime, Lifetime)> = Vec::new();
+                    let mut counter = 0usize;
+                    let new_lifetimes: Vec<Lifetime> = lifetimes
+                        .iter()
+                        .map(|bl| {
+                            if next_in_scope.contains(bl) {
+                                let fresh = loop {
+                                    let candidate = Lifetime(format!("{}_{counter}", bl.0));
+                                    counter += 1;
+                                    if !local_avoid.contains(&candidate) {
+                                        break candidate;
+                                    }
+                                };
+                                local_avoid.insert(fresh.clone());
+                                avoid.insert(fresh.clone());
+                                next_in_scope.insert(fresh.clone());
+                                renames.push((bl.clone(), fresh.clone()));
+                                fresh
+                            } else {
+                                next_in_scope.insert(bl.clone());
+                                bl.clone()
+                            }
+                        })
+                        .collect();
+                    let remap = |t: &RustType| -> RustType {
+                        if renames.is_empty() {
+                            t.clone()
+                        } else {
+                            t.map_free_lifetimes(&mut |l| {
+                                renames
+                                    .iter()
+                                    .find(|(old, _)| old == l)
+                                    .map(|(_, new)| new.clone())
+                                    .unwrap_or_else(|| l.clone())
+                            })
+                        }
+                    };
+                    let inputs: Vec<RustType> = inputs
+                        .iter()
+                        .map(|t| go(&remap(t), &next_in_scope, avoid))
+                        .collect();
+                    let output = Box::new(go(&remap(output), &next_in_scope, avoid));
+                    RustTrait::Fn {
+                        name: name.clone(),
+                        lifetimes: new_lifetimes,
+                        inputs,
+                        output,
+                    }
+                }
+            }
+        }
+        fn go(
+            ty: &RustType,
+            in_scope: &std::collections::HashSet<Lifetime>,
+            avoid: &mut std::collections::HashSet<Lifetime>,
+        ) -> RustType {
+            match ty {
+                RustType::Ref(m, l, t) => {
+                    RustType::Ref(*m, l.clone(), Box::new(go(t, in_scope, avoid)))
+                }
+                RustType::Raw(m, t) => RustType::Raw(*m, Box::new(go(t, in_scope, avoid))),
+                RustType::Boxed(t) => RustType::Boxed(Box::new(go(t, in_scope, avoid))),
+                RustType::Slice(t) => RustType::Slice(Box::new(go(t, in_scope, avoid))),
+                RustType::Tuple(tys) => {
+                    RustType::Tuple(tys.iter().map(|t| go(t, in_scope, avoid)).collect())
+                }
+                RustType::Adt(pg) => RustType::Adt(go_path(pg, in_scope, avoid)),
+                RustType::Dyn(tr, bounds) => {
+                    RustType::Dyn(go_trait(tr, in_scope, avoid), bounds.clone())
+                }
+                RustType::Impl(tr, bounds) => {
+                    RustType::Impl(go_trait(tr, in_scope, avoid), bounds.clone())
+                }
+                RustType::Primitive(_) | RustType::TypeVar(_) | RustType::Cpp(_) => ty.clone(),
+            }
+        }
+        go(self, outer_in_scope, avoid)
+    }
+
+    /// `self`, with each named lifetime that isn't bound by a `for<...>` inside it replaced by
+    /// `'_`. The generated glue uses it for types whose lifetimes aren't declared there.
+    pub fn with_anonymous_lifetimes(&self) -> RustType {
+        self.map_free_lifetimes(&mut |_| Lifetime("_".to_owned()))
+    }
+
+    /// `self`, with `f` applied to each named lifetime that isn't bound by a `for<...>` inside it.
+    pub fn map_free_lifetimes(&self, f: &mut impl FnMut(&Lifetime) -> Lifetime) -> RustType {
+        fn go(
+            ty: &RustType,
+            bound: &[Lifetime],
+            f: &mut dyn FnMut(&Lifetime) -> Lifetime,
+        ) -> RustType {
+            let lt = |l: &Lifetime, f: &mut dyn FnMut(&Lifetime) -> Lifetime| {
+                if l.is_builtin() || bound.contains(l) {
+                    l.clone()
+                } else {
+                    f(l)
+                }
+            };
+            let all = |tys: &[RustType], f: &mut dyn FnMut(&Lifetime) -> Lifetime| {
+                tys.iter().map(|t| go(t, bound, f)).collect::<Vec<_>>()
+            };
+            match ty {
+                RustType::Ref(m, l, t) => {
+                    RustType::Ref(*m, l.as_ref().map(|l| lt(l, f)), Box::new(go(t, bound, f)))
+                }
+                RustType::Raw(m, t) => RustType::Raw(*m, Box::new(go(t, bound, f))),
+                RustType::Boxed(t) => RustType::Boxed(Box::new(go(t, bound, f))),
+                RustType::Slice(t) => RustType::Slice(Box::new(go(t, bound, f))),
+                RustType::Tuple(tys) => RustType::Tuple(all(tys, f)),
+                RustType::Adt(pg) => RustType::Adt(go_path(pg, bound, f)),
+                RustType::Dyn(tr, bounds) => RustType::Dyn(go_trait(tr, bound, f), bounds.clone()),
+                RustType::Impl(tr, bounds) => {
+                    RustType::Impl(go_trait(tr, bound, f), bounds.clone())
+                }
+                RustType::Primitive(_) | RustType::TypeVar(_) | RustType::Cpp(_) => ty.clone(),
+            }
+        }
+        fn go_path(
+            pg: &RustPathAndGenerics,
+            bound: &[Lifetime],
+            f: &mut dyn FnMut(&Lifetime) -> Lifetime,
+        ) -> RustPathAndGenerics {
+            RustPathAndGenerics {
+                path: pg.path.clone(),
+                lifetimes: pg
+                    .lifetimes
+                    .iter()
+                    .map(|l| {
+                        if l.is_builtin() || bound.contains(l) {
+                            l.clone()
+                        } else {
+                            f(l)
+                        }
+                    })
+                    .collect(),
+                generics: pg.generics.iter().map(|t| go(t, bound, f)).collect(),
+                named_generics: pg
+                    .named_generics
+                    .iter()
+                    .map(|(n, t)| (n.clone(), go(t, bound, f)))
+                    .collect(),
+            }
+        }
+        fn go_trait(
+            tr: &RustTrait,
+            bound: &[Lifetime],
+            f: &mut dyn FnMut(&Lifetime) -> Lifetime,
+        ) -> RustTrait {
+            match tr {
+                RustTrait::Normal(pg) => RustTrait::Normal(go_path(pg, bound, f)),
+                RustTrait::Fn {
+                    name,
+                    lifetimes,
+                    inputs,
+                    output,
+                } => {
+                    let bound: Vec<Lifetime> = bound.iter().chain(lifetimes).cloned().collect();
+                    RustTrait::Fn {
+                        name: name.clone(),
+                        lifetimes: lifetimes.clone(),
+                        inputs: inputs.iter().map(|t| go(t, &bound, f)).collect(),
+                        output: Box::new(go(output, &bound, f)),
+                    }
+                }
+            }
+        }
+        go(self, &[], f)
+    }
+
+    /// `self` with all lifetime arguments, reference lifetimes, and `for<...>` binders removed.
+    /// Two `RustType`s produce the same C++ wrapper type when their lifetime-erased forms match.
+    pub fn with_erased_lifetimes(&self) -> RustType {
+        fn erase_trait(tr: &RustTrait) -> RustTrait {
+            match tr {
+                RustTrait::Normal(pg) => RustTrait::Normal(pg.with_erased_lifetimes()),
+                RustTrait::Fn {
+                    name,
+                    lifetimes: _,
+                    inputs,
+                    output,
+                } => RustTrait::Fn {
+                    name: name.clone(),
+                    lifetimes: vec![],
+                    inputs: inputs.iter().map(RustType::with_erased_lifetimes).collect(),
+                    output: Box::new(output.with_erased_lifetimes()),
+                },
+            }
+        }
+        match self {
+            RustType::Ref(m, _, t) => RustType::Ref(*m, None, Box::new(t.with_erased_lifetimes())),
+            RustType::Raw(m, t) => RustType::Raw(*m, Box::new(t.with_erased_lifetimes())),
+            RustType::Boxed(t) => RustType::Boxed(Box::new(t.with_erased_lifetimes())),
+            RustType::Slice(t) => RustType::Slice(Box::new(t.with_erased_lifetimes())),
+            RustType::Tuple(tys) => {
+                RustType::Tuple(tys.iter().map(RustType::with_erased_lifetimes).collect())
+            }
+            RustType::Adt(pg) => RustType::Adt(pg.with_erased_lifetimes()),
+            RustType::Dyn(tr, bounds) => RustType::Dyn(erase_trait(tr), bounds.clone()),
+            RustType::Impl(tr, bounds) => RustType::Impl(erase_trait(tr), bounds.clone()),
+            RustType::Primitive(_) | RustType::TypeVar(_) | RustType::Cpp(_) => self.clone(),
+        }
+    }
+
+    /// Whether `self` contains any non-`'static` lifetime (named `'a`, anonymous `'_`, or elided
+    /// `&T`) that is not bound by an enclosing `Fn` trait binder.
+    pub fn has_non_static_lifetime(&self) -> bool {
+        fn check_path(pg: &RustPathAndGenerics, fn_bound: &[Lifetime], in_fn: bool) -> bool {
+            pg.lifetimes
+                .iter()
+                .any(|l| l.0 != "static" && !(in_fn && l.0 == "_") && !fn_bound.contains(l))
+                || pg.generics.iter().any(|t| check(t, fn_bound, in_fn))
+                || pg
+                    .named_generics
+                    .iter()
+                    .any(|(_, t)| check(t, fn_bound, in_fn))
+        }
+        fn check_trait(tr: &RustTrait, fn_bound: &[Lifetime], in_fn: bool) -> bool {
+            match tr {
+                RustTrait::Normal(pg) => check_path(pg, fn_bound, in_fn),
+                RustTrait::Fn {
+                    lifetimes,
+                    inputs,
+                    output,
+                    ..
+                } => {
+                    let bound: Vec<Lifetime> = fn_bound.iter().chain(lifetimes).cloned().collect();
+                    inputs
+                        .iter()
+                        .chain([output.as_ref()])
+                        .any(|t| check(t, &bound, true))
+                }
+            }
+        }
+        fn check(ty: &RustType, fn_bound: &[Lifetime], in_fn: bool) -> bool {
+            match ty {
+                RustType::Ref(_, l, t) => {
+                    let ref_non_static = match l {
+                        Some(l) => {
+                            l.0 != "static" && !(in_fn && l.0 == "_") && !fn_bound.contains(l)
+                        }
+                        None => !in_fn,
+                    };
+                    ref_non_static || check(t, fn_bound, in_fn)
+                }
+                RustType::Raw(_, t) | RustType::Boxed(t) | RustType::Slice(t) => {
+                    check(t, fn_bound, in_fn)
+                }
+                RustType::Tuple(tys) => tys.iter().any(|t| check(t, fn_bound, in_fn)),
+                RustType::Adt(pg) => check_path(pg, fn_bound, in_fn),
+                RustType::Dyn(tr, _) | RustType::Impl(tr, _) => check_trait(tr, fn_bound, in_fn),
+                RustType::Primitive(_) | RustType::TypeVar(_) | RustType::Cpp(_) => false,
+            }
+        }
+        check(self, &[], false)
+    }
+
+    /// Canonicalizes declared `outer` lifetimes and `for<...>` binders to positional indices so
+    /// alpha-equivalent declarations (e.g. `type<'a> Foo<'a>` and `type<'b> Foo<'b>`) compare
+    /// equal while distinct instantiations (e.g. `Iter<'static, i32>` vs `Iter<'a, i32>`) differ.
+    pub fn canonicalize_lifetimes(&self, outer: &[Lifetime]) -> RustType {
+        fn map_lt(l: &Lifetime, env: &[(Lifetime, Lifetime)]) -> Lifetime {
+            if l.is_builtin() {
+                return l.clone();
+            }
+            env.iter()
+                .rev()
+                .find(|(from, _)| from == l)
+                .map(|(_, to)| to.clone())
+                .unwrap_or_else(|| l.clone())
+        }
+        fn go_path(
+            pg: &RustPathAndGenerics,
+            env: &[(Lifetime, Lifetime)],
+            depth: usize,
+        ) -> RustPathAndGenerics {
+            RustPathAndGenerics {
+                path: pg.path.clone(),
+                lifetimes: pg.lifetimes.iter().map(|l| map_lt(l, env)).collect(),
+                generics: pg.generics.iter().map(|t| go(t, env, depth)).collect(),
+                named_generics: pg
+                    .named_generics
+                    .iter()
+                    .map(|(n, t)| (n.clone(), go(t, env, depth)))
+                    .collect(),
+            }
+        }
+        fn go_trait(tr: &RustTrait, env: &[(Lifetime, Lifetime)], depth: usize) -> RustTrait {
+            match tr {
+                RustTrait::Normal(pg) => RustTrait::Normal(go_path(pg, env, depth)),
+                RustTrait::Fn {
+                    name,
+                    lifetimes,
+                    inputs,
+                    output,
+                } => {
+                    let mut next_env = env.to_vec();
+                    let canon_lts: Vec<Lifetime> = lifetimes
+                        .iter()
+                        .enumerate()
+                        .map(|(i, l)| {
+                            let canon = Lifetime(format!("__fn_{depth}_{i}"));
+                            next_env.push((l.clone(), canon.clone()));
+                            canon
+                        })
+                        .collect();
+                    RustTrait::Fn {
+                        name: name.clone(),
+                        lifetimes: canon_lts,
+                        inputs: inputs.iter().map(|t| go(t, &next_env, depth + 1)).collect(),
+                        output: Box::new(go(output, &next_env, depth + 1)),
+                    }
+                }
+            }
+        }
+        fn go(ty: &RustType, env: &[(Lifetime, Lifetime)], depth: usize) -> RustType {
+            match ty {
+                RustType::Ref(m, l, t) => RustType::Ref(
+                    *m,
+                    l.as_ref().map(|l| map_lt(l, env)),
+                    Box::new(go(t, env, depth)),
+                ),
+                RustType::Raw(m, t) => RustType::Raw(*m, Box::new(go(t, env, depth))),
+                RustType::Boxed(t) => RustType::Boxed(Box::new(go(t, env, depth))),
+                RustType::Slice(t) => RustType::Slice(Box::new(go(t, env, depth))),
+                RustType::Tuple(tys) => {
+                    RustType::Tuple(tys.iter().map(|t| go(t, env, depth)).collect())
+                }
+                RustType::Adt(pg) => RustType::Adt(go_path(pg, env, depth)),
+                RustType::Dyn(tr, bounds) => {
+                    RustType::Dyn(go_trait(tr, env, depth), bounds.clone())
+                }
+                RustType::Impl(tr, bounds) => {
+                    RustType::Impl(go_trait(tr, env, depth), bounds.clone())
+                }
+                RustType::Primitive(_) | RustType::TypeVar(_) | RustType::Cpp(_) => ty.clone(),
+            }
+        }
+        let env: Vec<(Lifetime, Lifetime)> = outer
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (l.clone(), Lifetime(format!("__outer_{i}"))))
+            .collect();
+        go(self, &env, 0)
+    }
+
     /// The C++ spelling of a `c++::` type, e.g. `::a::B` for `c++::a::B`.
     pub fn cpp_spelling(&self) -> Option<String> {
         match self {
@@ -541,6 +1151,7 @@ impl Display for RustPathAndGenerics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let RustPathAndGenerics {
             path,
+            lifetimes,
             generics,
             named_generics,
         } = self;
@@ -550,13 +1161,14 @@ impl Display for RustPathAndGenerics {
             }
             write!(f, "{p}")?;
         }
-        if !generics.is_empty() || !named_generics.is_empty() {
+        if !lifetimes.is_empty() || !generics.is_empty() || !named_generics.is_empty() {
             write!(
                 f,
                 "::<{}>",
-                generics
+                lifetimes
                     .iter()
                     .map(|x| format!("{x}"))
+                    .chain(generics.iter().map(|x| format!("{x}")))
                     .chain(named_generics.iter().map(|x| format!("{} = {}", x.0, x.1)))
                     .join(", ")
             )?;
@@ -571,9 +1183,13 @@ impl Display for RustTrait {
             RustTrait::Normal(tr) => write!(f, "{tr}"),
             RustTrait::Fn {
                 name,
+                lifetimes,
                 inputs,
                 output,
             } => {
+                if !lifetimes.is_empty() {
+                    write!(f, "for{} ", lifetime_params(lifetimes))?;
+                }
                 write!(f, "{name}({})", inputs.iter().join(", "))?;
                 if **output != RustType::UNIT {
                     write!(f, " -> {output}")?;
@@ -602,8 +1218,16 @@ impl Display for RustType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RustType::Primitive(s) => write!(f, "{s}"),
-            RustType::Ref(Mutability::Not, ty) => write!(f, "&{ty}"),
-            RustType::Ref(Mutability::Mut, ty) => write!(f, "&mut {ty}"),
+            RustType::Ref(m, lifetime, ty) => {
+                write!(f, "&")?;
+                if let Some(lifetime) = lifetime {
+                    write!(f, "{lifetime} ")?;
+                }
+                if *m == Mutability::Mut {
+                    write!(f, "mut ")?;
+                }
+                write!(f, "{ty}")
+            }
             RustType::Raw(Mutability::Not, ty) => write!(f, "*const {ty}"),
             RustType::Raw(Mutability::Mut, ty) => write!(f, "*mut {ty}"),
             RustType::Boxed(ty) => write!(f, "Box<{ty}>"),

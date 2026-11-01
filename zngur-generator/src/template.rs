@@ -265,7 +265,14 @@ impl<'a> CppHeaderTemplate<'a> {
         use crate::cpp::CppTraitDefinition;
 
         use itertools::Itertools;
-        let tr = td.from_trait.as_ref().and_then(|k| self.trait_defs.get(k));
+        let tr = td.from_trait.as_ref().and_then(|k| {
+            self.trait_defs.get(k).or_else(|| {
+                let k_canon = k.canonicalize_lifetimes(&[]);
+                self.trait_defs
+                    .iter()
+                    .find_map(|(tk, v)| (tk.canonicalize_lifetimes(&[]) == k_canon).then_some(v))
+            })
+        });
         let name = td
             .ty
             .to_string()
@@ -352,10 +359,14 @@ impl<'a> CppHeaderTemplate<'a> {
 
     pub fn render_from_trait_ref(&self, td: &crate::cpp::CppTypeDefinition) -> String {
         use crate::cpp::CppTraitDefinition;
-        let tr = td
-            .from_trait_ref
-            .as_ref()
-            .and_then(|k| self.trait_defs.get(k));
+        let tr = td.from_trait_ref.as_ref().and_then(|k| {
+            self.trait_defs.get(k).or_else(|| {
+                let k_canon = k.canonicalize_lifetimes(&[]);
+                self.trait_defs
+                    .iter()
+                    .find_map(|(tk, v)| (tk.canonicalize_lifetimes(&[]) == k_canon).then_some(v))
+            })
+        });
         let name = td
             .ty
             .to_string()

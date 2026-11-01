@@ -2,8 +2,8 @@ use std::panic::catch_unwind;
 
 use expect_test::{Expect, expect};
 use zngur_def::{
-    CppHeapAllocated, CppRef, CppStackOwned, LayoutPolicy, RustPathAndGenerics, RustType,
-    TriviallyRelocatable, ZngurSpec,
+    CppHeapAllocated, CppRef, CppStackOwned, LayoutPolicy, Mutability, RustPathAndGenerics,
+    RustType, TriviallyRelocatable, ZngurSpec,
 };
 
 use crate::{
@@ -2886,4 +2886,789 @@ import "elsewhere.zng";
         |_| {},
     );
     assert_eq!(parsed.spec.imported_modules[0].crate_name, None);
+}
+
+#[test]
+fn lifetimes_parse() {
+    use zngur_def::{Lifetime, PrimitiveRustType, RustTrait};
+
+    let parsed = parse_str(
+        r#"
+type<'a> crate::Parser<'a> {
+    #layout(size = 24, align = 8);
+    fn rest(&self) -> &'a str;
+    fn peek<'b>(&'b mut self) -> &'b str;
+    fn elided(&self, &'_ str) -> &'_ str;
+}
+
+type Box<dyn for<'a> Fn(&'a i32) -> &'a i32> {
+    #layout(size = 16, align = 8);
+}
+
+extern "C++" {
+    safe fn pick<'a>(&'a i32, &'static i32) -> &'a i32;
+    impl<'a> crate::Parser<'a> {
+        safe fn first(&self) -> &'a str;
+    }
+}
+"#,
+        NullCfg,
+        |e| panic!("unexpected warning: {e}"),
+    );
+    let a = || Lifetime("a".to_owned());
+    let anon = || Lifetime("_".to_owned());
+    let i32 = || Box::new(RustType::Primitive(PrimitiveRustType::Int(32)));
+    let str_ty = || Box::new(RustType::Primitive(PrimitiveRustType::Str));
+    let parser_ty = &parsed.spec.types[0];
+    assert_eq!(parser_ty.lifetimes, vec![a()]);
+    assert_eq!(
+        parser_ty.ty,
+        RustType::Adt(RustPathAndGenerics {
+            path: vec!["crate".to_owned(), "Parser".to_owned()],
+            lifetimes: vec![a()],
+            ..Default::default()
+        })
+    );
+    let peek = &parser_ty.methods[1].data;
+    assert_eq!(peek.lifetimes, vec![Lifetime("b".to_owned())]);
+    assert_eq!(peek.receiver_lifetime, Some(Lifetime("b".to_owned())));
+    let elided = &parser_ty.methods[2].data;
+    assert!(elided.lifetimes.is_empty());
+    assert_eq!(
+        elided.inputs,
+        vec![RustType::Ref(Mutability::Not, Some(anon()), str_ty())]
+    );
+    assert_eq!(
+        elided.output,
+        RustType::Ref(Mutability::Not, Some(anon()), str_ty())
+    );
+    let RustType::Boxed(dyn_fn) = &parsed.spec.types[1].ty else {
+        panic!("not a box");
+    };
+    let RustType::Dyn(RustTrait::Fn { lifetimes, .. }, _) = &**dyn_fn else {
+        panic!("not a dyn Fn");
+    };
+    assert_eq!(lifetimes, &vec![a()]);
+    let pick = &parsed.spec.extern_cpp_funcs[0];
+    assert_eq!(pick.lifetimes, vec![a()]);
+    assert_eq!(
+        pick.inputs,
+        vec![
+            RustType::Ref(Mutability::Not, Some(a()), i32()),
+            RustType::Ref(Mutability::Not, Some(Lifetime("static".to_owned())), i32()),
+        ]
+    );
+    assert_eq!(parsed.spec.extern_cpp_impls[0].lifetimes, vec![a()]);
+}
+
+#[test]
+fn undeclared_lifetime_is_rejected() {
+    check_fail(
+        r#"
+extern "C++" {
+    safe fn pick<'a>(&'a i32, &'b i32) -> &'a i32;
+}
+"#,
+        expect![[r#"
+            Error: undeclared lifetime `'b`: declare it on the function, `impl` or `type` (e.g. `fn f<'b>(...)`)
+               ╭─[ test.zng:3:10 ]
+               │
+             3 │     safe fn pick<'a>(&'a i32, &'b i32) -> &'a i32;
+               │          ────────────────────┬───────────────────  
+               │                              ╰───────────────────── undeclared lifetime `'b`: declare it on the function, `impl` or `type` (e.g. `fn f<'b>(...)`)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn undeclared_type_and_trait_lifetimes_are_rejected() {
+    // Higher-ranked `Fn(...)` inside a trait header is allowed (its references are bound by the
+    // `Fn` trait binder rather than the `trait` header itself).
+    let _ = parse_str(
+        "trait crate::FnAssoc<F = Box<dyn Fn(&str) -> &str>> {}\n",
+        NullCfg,
+        |w| panic!("unexpected warning: {w}"),
+    );
+
+    check_fail(
+        r#"
+type crate::Parser<'a> {
+    #layout(size = 24, align = 8);
+}
+
+type<'a> crate::Unconstrained {
+    #layout(size = 8, align = 8);
+    fn f(&self, &'a str);
+}
+
+trait crate::MyTrait<'a> {
+    fn f(&self);
+}
+
+trait crate::AnonTrait<'_> {
+    fn f(&self);
+}
+
+trait ::std::iter::Iterator<Item = &'a str> {
+    fn next(&mut self) -> ::std::option::Option<&'static str>;
+}
+
+trait ::std::iter::Iterator<Item = &'_ str> {
+    fn next(&mut self) -> ::std::option::Option<&'static str>;
+}
+
+trait ::std::iter::Iterator<Item = &str> {
+    fn next(&mut self) -> ::std::option::Option<&'static str>;
+}
+
+trait crate::Chooser {
+    fn choose(&self, &'b str) -> &'b str;
+}
+
+extern "C++" {
+    impl crate::Foo {
+        safe fn bar(&self, &'c str);
+    }
+}
+"#,
+        expect![[r#"
+            Error: undeclared lifetime `'a`: declare it on the function, `impl` or `type` (e.g. `fn f<'a>(...)`)
+               ╭─[ test.zng:2:6 ]
+               │
+             2 │ type crate::Parser<'a> {
+               │      ────────┬────────  
+               │              ╰────────── undeclared lifetime `'a`: declare it on the function, `impl` or `type` (e.g. `fn f<'a>(...)`)
+            ───╯
+            Error: unconstrained lifetime `'a` in `type`: `'a` must be used in `crate::Unconstrained` (if `'a` is only used by methods, declare it on each method instead, e.g. `fn f<'a>(...)`)
+               ╭─[ test.zng:6:10 ]
+               │
+             6 │ type<'a> crate::Unconstrained {
+               │          ──────────┬─────────  
+               │                    ╰─────────── unconstrained lifetime `'a` in `type`: `'a` must be used in `crate::Unconstrained` (if `'a` is only used by methods, declare it on each method instead, e.g. `fn f<'a>(...)`)
+            ───╯
+            Error: undeclared lifetime `'a`: `trait` declarations don't take lifetime parameters (only `'static` can be used here)
+                ╭─[ test.zng:11:7 ]
+                │
+             11 │ trait crate::MyTrait<'a> {
+                │       ─────────┬────────  
+                │                ╰────────── undeclared lifetime `'a`: `trait` declarations don't take lifetime parameters (only `'static` can be used here)
+            ────╯
+            Error: anonymous lifetime `'_` cannot be used in a `trait` header: `trait` declarations don't take lifetime parameters (only `'static` can be used here)
+                ╭─[ test.zng:15:7 ]
+                │
+             15 │ trait crate::AnonTrait<'_> {
+                │       ──────────┬─────────  
+                │                 ╰─────────── anonymous lifetime `'_` cannot be used in a `trait` header: `trait` declarations don't take lifetime parameters (only `'static` can be used here)
+            ────╯
+            Error: undeclared lifetime `'a`: `trait` declarations don't take lifetime parameters (only `'static` can be used here)
+                ╭─[ test.zng:19:7 ]
+                │
+             19 │ trait ::std::iter::Iterator<Item = &'a str> {
+                │       ──────────────────┬──────────────────  
+                │                         ╰──────────────────── undeclared lifetime `'a`: `trait` declarations don't take lifetime parameters (only `'static` can be used here)
+            ────╯
+            Error: anonymous lifetime `'_` cannot be used in a `trait` header: `trait` declarations don't take lifetime parameters (only `'static` can be used here)
+                ╭─[ test.zng:23:7 ]
+                │
+             23 │ trait ::std::iter::Iterator<Item = &'_ str> {
+                │       ──────────────────┬──────────────────  
+                │                         ╰──────────────────── anonymous lifetime `'_` cannot be used in a `trait` header: `trait` declarations don't take lifetime parameters (only `'static` can be used here)
+            ────╯
+            Error: elided reference lifetime cannot be used in a `trait` header: `trait` declarations don't take lifetime parameters (use `&'static ...` if `'static` is intended)
+                ╭─[ test.zng:27:7 ]
+                │
+             27 │ trait ::std::iter::Iterator<Item = &str> {
+                │       ─────────────────┬────────────────  
+                │                        ╰────────────────── elided reference lifetime cannot be used in a `trait` header: `trait` declarations don't take lifetime parameters (use `&'static ...` if `'static` is intended)
+            ────╯
+            Error: undeclared lifetime `'b`: declare it on the function, `impl` or `type` (e.g. `fn f<'b>(...)`)
+                ╭─[ test.zng:32:5 ]
+                │
+             32 │     fn choose(&self, &'b str) -> &'b str;
+                │     ──────────────────┬─────────────────  
+                │                       ╰─────────────────── undeclared lifetime `'b`: declare it on the function, `impl` or `type` (e.g. `fn f<'b>(...)`)
+            ────╯
+            Error: undeclared lifetime `'c`: declare it on the function, `impl` or `type` (e.g. `fn f<'c>(...)`)
+                ╭─[ test.zng:37:14 ]
+                │
+             37 │         safe fn bar(&self, &'c str);
+                │              ───────────┬──────────  
+                │                         ╰──────────── undeclared lifetime `'c`: declare it on the function, `impl` or `type` (e.g. `fn f<'c>(...)`)
+            ────╯
+        "#]],
+    );
+}
+
+#[test]
+fn duplicate_and_shadowed_lifetimes_are_rejected() {
+    check_fail(
+        r#"
+fn dup<'a, 'a>(&'a str);
+
+type<'a> crate::Parser<'a> {
+    #layout(size = 24, align = 8);
+    fn rest<'a>(&'a self) -> &'a str;
+}
+
+extern "C++" {
+    impl<'a> crate::Parser<'a> {
+        safe fn first<'a>(&'a self) -> &'a str;
+    }
+}
+
+type Box<dyn for<'a, 'a> Fn(&'a i32)> {
+    #layout(size = 16, align = 8);
+}
+
+fn shadow_bind<'a>(Box<dyn for<'a> Fn(&'a i32)>);
+"#,
+        expect![[r#"
+            Error: lifetime `'a` is declared twice
+               ╭─[ test.zng:2:1 ]
+               │
+             2 │ fn dup<'a, 'a>(&'a str);
+               │ ───────────┬───────────  
+               │            ╰───────────── lifetime `'a` is declared twice
+            ───╯
+            Error: lifetime `'a` is already declared by the `impl` or `type`
+               ╭─[ test.zng:6:5 ]
+               │
+             6 │     fn rest<'a>(&'a self) -> &'a str;
+               │     ────────────────┬────────────────  
+               │                     ╰────────────────── lifetime `'a` is already declared by the `impl` or `type`
+            ───╯
+            Error: lifetime `'a` is already declared by the `impl` or `type`
+                ╭─[ test.zng:11:14 ]
+                │
+             11 │         safe fn first<'a>(&'a self) -> &'a str;
+                │              ────────────────┬────────────────  
+                │                              ╰────────────────── lifetime `'a` is already declared by the `impl` or `type`
+            ────╯
+            Error: lifetime `'a` is declared twice
+                ╭─[ test.zng:15:6 ]
+                │
+             15 │ type Box<dyn for<'a, 'a> Fn(&'a i32)> {
+                │      ────────────────┬───────────────  
+                │                      ╰───────────────── lifetime `'a` is declared twice
+            ────╯
+            Error: lifetime `'a` in `for<...>` is already declared in an outer scope
+                ╭─[ test.zng:19:1 ]
+                │
+             19 │ fn shadow_bind<'a>(Box<dyn for<'a> Fn(&'a i32)>);
+                │ ────────────────────────┬───────────────────────  
+                │                         ╰───────────────────────── lifetime `'a` in `for<...>` is already declared in an outer scope
+            ────╯
+        "#]],
+    );
+}
+
+#[test]
+fn builtin_lifetimes_in_declarations_are_rejected() {
+    check_fail(
+        r#"
+fn f<'static>(&'static str);
+fn g<'_>(&'_ str);
+
+type<'static> crate::Foo {
+    #layout(size = 8, align = 8);
+    fn bar(&self);
+}
+
+type Box<dyn for<'static> Fn(&'static str)> {
+    #layout(size = 16, align = 8);
+}
+
+type Box<dyn for<'_> Fn(&'_ str)> {
+    #layout(size = 16, align = 8);
+}
+"#,
+        expect![[r#"
+            Error: `'static` can't be declared
+               ╭─[ test.zng:2:1 ]
+               │
+             2 │ fn f<'static>(&'static str);
+               │ ─────────────┬─────────────  
+               │              ╰─────────────── `'static` can't be declared
+            ───╯
+            Error: `'_` can't be declared
+               ╭─[ test.zng:3:1 ]
+               │
+             3 │ fn g<'_>(&'_ str);
+               │ ────────┬────────  
+               │         ╰────────── `'_` can't be declared
+            ───╯
+            Error: `'static` can't be declared
+               ╭─[ test.zng:5:15 ]
+               │
+             5 │ type<'static> crate::Foo {
+               │               ─────┬────  
+               │                    ╰────── `'static` can't be declared
+            ───╯
+            Error: `'static` can't be declared
+                ╭─[ test.zng:10:6 ]
+                │
+             10 │ type Box<dyn for<'static> Fn(&'static str)> {
+                │      ───────────────────┬──────────────────  
+                │                         ╰──────────────────── `'static` can't be declared
+            ────╯
+            Error: `'_` can't be declared
+                ╭─[ test.zng:14:6 ]
+                │
+             14 │ type Box<dyn for<'_> Fn(&'_ str)> {
+                │      ──────────────┬─────────────  
+                │                    ╰─────────────── `'_` can't be declared
+            ────╯
+        "#]],
+    );
+}
+
+#[test]
+fn fn_trait_syntax_and_outer_lifetime_errors() {
+    // Bare `for Fn(...)` without `<...>` is rejected as a syntax error.
+    let r = catch_unwind(|| {
+        let _ = parse_str(
+            "type Box<dyn for Fn(i32)> { #layout(size = 16, align = 8); }\n",
+            NullCfg,
+            |_| {},
+        );
+    });
+    assert!(r.is_err(), "expected bare `dyn for Fn(i32)` to fail");
+
+    check_fail(
+        r#"
+fn f<'a>(Box<dyn Fn(&'a str)>);
+
+type Box<dyn Fn(&'z str)> {
+    #layout(size = 16, align = 8);
+}
+"#,
+        expect![[r#"
+            Error: outer lifetime `'a` can't be used inside `Fn(...)`: use `for<'a> Fn(...)` for a higher-ranked function trait
+               ╭─[ test.zng:2:1 ]
+               │
+             2 │ fn f<'a>(Box<dyn Fn(&'a str)>);
+               │ ───────────────┬──────────────  
+               │                ╰──────────────── outer lifetime `'a` can't be used inside `Fn(...)`: use `for<'a> Fn(...)` for a higher-ranked function trait
+            ───╯
+            Error: undeclared lifetime `'z`: declare it with `for<'z> Fn(...)`
+               ╭─[ test.zng:4:6 ]
+               │
+             4 │ type Box<dyn Fn(&'z str)> {
+               │      ──────────┬─────────  
+               │                ╰─────────── undeclared lifetime `'z`: declare it with `for<'z> Fn(...)`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_type_lifetimes_and_parameter_ordering_are_rejected() {
+    for src in [
+        "type<'a> c++::Foo {}\n",
+        "mod c++::ns { type<'a> Foo {} }\n",
+        "fn f(c++::Foo<'static>);\n",
+        "mod c++::ns { extern \"C++\" { safe fn f(Foo<'static>); } }\n",
+        "type ::std::slice::Iter<i32, 'static> { #layout(size = 16, align = 8); }\n",
+        "fn f<i32, 'a>(&'a str);\n",
+        "#unstable(template_types)\ntype<T, 'a> crate::Foo<'a, T> { #layout(size = 8, align = 8); }\n",
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains("`c++::` types don't")
+                || err.contains("lifetime arguments must come before type arguments")
+                || err.contains("lifetime parameters must come before"),
+            "unexpected error for `{src}`:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn lifetime_types_merge_up_to_alpha_equivalence_and_reject_collisions() {
+    use zngur_def::{Lifetime, PrimitiveRustType};
+
+    let resolver = MockFilesystem::new(vec![(
+        "./a.zng",
+        r#"
+type<'a> crate::Parser<'a> {
+    #layout(size = 24, align = 8);
+    fn rest<'b>(&'b self) -> &'a str;
+}
+"#,
+    )]);
+    let parsed = parse_str_with_resolver(
+        r#"
+merge "./a.zng";
+type<'b> crate::Parser<'b> {
+    fn new(&'b str) -> crate::Parser<'b>;
+}
+"#,
+        NullCfg,
+        &resolver,
+        |e| panic!("unexpected warning: {e}"),
+    );
+    assert_eq!(parsed.spec.types.len(), 1);
+    let parser_ty = &parsed.spec.types[0];
+    assert_eq!(parser_ty.lifetimes, vec![Lifetime("b".to_owned())]);
+    assert_eq!(parser_ty.methods.len(), 2);
+    let rest = &parser_ty.methods[1].data;
+    assert_eq!(rest.name, "rest");
+    // `rest`'s own `'b` from `./a.zng` was renamed to avoid capturing `test.zng`'s outer `'b`.
+    assert_eq!(rest.lifetimes, vec![Lifetime("b_0".to_owned())]);
+    assert_eq!(rest.receiver_lifetime, Some(Lifetime("b_0".to_owned())));
+    assert_eq!(
+        rest.output,
+        RustType::Ref(
+            Mutability::Not,
+            Some(Lifetime("b".to_owned())),
+            Box::new(RustType::Primitive(PrimitiveRustType::Str)),
+        )
+    );
+
+    // Distinct lifetime instantiations mapping to the same C++ wrapper are rejected as conflicts.
+    for src in [
+        r#"
+type ::std::slice::Iter<'static, i32> {
+    #layout(size = 16, align = 8);
+}
+type<'a> ::std::slice::Iter<'a, i32> {
+    #layout(size = 16, align = 8);
+}
+"#,
+        r#"
+type Box<dyn Fn(&str) -> &str> {
+    #layout(size = 16, align = 8);
+}
+type Box<dyn for<'a> Fn(&'a str) -> &'a str> {
+    #layout(size = 16, align = 8);
+}
+"#,
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains("map to the same C++ type"),
+            "unexpected error:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn template_types_with_lifetimes_match_concrete_instantiations() {
+    use zngur_def::{Lifetime, PrimitiveRustType};
+
+    let parsed = parse_str(
+        r#"
+#unstable(template_types)
+
+type<'a, T> ::std::slice::Iter<'a, T> {
+    #layout(size = 16, align = 8);
+    fn next<'b>(&'b mut self) -> ::std::option::Option<&'a T>;
+}
+
+type<'b> ::std::slice::Iter<'b, i32> {
+}
+
+type ::std::slice::Iter<'static, u8> {
+}
+"#,
+        NullCfg,
+        |e| panic!("unexpected warning: {e}"),
+    );
+    assert_eq!(parsed.spec.types.len(), 2);
+
+    let iter_i32 = &parsed.spec.types[0];
+    assert_eq!(iter_i32.lifetimes, vec![Lifetime("b".to_owned())]);
+    let next_i32 = &iter_i32.methods[0].data;
+    assert_eq!(next_i32.lifetimes, vec![Lifetime("b_0".to_owned())]);
+    assert_eq!(next_i32.receiver_lifetime, Some(Lifetime("b_0".to_owned())));
+    assert_eq!(
+        next_i32.output,
+        RustType::Adt(RustPathAndGenerics {
+            path: vec!["std".to_owned(), "option".to_owned(), "Option".to_owned()],
+            generics: vec![RustType::Ref(
+                Mutability::Not,
+                Some(Lifetime("b".to_owned())),
+                Box::new(RustType::Primitive(PrimitiveRustType::Int(32))),
+            )],
+            ..Default::default()
+        })
+    );
+
+    let iter_u8 = &parsed.spec.types[1];
+    assert!(iter_u8.lifetimes.is_empty());
+    let next_u8 = &iter_u8.methods[0].data;
+    assert_eq!(next_u8.lifetimes, vec![Lifetime("b".to_owned())]);
+    assert_eq!(next_u8.receiver_lifetime, Some(Lifetime("b".to_owned())));
+    assert_eq!(
+        next_u8.output,
+        RustType::Adt(RustPathAndGenerics {
+            path: vec!["std".to_owned(), "option".to_owned(), "Option".to_owned()],
+            generics: vec![RustType::Ref(
+                Mutability::Not,
+                Some(Lifetime("static".to_owned())),
+                Box::new(RustType::Primitive(PrimitiveRustType::Uint(8))),
+            )],
+            ..Default::default()
+        })
+    );
+
+    // Substituting a `TypeVar` containing `for<'b>` into a template with method lifetime `'b`
+    // renames the method lifetime so the inner `for<'b>` does not shadow it.
+    let parsed_capture = parse_str(
+        r#"
+#unstable(template_types)
+
+type<'a, T> crate::Holder<'a, T> {
+    #layout(size = 24, align = 8);
+    fn invoke<'b, 'b_0>(&'b self, &'b_0 str, T) -> &'a str;
+}
+
+type<'b> crate::Holder<'b, Box<dyn for<'c> Fn(&'c str)>> {
+}
+
+type<T> crate::Runner<T> {
+    #layout(size = 16, align = 8);
+    fn call<'b>(&'b self, T);
+}
+
+type crate::Runner<Box<dyn for<'b> Fn(&'b str)>> {
+}
+"#,
+        NullCfg,
+        |e| panic!("unexpected warning: {e}"),
+    );
+    let holder = &parsed_capture.spec.types[0];
+    assert_eq!(
+        holder.methods[0].data.lifetimes,
+        vec![Lifetime("b_1".to_owned()), Lifetime("b_0".to_owned())]
+    );
+    let runner = &parsed_capture.spec.types[1];
+    assert_eq!(
+        runner.methods[0].data.lifetimes,
+        vec![Lifetime("b_0".to_owned())]
+    );
+}
+
+#[test]
+fn unconstrained_extern_cpp_impl_lifetimes_are_rejected() {
+    check_fail(
+        r#"
+extern "C++" {
+    impl<'a> crate::Foo {
+        safe fn bar(&self, &'a str);
+    }
+
+    impl<'a, 'b> crate::Parser<'a> {
+        safe fn skip(&'a self, &'b str);
+    }
+
+    impl<'a> ::std::iter::Iterator<Item = &'a str> for crate::Foo {
+        safe fn next(&mut self) -> ::std::option::Option<&'a str>;
+    }
+}
+"#,
+        expect![[r#"
+            Error: unconstrained lifetime `'a` in `impl`: `'a` must be used in the implemented trait or self type (if `'a` is only used by methods, declare it on each method instead, e.g. `fn f<'a>(...)`)
+               ╭─[ test.zng:3:14 ]
+               │
+             3 │     impl<'a> crate::Foo {
+               │              ─────┬────  
+               │                   ╰────── unconstrained lifetime `'a` in `impl`: `'a` must be used in the implemented trait or self type (if `'a` is only used by methods, declare it on each method instead, e.g. `fn f<'a>(...)`)
+            ───╯
+            Error: unconstrained lifetime `'b` in `impl`: `'b` must be used in the implemented trait or self type (if `'b` is only used by methods, declare it on each method instead, e.g. `fn f<'b>(...)`)
+               ╭─[ test.zng:7:18 ]
+               │
+             7 │     impl<'a, 'b> crate::Parser<'a> {
+               │                  ────────┬────────  
+               │                          ╰────────── unconstrained lifetime `'b` in `impl`: `'b` must be used in the implemented trait or self type (if `'b` is only used by methods, declare it on each method instead, e.g. `fn f<'b>(...)`)
+            ───╯
+            Error: unconstrained lifetime `'a` in `impl`: `'a` must be used in the implemented trait or self type (if `'a` is only used by methods, declare it on each method instead, e.g. `fn f<'a>(...)`)
+                ╭─[ test.zng:11:56 ]
+                │
+             11 │     impl<'a> ::std::iter::Iterator<Item = &'a str> for crate::Foo {
+                │                                                        ─────┬────  
+                │                                                             ╰────── unconstrained lifetime `'a` in `impl`: `'a` must be used in the implemented trait or self type (if `'a` is only used by methods, declare it on each method instead, e.g. `fn f<'a>(...)`)
+            ────╯
+        "#]],
+    );
+}
+
+#[test]
+fn lifetime_items_merge_alpha_equivalently_and_reject_conflicts() {
+    use zngur_def::Lifetime;
+
+    let resolver = MockFilesystem::new(vec![(
+        "./other.zng",
+        r#"
+type<'a> crate::Parser<'a> {
+    #layout(size = 40, align = 8);
+    constructor(&'a str, Box<dyn for<'c> Fn(&'c str)>);
+    field callback (offset = 8, type = Box<dyn for<'b> Fn(&'b str) -> &'b str>);
+    fn pair<'b, 'b_0>(&'b self, &'b_0 str) -> &'a str;
+}
+
+trait crate::Picker {
+    fn pick<'a>(&self, &'a str, &'a str) -> &'a str;
+}
+
+mod crate {
+    fn longest<'a>(&'a str, &'a str) -> &'a str;
+    fn generic<i32>(i32) -> i32;
+}
+
+extern "C++" {
+    safe fn shortest<'a>(&'a str, &'a str) -> &'a str;
+    impl<'a> crate::Parser<'a> {
+        safe fn first(&'a self) -> &'a str;
+        safe fn slice<'b>(&'b self) -> &'a str;
+    }
+}
+"#,
+    )]);
+
+    let parsed = parse_str_with_resolver(
+        r#"
+merge "./other.zng";
+
+type<'b> crate::Parser<'b> {
+    constructor(&'b str, Box<dyn for<'d> Fn(&'d str)>);
+    field callback (offset = 8, type = Box<dyn for<'x> Fn(&'x str) -> &'x str>);
+}
+
+trait crate::Picker {
+    fn pick<'b>(&self, &'b str, &'b str) -> &'b str;
+}
+
+mod crate {
+    fn longest<'b>(&'b str, &'b str) -> &'b str;
+    fn generic<f64>(f64) -> f64;
+}
+
+extern "C++" {
+    safe fn shortest<'b>(&'b str, &'b str) -> &'b str;
+    impl<'b> crate::Parser<'b> {
+        safe fn first(&'b self) -> &'b str;
+    }
+}
+"#,
+        NullCfg,
+        &resolver,
+        |e| panic!("unexpected warning: {e}"),
+    );
+
+    assert_eq!(parsed.spec.types.len(), 1);
+    let parser_ty = &parsed.spec.types[0];
+    assert_eq!(
+        parser_ty.methods[0].data.lifetimes,
+        vec![Lifetime("b_1".to_owned()), Lifetime("b_0".to_owned())]
+    );
+    assert_eq!(parsed.spec.traits.len(), 1);
+    assert_eq!(parsed.spec.traits[0].methods.len(), 1);
+    // `longest<'a>` and `longest<'b>` deduplicate, while `generic<i32>` and `generic<f64>` stay separate.
+    assert_eq!(parsed.spec.funcs.len(), 3);
+    assert_eq!(parsed.spec.extern_cpp_funcs.len(), 1);
+    assert_eq!(parsed.spec.extern_cpp_impls.len(), 1);
+    assert_eq!(parsed.spec.extern_cpp_impls[0].methods.len(), 2);
+    assert_eq!(
+        parsed.spec.extern_cpp_impls[0].methods[1].lifetimes,
+        vec![Lifetime("b_0".to_owned())]
+    );
+
+    // Conflicting lifetime signatures across declarations are rejected instead of silently
+    // keeping both or panicking.
+    for (src, needle) in [
+        (
+            r#"
+mod crate {
+    fn longest<'a>(&'a str, &'a str) -> &'a str;
+    fn longest<'a, 'b>(&'a str, &'b str) -> &'a str;
+}
+"#,
+            "Function `crate::longest` mismatch",
+        ),
+        (
+            r#"
+extern "C++" {
+    safe fn shortest<'a>(&'a str, &'a str) -> &'a str;
+    safe fn shortest<'a, 'b>(&'a str, &'b str) -> &'a str;
+}
+"#,
+            "Extern C++ function `shortest` mismatch",
+        ),
+        (
+            r#"
+trait crate::Picker {
+    fn pick<'a>(&self, &'a str, &'a str) -> &'a str;
+}
+trait crate::Picker {
+    fn pick<'a, 'b>(&self, &'a str, &'b str) -> &'a str;
+}
+"#,
+            "Method mismatch",
+        ),
+        (
+            r#"
+trait crate::Handler<Box<dyn Fn(&str)>> {
+    fn run(&self);
+}
+trait crate::Handler<Box<dyn for<'a> Fn(&'a str)>> {
+    fn run(&self);
+}
+"#,
+            "map to the same C++ trait",
+        ),
+        (
+            r#"
+extern "C++" {
+    impl<'a> crate::Parser<'a> {
+        safe fn first(&'a self) -> &'a str;
+    }
+    impl crate::Parser<'static> {
+        safe fn first(&'static self) -> &'static str;
+    }
+}
+"#,
+            "Conflicting lifetime declarations in `impl`",
+        ),
+        (
+            r#"
+extern "C++" {
+    impl<'a> crate::Parser<'a> {
+        safe fn first(&'a self) -> &'a str;
+    }
+    impl<'b> crate::Parser<'b> {
+        safe fn first(&'b self) -> &'static str;
+    }
+}
+"#,
+            "Method mismatch",
+        ),
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(needle),
+            "expected `{needle}` in error for:\n{src}\ngot:\n{err}"
+        );
+    }
 }
