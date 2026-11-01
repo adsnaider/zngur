@@ -59,7 +59,7 @@ since you don't need to know about the internal implementations
 and you can just decide by seeing function signatures.
 
 You should also handle lifetimes in functions exposed to Rust,
-and use correct and explicit lifetime annotations in the `main.zng`
+and use correct and explicit [lifetime annotations](./lifetimes.md) in the `main.zng`
 if the elided version does not reflect your requirements.
 
 ## Mutability XOR aliasing

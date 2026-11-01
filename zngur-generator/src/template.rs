@@ -261,11 +261,23 @@ impl<'a> CppHeaderTemplate<'a> {
         s
     }
 
+    fn lookup_trait_def(&self, k: &RustTrait) -> Option<&crate::cpp::CppTraitDefinition> {
+        self.trait_defs.get(k).or_else(|| {
+            let k_canon = k.canonicalize_lifetimes(&[]);
+            self.trait_defs
+                .iter()
+                .find_map(|(tk, v)| (tk.canonicalize_lifetimes(&[]) == k_canon).then_some(v))
+        })
+    }
+
     pub fn render_from_trait(&self, td: &crate::cpp::CppTypeDefinition) -> String {
         use crate::cpp::CppTraitDefinition;
 
         use itertools::Itertools;
-        let tr = td.from_trait.as_ref().and_then(|k| self.trait_defs.get(k));
+        let tr = td
+            .from_trait
+            .as_ref()
+            .and_then(|k| self.lookup_trait_def(k));
         let name = td
             .ty
             .to_string()
@@ -355,7 +367,7 @@ impl<'a> CppHeaderTemplate<'a> {
         let tr = td
             .from_trait_ref
             .as_ref()
-            .and_then(|k| self.trait_defs.get(k));
+            .and_then(|k| self.lookup_trait_def(k));
         let name = td
             .ty
             .to_string()

@@ -11,9 +11,9 @@ use indexmap::IndexMap;
 use itertools::{Either, Itertools};
 
 use zngur_def::{
-    AdditionalIncludes, ConflictSource, ConvertPanicToException, Import, LayoutPolicy, Merge,
-    MergeFailure, ModuleImport, Mutability, PrimitiveRustType, RustPathAndGenerics, RustTrait,
-    RustType, TriviallyRelocatable, TypeVar, ZngurConstructor, ZngurExternCppFn,
+    AdditionalIncludes, ConflictSource, ConvertPanicToException, Import, LayoutPolicy, Lifetime,
+    Merge, MergeFailure, ModuleImport, Mutability, PrimitiveRustType, RustPathAndGenerics,
+    RustTrait, RustType, TriviallyRelocatable, TypeVar, ZngurConstructor, ZngurExternCppFn,
     ZngurExternCppImpl, ZngurField, ZngurFn, ZngurMethod, ZngurMethodDetails, ZngurMethodReceiver,
     ZngurSpec, ZngurTrait, ZngurType, ZngurVariant, ZngurWellknownTrait, cpp_handle_field_name,
     cpp_handle_keyword,
@@ -472,9 +472,11 @@ impl<'a> Scope<'a> {
                     segments,
                     span: _,
                 },
+            lifetimes,
             generics,
             named_generics,
         } = ty
+            && lifetimes.is_empty()
             && generics.is_empty()
             && named_generics.is_empty()
             && let &[single_elem] = segments.as_slice()
@@ -551,11 +553,13 @@ enum ParsedItem<'a> {
     Type {
         ty: Spanned<ParsedRustType<'a>>,
         items: Vec<Spanned<ParsedTypeItem<'a>>>,
+        /// The lifetime parameters in `type<'a, ...>`.
+        lifetimes: Vec<&'a str>,
         type_vars: Option<HashSet<ParsedTypeVar<'a>>>,
     },
     Trait {
         tr: Spanned<ParsedRustTrait<'a>>,
-        methods: Vec<ParsedMethod<'a>>,
+        methods: Vec<Spanned<ParsedMethod<'a>>>,
     },
     Fn {
         is_safe: Option<bool>,
@@ -584,11 +588,13 @@ enum ProcessedItem<'a> {
     Type {
         ty: Spanned<ParsedRustType<'a>>,
         items: Vec<Spanned<ParsedTypeItem<'a>>>,
+        /// The lifetime parameters in `type<'a, ...>`.
+        lifetimes: Vec<&'a str>,
         type_vars: Option<HashSet<ParsedTypeVar<'a>>>,
     },
     Trait {
         tr: Spanned<ParsedRustTrait<'a>>,
-        methods: Vec<ParsedMethod<'a>>,
+        methods: Vec<Spanned<ParsedMethod<'a>>>,
     },
     Fn {
         is_safe: Option<bool>,
@@ -609,9 +615,11 @@ enum ParsedExternCppItem<'a> {
         method: Spanned<ParsedMethod<'a>>,
     },
     Impl {
+        /// The lifetime parameters in `impl<'a>`.
+        lifetimes: Vec<&'a str>,
         tr: Option<ParsedRustTrait<'a>>,
         ty: Spanned<ParsedRustType<'a>>,
-        methods: Vec<(bool, ParsedMethod<'a>)>,
+        methods: Vec<(bool, Spanned<ParsedMethod<'a>>)>,
     },
 }
 
@@ -669,8 +677,12 @@ struct ParsedTypeVar<'a>(&'a str);
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedMethod<'a> {
     name: &'a str,
+    /// The lifetimes it declares (`fn f<'a>(...)`), without the `'`.
+    lifetimes: Vec<&'a str>,
     is_safe: Option<bool>,
     receiver: ZngurMethodReceiver,
+    /// The lifetime of a `&'a self` / `&'a mut self` receiver.
+    receiver_lifetime: Option<&'a str>,
     generics: Vec<ParsedRustType<'a>>,
     inputs: Vec<ParsedRustType<'a>>,
     output: ParsedRustType<'a>,
@@ -686,12 +698,14 @@ impl ParsedMethod<'_> {
     fn to_zngur(self, scope: &Scope<'_>, ctx: &mut ParseContext) -> ZngurMethod {
         ZngurMethod {
             name: self.name.to_owned(),
+            lifetimes: lifetimes(&self.lifetimes),
             generics: self
                 .generics
                 .into_iter()
                 .map(|x| x.to_zngur(scope, ctx))
                 .collect(),
             receiver: self.receiver,
+            receiver_lifetime: self.receiver_lifetime.map(lifetime),
             inputs: self
                 .inputs
                 .into_iter()
@@ -701,6 +715,249 @@ impl ParsedMethod<'_> {
             is_safe: self.is_safe,
         }
     }
+}
+
+fn lifetime(name: &str) -> Lifetime {
+    Lifetime(name.to_owned())
+}
+
+fn lifetimes(names: &[&str]) -> Vec<Lifetime> {
+    names.iter().map(|n| lifetime(n)).collect()
+}
+
+fn validate_declared_lifetimes(ctx: &mut ParseContext, span: Span, declared: &[Lifetime]) -> bool {
+    for (i, l) in declared.iter().enumerate() {
+        if l.is_builtin() {
+            ctx.add_error_str(&format!("`{l}` can't be declared"), span);
+            return false;
+        }
+        if declared[..i].contains(l) {
+            ctx.add_error_str(&format!("lifetime `{l}` is declared twice"), span);
+            return false;
+        }
+    }
+    true
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LifetimeContext {
+    Item,
+    TraitHeader,
+}
+
+fn check_used_lifetime(
+    ctx: &mut ParseContext,
+    span: Span,
+    all_outer: &[Lifetime],
+    allowed: &[Lifetime],
+    fn_trait_name: Option<&str>,
+    context: LifetimeContext,
+    l: &Lifetime,
+) -> bool {
+    if context == LifetimeContext::TraitHeader && fn_trait_name.is_none() && l.0 == "_" {
+        ctx.add_error_str(
+            "anonymous lifetime `'_` cannot be used in a `trait` header: \
+             `trait` declarations don't take lifetime parameters (only `'static` can be used here)",
+            span,
+        );
+        return false;
+    }
+    if l.is_builtin() || allowed.contains(l) {
+        return true;
+    }
+    if let Some(name) = fn_trait_name {
+        if all_outer.contains(l) {
+            ctx.add_error_str(
+                &format!(
+                    "outer lifetime `{l}` can't be used inside `{name}(...)`: \
+                     use `for<{l}> {name}(...)` for a higher-ranked function trait"
+                ),
+                span,
+            );
+        } else {
+            ctx.add_error_str(
+                &format!("undeclared lifetime `{l}`: declare it with `for<{l}> {name}(...)`"),
+                span,
+            );
+        }
+    } else if context == LifetimeContext::TraitHeader {
+        ctx.add_error_str(
+            &format!(
+                "undeclared lifetime `{l}`: `trait` declarations don't take lifetime parameters \
+                 (only `'static` can be used here)"
+            ),
+            span,
+        );
+    } else {
+        ctx.add_error_str(
+            &format!(
+                "undeclared lifetime `{l}`: declare it on the function, `impl` or `type` \
+                 (e.g. `fn f<{l}>(...)`)"
+            ),
+            span,
+        );
+    }
+    false
+}
+
+fn check_ty_lifetimes(
+    ctx: &mut ParseContext,
+    span: Span,
+    all_outer: &[Lifetime],
+    allowed: &[Lifetime],
+    fn_trait_name: Option<&str>,
+    context: LifetimeContext,
+    ty: &RustType,
+) -> bool {
+    match ty {
+        RustType::Primitive(_) | RustType::TypeVar(_) | RustType::Cpp(_) => true,
+        RustType::Ref(_, lt, inner) => {
+            match lt {
+                Some(l) => {
+                    if !check_used_lifetime(
+                        ctx,
+                        span,
+                        all_outer,
+                        allowed,
+                        fn_trait_name,
+                        context,
+                        l,
+                    ) {
+                        return false;
+                    }
+                }
+                None if context == LifetimeContext::TraitHeader && fn_trait_name.is_none() => {
+                    ctx.add_error_str(
+                        "elided reference lifetime cannot be used in a `trait` header: \
+                         `trait` declarations don't take lifetime parameters \
+                         (use `&'static ...` if `'static` is intended)",
+                        span,
+                    );
+                    return false;
+                }
+                None => {}
+            }
+            check_ty_lifetimes(ctx, span, all_outer, allowed, fn_trait_name, context, inner)
+        }
+        RustType::Raw(_, inner) | RustType::Boxed(inner) | RustType::Slice(inner) => {
+            check_ty_lifetimes(ctx, span, all_outer, allowed, fn_trait_name, context, inner)
+        }
+        RustType::Tuple(tys) => tys
+            .iter()
+            .all(|t| check_ty_lifetimes(ctx, span, all_outer, allowed, fn_trait_name, context, t)),
+        RustType::Adt(pg)
+        | RustType::Dyn(RustTrait::Normal(pg), _)
+        | RustType::Impl(RustTrait::Normal(pg), _) => {
+            pg.lifetimes.iter().all(|l| {
+                check_used_lifetime(ctx, span, all_outer, allowed, fn_trait_name, context, l)
+            }) && pg
+                .generics
+                .iter()
+                .chain(pg.named_generics.iter().map(|(_, t)| t))
+                .all(|t| {
+                    check_ty_lifetimes(ctx, span, all_outer, allowed, fn_trait_name, context, t)
+                })
+        }
+        RustType::Dyn(
+            RustTrait::Fn {
+                name,
+                lifetimes: fn_lts,
+                inputs,
+                output,
+            },
+            _,
+        )
+        | RustType::Impl(
+            RustTrait::Fn {
+                name,
+                lifetimes: fn_lts,
+                inputs,
+                output,
+            },
+            _,
+        ) => {
+            if !validate_declared_lifetimes(ctx, span, fn_lts) {
+                return false;
+            }
+            if let Some(l) = fn_lts.iter().find(|l| all_outer.contains(l)) {
+                ctx.add_error_str(
+                    &format!("lifetime `{l}` in `for<...>` is already declared in an outer scope"),
+                    span,
+                );
+                return false;
+            }
+            let mut inner_outer = all_outer.to_vec();
+            inner_outer.extend(fn_lts.iter().cloned());
+            inputs.iter().chain([&**output]).all(|t| {
+                check_ty_lifetimes(ctx, span, &inner_outer, fn_lts, Some(name), context, t)
+            })
+        }
+    }
+}
+
+fn check_used_lifetimes<'t>(
+    ctx: &mut ParseContext,
+    span: Span,
+    declared: &[Lifetime],
+    types: impl IntoIterator<Item = &'t RustType>,
+    extra: impl IntoIterator<Item = &'t Lifetime>,
+    context: LifetimeContext,
+) -> bool {
+    types
+        .into_iter()
+        .all(|t| check_ty_lifetimes(ctx, span, declared, declared, None, context, t))
+        && extra
+            .into_iter()
+            .all(|l| check_used_lifetime(ctx, span, declared, declared, None, context, l))
+}
+
+/// Checks that `declared` is valid (no builtins or duplicates) and that all lifetimes used in
+/// `types` and `extra` are declared (or `'static` / `'_`).
+fn check_lifetimes<'t>(
+    ctx: &mut ParseContext,
+    span: Span,
+    declared: &[Lifetime],
+    types: impl IntoIterator<Item = &'t RustType>,
+    extra: impl IntoIterator<Item = &'t Lifetime>,
+    context: LifetimeContext,
+) -> bool {
+    validate_declared_lifetimes(ctx, span, declared)
+        && check_used_lifetimes(ctx, span, declared, types, extra, context)
+}
+
+/// Checks the lifetimes of `method`, which can use its own and `outer` (those of its `impl` or
+/// `type` block).
+fn check_method_lifetimes<'t>(
+    ctx: &mut ParseContext,
+    span: Span,
+    outer: &[Lifetime],
+    method: &'t ZngurMethod,
+    extra_types: impl IntoIterator<Item = &'t RustType>,
+) -> bool {
+    if let Some(l) = method.lifetimes.iter().find(|l| outer.contains(l)) {
+        ctx.add_error_str(
+            &format!("lifetime `{l}` is already declared by the `impl` or `type`"),
+            span,
+        );
+        return false;
+    }
+    if !validate_declared_lifetimes(ctx, span, &method.lifetimes) {
+        return false;
+    }
+    let declared: Vec<Lifetime> = outer.iter().chain(&method.lifetimes).cloned().collect();
+    check_used_lifetimes(
+        ctx,
+        span,
+        &declared,
+        method
+            .inputs
+            .iter()
+            .chain([&method.output])
+            .chain(&method.generics)
+            .chain(extra_types),
+        method.receiver_lifetime.as_ref(),
+        LifetimeContext::Item,
+    )
 }
 
 struct MergeContext {
@@ -827,7 +1084,7 @@ fn add_conflict_labels(
         .into_span_key_with_variant(merge_ctx.outer_ty.clone(), merge_ctx.variant.clone());
     let src_spans = ctx.fetch_spans_global(&src_span_key);
     let dst_spans = ctx.fetch_spans_global(&dst_span_key);
-    let (src_span, dst_span, first_span, rest) = if src_conflict == dst_conflict {
+    let (src_span, dst_span, first_span, rest) = if src_span_key == dst_span_key {
         let mut src = src_spans.into_iter();
         (
             src.next_back().cloned(),
@@ -956,6 +1213,7 @@ impl ProcessedItem<'_> {
             ProcessedItem::Type {
                 ty,
                 items,
+                lifetimes: type_lifetimes,
                 type_vars,
             } => {
                 if ty.inner == ParsedRustType::Tuple(vec![]) {
@@ -965,6 +1223,7 @@ impl ProcessedItem<'_> {
                         ty.span,
                     );
                 }
+                let type_lifetimes = lifetimes(&type_lifetimes);
 
                 let (is_template, scope) = match type_vars {
                     Some(type_vars) => (true, &scope.with_type_vars(type_vars)),
@@ -1012,6 +1271,36 @@ impl ProcessedItem<'_> {
                 };
                 let rust_ty = ty.inner.to_zngur(scope, ctx);
                 let mut has_removed_cpp_directive = false;
+                let mut ty_ok = if !type_lifetimes.is_empty() && matches!(rust_ty, RustType::Cpp(_))
+                {
+                    ctx.add_error_str("`c++::` types don't have lifetime parameters", ty.span);
+                    false
+                } else {
+                    check_lifetimes(
+                        ctx,
+                        ty.span,
+                        &type_lifetimes,
+                        [&rust_ty],
+                        [],
+                        LifetimeContext::Item,
+                    )
+                };
+                if ty_ok && !matches!(rust_ty, RustType::Cpp(_)) {
+                    let used = rust_ty.free_lifetimes();
+                    for lt in &type_lifetimes {
+                        if !used.contains(lt) {
+                            ctx.add_error_str(
+                                &format!(
+                                    "unconstrained lifetime `{lt}` in `type`: `{lt}` must be used \
+                                     in `{rust_ty}` (if `{lt}` is only used by methods, declare it \
+                                     on each method instead, e.g. `fn f<{lt}>(...)`)"
+                                ),
+                                ty.span,
+                            );
+                            ty_ok = false;
+                        }
+                    }
+                }
                 while let Some(item) = to_process.pop() {
                     let item_span = item.span;
                     let item = item.inner;
@@ -1063,7 +1352,7 @@ impl ProcessedItem<'_> {
                         ParsedTypeItem::Traits(tr) => {
                             for t in &tr {
                                 ctx.record_span(
-                                    &PartialSpanKey::WellknownTrait(rust_ty.clone(), t.inner),
+                                    &PartialSpanKey::wellknown_trait(rust_ty.clone(), t.inner),
                                     t.span.into_range(),
                                 );
                             }
@@ -1096,6 +1385,16 @@ impl ProcessedItem<'_> {
                                         .collect(),
                                 },
                             };
+                            if !check_used_lifetimes(
+                                ctx,
+                                item_span,
+                                &type_lifetimes,
+                                c.inputs.iter().map(|(_, t)| t),
+                                [],
+                                LifetimeContext::Item,
+                            ) {
+                                continue;
+                            }
                             ctx.record_span(
                                 &c.into_span_key_with(rust_ty.clone()),
                                 item_span.into_range(),
@@ -1128,6 +1427,16 @@ impl ProcessedItem<'_> {
                                             ty: ty.to_zngur(scope, ctx),
                                             offset,
                                         };
+                                        if !check_used_lifetimes(
+                                            ctx,
+                                            item.span,
+                                            &type_lifetimes,
+                                            [&field.ty],
+                                            [],
+                                            LifetimeContext::Item,
+                                        ) {
+                                            continue;
+                                        }
                                         ctx.record_span(
                                             &field.into_span_key_with_variant(
                                                 rust_ty.clone(),
@@ -1152,6 +1461,16 @@ impl ProcessedItem<'_> {
                                 ty: ty.to_zngur(scope, ctx),
                                 offset,
                             };
+                            if !check_used_lifetimes(
+                                ctx,
+                                item_span,
+                                &type_lifetimes,
+                                [&field.ty],
+                                [],
+                                LifetimeContext::Item,
+                            ) {
+                                continue;
+                            }
                             ctx.record_span(
                                 &field.into_span_key_with_variant(rust_ty.clone(), None),
                                 item_span.into_range(),
@@ -1199,6 +1518,15 @@ impl ProcessedItem<'_> {
                                 deref,
                                 cpp_name: cpp_name.map(|s| s.to_owned()),
                             };
+                            if !check_method_lifetimes(
+                                ctx,
+                                item_span,
+                                &type_lifetimes,
+                                &method.data,
+                                method.deref.as_ref().map(|d| &d.0),
+                            ) {
+                                continue;
+                            }
                             ctx.record_span(
                                 &method.data.into_span_key_with(rust_ty.clone()),
                                 item_span.into_range(),
@@ -1212,7 +1540,7 @@ impl ProcessedItem<'_> {
                                 TriviallyRelocatable::Checked
                             };
                             ctx.record_span(
-                                &PartialSpanKey::TriviallyRelocatable(rust_ty.clone(), kind),
+                                &PartialSpanKey::trivially_relocatable(rust_ty.clone(), kind),
                                 item_span.into_range(),
                             );
                             trivially_relocatable = trivially_relocatable.combine(kind);
@@ -1236,7 +1564,8 @@ impl ProcessedItem<'_> {
                             };
                             has_removed_cpp_directive = true;
                             if !is_template {
-                                r.types_with_removed_cpp_directive.insert(rust_ty.clone());
+                                r.types_with_removed_cpp_directive
+                                    .insert(rust_ty.with_erased_lifetimes());
                             }
                             let report_span = ctx.report_span_for_range(item_span.into_range());
                             let report = Report::build(ReportKind::Error, report_span.clone())
@@ -1296,6 +1625,7 @@ impl ProcessedItem<'_> {
                 }
                 let zngur_type = ZngurType {
                     ty: rust_ty.clone(),
+                    lifetimes: type_lifetimes,
                     layout,
                     methods,
                     wellknown_traits: wt,
@@ -1305,6 +1635,9 @@ impl ProcessedItem<'_> {
                     fields,
                     trivially_relocatable,
                 };
+                if !ty_ok {
+                    return;
+                }
                 if is_template {
                     r.templates.push(TemplateDef {
                         ty: zngur_type,
@@ -1327,12 +1660,30 @@ impl ProcessedItem<'_> {
                 }
             }
             ProcessedItem::Trait { tr, methods } => {
+                let tr_zngur = tr.inner.to_zngur(scope, ctx);
+                let mut ok = check_lifetimes(
+                    ctx,
+                    tr.span,
+                    &[],
+                    [&RustType::Dyn(tr_zngur.clone(), vec![])],
+                    [],
+                    LifetimeContext::TraitHeader,
+                );
+                let mut zngur_methods = Vec::with_capacity(methods.len());
+                for m in methods {
+                    let m_span = m.span;
+                    let m_zngur = m.inner.to_zngur(scope, ctx);
+                    if !check_method_lifetimes(ctx, m_span, &[], &m_zngur, []) {
+                        ok = false;
+                    }
+                    zngur_methods.push(m_zngur);
+                }
+                if !ok {
+                    return;
+                }
                 let trt = ZngurTrait {
-                    tr: tr.inner.to_zngur(scope, ctx),
-                    methods: methods
-                        .into_iter()
-                        .map(|m| m.to_zngur(scope, ctx))
-                        .collect(),
+                    tr: tr_zngur,
+                    methods: zngur_methods,
                 };
                 ctx.record_span(&trt, tr.span.into_range());
                 checked_merge(trt, &mut r.spec, tr.span, ctx, None);
@@ -1360,12 +1711,16 @@ impl ProcessedItem<'_> {
                         return;
                     }
                 };
+                if !check_method_lifetimes(ctx, f.span, &[], &method, []) {
+                    return;
+                }
                 let func = ZngurFn {
                     path: RustPathAndGenerics {
                         path,
                         generics: method.generics,
-                        named_generics: vec![],
+                        ..Default::default()
                     },
+                    lifetimes: method.lifetimes,
                     inputs: method.inputs,
                     output: method.output,
                     is_safe,
@@ -1379,9 +1734,13 @@ impl ProcessedItem<'_> {
                         ParsedExternCppItem::Function { is_safe, method } => {
                             let span = method.span;
                             let method = method.inner.to_zngur(scope, ctx);
+                            if !check_method_lifetimes(ctx, span, &[], &method, []) {
+                                continue;
+                            }
                             checked_merge(
                                 ZngurExternCppFn {
                                     name: method.name.to_string(),
+                                    lifetimes: method.lifetimes,
                                     inputs: method.inputs,
                                     output: method.output,
                                     is_safe,
@@ -1392,19 +1751,72 @@ impl ProcessedItem<'_> {
                                 None,
                             );
                         }
-                        ParsedExternCppItem::Impl { tr, ty, methods } => {
+                        ParsedExternCppItem::Impl {
+                            lifetimes: impl_lifetimes,
+                            tr,
+                            ty,
+                            methods,
+                        } => {
+                            let impl_lifetimes = lifetimes(&impl_lifetimes);
+                            let tr_zngur = tr.map(|x| x.to_zngur(scope, ctx));
+                            let ty_zngur = ty.inner.to_zngur(scope, ctx);
+                            let trait_ty = tr_zngur.clone().map(|tr| RustType::Dyn(tr, vec![]));
+                            let mut ok = check_lifetimes(
+                                ctx,
+                                ty.span,
+                                &impl_lifetimes,
+                                [&ty_zngur].into_iter().chain(trait_ty.as_ref()),
+                                [],
+                                LifetimeContext::Item,
+                            );
+                            if ok {
+                                let mut constrained: HashSet<Lifetime> =
+                                    ty_zngur.free_lifetimes().into_iter().collect();
+                                if let Some(tr) = &tr_zngur {
+                                    // Associated type bindings (`Trait<Assoc = T>`) are stripped
+                                    // from the `impl` header into `type Assoc = T;` items inside
+                                    // the block by `take_assocs()`, so Rust E0207 does not
+                                    // consider lifetimes appearing only in `named_generics` to
+                                    // constrain the `impl`'s lifetime parameters.
+                                    let (tr_without_assocs, _) = tr.clone().take_assocs();
+                                    constrained.extend(
+                                        RustType::Dyn(tr_without_assocs, vec![]).free_lifetimes(),
+                                    );
+                                }
+                                for lt in &impl_lifetimes {
+                                    if !constrained.contains(lt) {
+                                        ctx.add_error_str(
+                                            &format!(
+                                                "unconstrained lifetime `{lt}` in `impl`: `{lt}` \
+                                                 must be used in the implemented trait or self \
+                                                 type (if `{lt}` is only used by methods, declare \
+                                                 it on each method instead, e.g. `fn f<{lt}>(...)`)"
+                                            ),
+                                            ty.span,
+                                        );
+                                        ok = false;
+                                    }
+                                }
+                            }
+                            let mut zngur_methods = Vec::with_capacity(methods.len());
+                            for (is_safe, x) in methods {
+                                let m_span = x.span;
+                                let mut m = x.inner.to_zngur(scope, ctx);
+                                m.is_safe = Some(is_safe);
+                                if !check_method_lifetimes(ctx, m_span, &impl_lifetimes, &m, []) {
+                                    ok = false;
+                                }
+                                zngur_methods.push(m);
+                            }
+                            if !ok {
+                                continue;
+                            }
                             checked_merge(
                                 ZngurExternCppImpl {
-                                    tr: tr.map(|x| x.to_zngur(scope, ctx)),
-                                    ty: ty.inner.to_zngur(scope, ctx),
-                                    methods: methods
-                                        .into_iter()
-                                        .map(|(is_safe, x)| {
-                                            let mut m = x.to_zngur(scope, ctx);
-                                            m.is_safe = Some(is_safe);
-                                            m
-                                        })
-                                        .collect(),
+                                    lifetimes: impl_lifetimes,
+                                    tr: tr_zngur,
+                                    ty: ty_zngur,
+                                    methods: zngur_methods,
                                 },
                                 &mut r.spec,
                                 ty.span,
@@ -1472,7 +1884,8 @@ impl ProcessedItem<'_> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ParsedRustType<'a> {
     Primitive(PrimitiveRustType),
-    Ref(Mutability, Box<ParsedRustType<'a>>),
+    /// `&T`, `&'a T`, ... (the lifetime is without the `'`).
+    Ref(Mutability, Option<&'a str>, Box<ParsedRustType<'a>>),
     Raw(Mutability, Box<ParsedRustType<'a>>),
     Boxed(Box<ParsedRustType<'a>>),
     Slice(Box<ParsedRustType<'a>>),
@@ -1486,7 +1899,9 @@ impl ParsedRustType<'_> {
     fn to_zngur(self, scope: &Scope<'_>, ctx: &mut ParseContext) -> RustType {
         match self {
             ParsedRustType::Primitive(s) => RustType::Primitive(s),
-            ParsedRustType::Ref(m, s) => RustType::Ref(m, Box::new(s.to_zngur(scope, ctx))),
+            ParsedRustType::Ref(m, l, s) => {
+                RustType::Ref(m, l.map(lifetime), Box::new(s.to_zngur(scope, ctx)))
+            }
             ParsedRustType::Raw(m, s) => RustType::Raw(m, Box::new(s.to_zngur(scope, ctx))),
             ParsedRustType::Boxed(s) => RustType::Boxed(Box::new(s.to_zngur(scope, ctx))),
             ParsedRustType::Slice(s) => RustType::Slice(Box::new(s.to_zngur(scope, ctx))),
@@ -1505,13 +1920,19 @@ impl ParsedRustType<'_> {
                 Some(v) => RustType::TypeVar(v),
                 None => match scope.resolve_path(&s.path) {
                     EntityPath::Cpp(segs) => {
-                        if !s.generics.is_empty() || !s.named_generics.is_empty() {
-                            scope.report_invalid_cpp_path(
-                                ctx,
-                                &s.path,
-                                "`c++::` paths do not support generic arguments",
-                                "paths",
-                            );
+                        if !s.lifetimes.is_empty()
+                            || !s.generics.is_empty()
+                            || !s.named_generics.is_empty()
+                        {
+                            let msg = if !s.lifetimes.is_empty()
+                                && s.generics.is_empty()
+                                && s.named_generics.is_empty()
+                            {
+                                "`c++::` types don't take lifetime arguments"
+                            } else {
+                                "`c++::` paths do not support generic arguments"
+                            };
+                            scope.report_invalid_cpp_path(ctx, &s.path, msg, "paths");
                         }
                         let _ = s.resolve_generics(scope, ctx);
                         RustType::Cpp(segs)
@@ -1530,6 +1951,8 @@ enum ParsedRustTrait<'a> {
     Normal(ParsedRustPathAndGenerics<'a>),
     Fn {
         name: &'a str,
+        /// The lifetimes of a `for<'a>` binder.
+        lifetimes: Vec<&'a str>,
         inputs: Vec<ParsedRustType<'a>>,
         output: Box<ParsedRustType<'a>>,
     },
@@ -1555,10 +1978,12 @@ impl ParsedRustTrait<'_> {
             }
             ParsedRustTrait::Fn {
                 name,
+                lifetimes: fn_lifetimes,
                 inputs,
                 output,
             } => RustTrait::Fn {
                 name: name.to_owned(),
+                lifetimes: lifetimes(&fn_lifetimes),
                 inputs: inputs.into_iter().map(|s| s.to_zngur(scope, ctx)).collect(),
                 output: Box::new(output.to_zngur(scope, ctx)),
             },
@@ -1569,6 +1994,8 @@ impl ParsedRustTrait<'_> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedRustPathAndGenerics<'a> {
     path: ParsedPath<'a>,
+    /// Lifetime arguments, without the `'`.
+    lifetimes: Vec<&'a str>,
     generics: Vec<ParsedRustType<'a>>,
     named_generics: Vec<(&'a str, ParsedRustType<'a>)>,
 }
@@ -1598,9 +2025,11 @@ impl ParsedRustPathAndGenerics<'_> {
         scope: &Scope<'_>,
         ctx: &mut ParseContext,
     ) -> RustPathAndGenerics {
+        let lifetimes = lifetimes(&self.lifetimes);
         let (generics, named_generics) = self.resolve_generics(scope, ctx);
         RustPathAndGenerics {
             path,
+            lifetimes,
             generics,
             named_generics,
         }
@@ -1663,6 +2092,57 @@ impl PartialSpanKey {
     fn full_key_with(self, source_id: SourceId) -> SpanKey {
         SpanKey(source_id, self)
     }
+
+    fn layout(outer_ty: RustType) -> Self {
+        Self::Layout(outer_ty.with_erased_lifetimes())
+    }
+
+    fn constructor(outer_ty: RustType, sig: Option<Vec<(String, RustType)>>) -> Self {
+        Self::Constructor(
+            outer_ty.with_erased_lifetimes(),
+            sig.map(|v| {
+                v.into_iter()
+                    .map(|(n, t)| (n, t.with_erased_lifetimes()))
+                    .collect()
+            }),
+        )
+    }
+
+    fn trivially_relocatable(outer_ty: RustType, kind: TriviallyRelocatable) -> Self {
+        Self::TriviallyRelocatable(outer_ty.with_erased_lifetimes(), kind)
+    }
+
+    fn wellknown_trait(outer_ty: RustType, tr: ZngurWellknownTrait) -> Self {
+        Self::WellknownTrait(outer_ty.with_erased_lifetimes(), tr)
+    }
+
+    fn method(outer_ty: RustType, method: ZngurMethod) -> Self {
+        Self::Method(
+            outer_ty.with_erased_lifetimes(),
+            ZngurMethod {
+                name: method.name,
+                lifetimes: vec![],
+                generics: method
+                    .generics
+                    .into_iter()
+                    .map(|t| t.with_erased_lifetimes())
+                    .collect(),
+                receiver: method.receiver,
+                receiver_lifetime: None,
+                inputs: method
+                    .inputs
+                    .into_iter()
+                    .map(|t| t.with_erased_lifetimes())
+                    .collect(),
+                output: method.output.with_erased_lifetimes(),
+                is_safe: method.is_safe,
+            },
+        )
+    }
+
+    fn field(outer_ty: RustType, variant: Option<String>, name: String) -> Self {
+        Self::Field(outer_ty.with_erased_lifetimes(), variant, name)
+    }
 }
 
 /// a full key identifying a list of spans for a given type in a particular source
@@ -1694,7 +2174,7 @@ impl IntoSpanKey for zngur_def::Import {
 
 impl IntoSpanKey for zngur_def::ZngurType {
     fn into_span_key(&self) -> PartialSpanKey {
-        PartialSpanKey::Ty(self.ty.clone())
+        PartialSpanKey::Ty(self.ty.canonicalize_lifetimes(&self.lifetimes))
     }
 }
 impl IntoSpanKey for zngur_def::RustType {
@@ -1741,15 +2221,16 @@ impl VariantQualifiedSpanKeyExt for zngur_def::ConflictSource {
         variant: Option<String>,
     ) -> PartialSpanKey {
         match self {
-            zngur_def::ConflictSource::Layout => PartialSpanKey::Layout(outer_ty),
+            zngur_def::ConflictSource::Type(ty) => PartialSpanKey::Ty(ty.clone()),
+            zngur_def::ConflictSource::Layout => PartialSpanKey::layout(outer_ty),
             zngur_def::ConflictSource::Constructor(sig) => {
-                PartialSpanKey::Constructor(outer_ty, sig.clone())
+                PartialSpanKey::constructor(outer_ty, sig.clone())
             }
             zngur_def::ConflictSource::Method(method) => {
-                PartialSpanKey::Method(outer_ty, method.clone())
+                PartialSpanKey::method(outer_ty, method.clone())
             }
             zngur_def::ConflictSource::Field(name) => {
-                PartialSpanKey::Field(outer_ty, variant, name.clone())
+                PartialSpanKey::field(outer_ty, variant, name.clone())
             }
         }
     }
@@ -1761,25 +2242,25 @@ impl VariantQualifiedSpanKeyExt for zngur_def::ZngurField {
         outer_ty: RustType,
         variant: Option<String>,
     ) -> PartialSpanKey {
-        PartialSpanKey::Field(outer_ty, variant, self.name.clone())
+        PartialSpanKey::field(outer_ty, variant, self.name.clone())
     }
 }
 
 impl QualifiedSpanKeyExt for zngur_def::LayoutPolicy {
     fn into_span_key_with(&self, outer_ty: RustType) -> PartialSpanKey {
-        PartialSpanKey::Layout(outer_ty)
+        PartialSpanKey::layout(outer_ty)
     }
 }
 
 impl QualifiedSpanKeyExt for zngur_def::ZngurMethod {
     fn into_span_key_with(&self, outer_ty: RustType) -> PartialSpanKey {
-        PartialSpanKey::Method(outer_ty, self.clone())
+        PartialSpanKey::method(outer_ty, self.clone())
     }
 }
 
 impl QualifiedSpanKeyExt for zngur_def::ZngurConstructor {
     fn into_span_key_with(&self, outer_ty: RustType) -> PartialSpanKey {
-        PartialSpanKey::Constructor(outer_ty, Some(self.inputs.clone()))
+        PartialSpanKey::constructor(outer_ty, Some(self.inputs.clone()))
     }
 }
 
@@ -2713,10 +3194,12 @@ fn process_parsed_item<'a>(
         ParsedItem::Type {
             ty,
             items,
+            lifetimes,
             type_vars,
         } => Ret::Processed(ProcessedItem::Type {
             ty,
             items,
+            lifetimes,
             type_vars,
         }),
         ParsedItem::Trait { tr, methods } => Ret::Processed(ProcessedItem::Trait { tr, methods }),
@@ -2804,7 +3287,7 @@ impl ZngurSpecBuilder {
             let mut template_locations = Vec::new();
             let mut template_has_removed_directive = false;
             for template in &templates {
-                if let Some(template_match) = try_match_template(&ty.ty, &template.ty) {
+                if let Some(template_match) = try_match_template(ty, &template.ty) {
                     let location = (template.source_id, template.span.into_range());
                     if let Err(e) = template_match.merge(ty) {
                         match e {
@@ -2897,7 +3380,7 @@ impl ZngurSpecBuilder {
                 && matches!(ty.ty, RustType::Cpp(_))
             {
                 let report_span = ctx.resolve_item_span(
-                    &PartialSpanKey::WellknownTrait(ty.ty.clone(), ZngurWellknownTrait::Unsized),
+                    &PartialSpanKey::wellknown_trait(ty.ty.clone(), ZngurWellknownTrait::Unsized),
                     &template_locations,
                     ty,
                 );
@@ -2911,7 +3394,7 @@ impl ZngurSpecBuilder {
             if ty.layout.is_none()
                 && !matches!(ty.ty, RustType::Cpp(_))
                 && !template_has_removed_directive
-                && !types_with_removed_cpp_directive.contains(&ty.ty)
+                && !types_with_removed_cpp_directive.contains(&ty.ty.with_erased_lifetimes())
             {
                 let spans = ctx.fetch_spans_global(ty);
                 let (first, rest) = {
@@ -2976,7 +3459,7 @@ impl ZngurSpecBuilder {
                 };
                 if let Some(msg) = msg {
                     let report_span = ctx.resolve_item_span(
-                        &PartialSpanKey::Layout(ty.ty.clone()),
+                        &PartialSpanKey::layout(ty.ty.clone()),
                         &template_locations,
                         ty,
                     );
@@ -2985,7 +3468,7 @@ impl ZngurSpecBuilder {
             }
             if let Some(directive) = ty.trivially_relocatable.directive() {
                 let tr_span = ctx.resolve_item_span(
-                    &PartialSpanKey::TriviallyRelocatable(ty.ty.clone(), ty.trivially_relocatable),
+                    &PartialSpanKey::trivially_relocatable(ty.ty.clone(), ty.trivially_relocatable),
                     &template_locations,
                     ty,
                 );
@@ -3151,6 +3634,8 @@ enum Token<'a> {
     KwSafe,
     KwUnsafe,
     CppPathStart,
+    /// `'a`, without the `'`.
+    Lifetime(&'a str),
     Ident(&'a str),
     Str(&'a str),
     RawStr(usize, &'a str),
@@ -3234,6 +3719,7 @@ impl<'a> Token<'a> {
             | Token::Dot
             | Token::Bang
             | Token::CppPathStart
+            | Token::Lifetime(_)
             | Token::Str(_)
             | Token::RawStr(_, _)
             | Token::Number(_) => None,
@@ -3272,6 +3758,7 @@ impl Display for Token<'_> {
             Token::Dot => write!(f, "."),
             Token::Bang => write!(f, "!"),
             Token::CppPathStart => write!(f, "c++"),
+            Token::Lifetime(l) => write!(f, "'{l}"),
             Token::Number(n) => write!(f, "{n}"),
             Token::Str(s) => write!(f, r#""{s}""#),
             Token::RawStr(hashes, s) => {
@@ -3329,6 +3816,7 @@ fn lexer<'src>()
         raw_string,
         plain_string,
         just("c++").to(Token::CppPathStart),
+        just('\'').ignore_then(text::ident()).map(Token::Lifetime),
         text::ident()
             .filter(|ident: &&str| *ident != "_")
             .map(Token::ident_or_kw),
@@ -3460,9 +3948,9 @@ fn rust_type<'a>() -> Boxed<'a, 'a, ParserInput<'a>, ParsedRustType<'a>, ZngPars
             });
         let boxed = just(Token::Ident("Box"))
             .then(rust_generics(parser.clone()))
-            .map(|(_, x)| {
-                assert_eq!(x.len(), 1);
-                ParsedRustType::Boxed(Box::new(x.into_iter().next().unwrap().right().unwrap()))
+            .try_map(|(_, x), span| match <[_; 1]>::try_from(x) {
+                Ok([ParsedGenericArg::Type(t)]) => Ok(ParsedRustType::Boxed(Box::new(t))),
+                _ => Err(Rich::custom(span, "`Box` takes exactly one type argument")),
             });
         let unit = just(Token::ParenOpen)
             .then(just(Token::ParenClose))
@@ -3479,13 +3967,14 @@ fn rust_type<'a>() -> Boxed<'a, 'a, ParserInput<'a>, ParsedRustType<'a>, ZngPars
             .map(|x| ParsedRustType::Slice(Box::new(x)))
             .delimited_by(just(Token::BracketOpen), just(Token::BracketClose));
         let reference = just(Token::And)
-            .ignore_then(
+            .ignore_then(select! { Token::Lifetime(l) => l }.or_not())
+            .then(
                 just(Token::KwMut)
                     .to(Mutability::Mut)
                     .or(empty().to(Mutability::Not)),
             )
             .then(parser.clone())
-            .map(|(m, x)| ParsedRustType::Ref(m, Box::new(x)));
+            .map(|((l, m), x)| ParsedRustType::Ref(m, l, Box::new(x)));
         let raw_ptr = just(Token::Star)
             .ignore_then(
                 just(Token::KwMut)
@@ -3509,31 +3998,38 @@ fn rust_type<'a>() -> Boxed<'a, 'a, ParserInput<'a>, ParsedRustType<'a>, ZngPars
     .boxed()
 }
 
+/// A generic argument of a Rust path: `'a`, `T` or `Name = T`.
+#[derive(Debug, Clone)]
+enum ParsedGenericArg<'a> {
+    Lifetime(&'a str),
+    Type(ParsedRustType<'a>),
+    Named(&'a str, ParsedRustType<'a>),
+}
+
 fn rust_generics<'a>(
     rust_type: Boxed<'a, 'a, ParserInput<'a>, ParsedRustType<'a>, ZngParserExtra<'a>>,
-) -> impl Parser<
-    'a,
-    ParserInput<'a>,
-    Vec<Either<(&'a str, ParsedRustType<'a>), ParsedRustType<'a>>>,
-    ZngParserExtra<'a>,
-> + Clone {
+) -> impl Parser<'a, ParserInput<'a>, Vec<ParsedGenericArg<'a>>, ZngParserExtra<'a>> + Clone {
     let named_generic = select! {
         Token::Ident(c) => c,
     }
     .then_ignore(just(Token::Eq))
     .then(rust_type.clone())
-    .map(Either::Left);
+    .map(|(name, ty)| ParsedGenericArg::Named(name, ty));
+    let lifetime = select! { Token::Lifetime(l) => ParsedGenericArg::Lifetime(l) };
     just(Token::ColonColon)
         .repeated()
         .at_most(1)
         .ignore_then(
-            named_generic
-                .or(rust_type.clone().map(Either::Right))
-                .separated_by(just(Token::Comma))
-                .allow_trailing()
-                .collect::<Vec<_>>()
-                .delimited_by(just(Token::AngleOpen), just(Token::AngleClose))
-                .boxed(),
+            choice((
+                lifetime,
+                named_generic,
+                rust_type.clone().map(ParsedGenericArg::Type),
+            ))
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::AngleOpen), just(Token::AngleClose))
+            .boxed(),
         )
         .boxed()
 }
@@ -3544,15 +4040,55 @@ fn rust_path_and_generics<'a>(
     let generics = rust_generics(rust_type.clone());
     path()
         .then(generics.clone().repeated().at_most(1).collect::<Vec<_>>())
-        .map(|x| {
-            let generics = x.1.into_iter().next().unwrap_or_default();
-            let (named_generics, generics) = generics.into_iter().partition_map(|x| x);
-            ParsedRustPathAndGenerics {
+        .try_map(|x, span| {
+            let mut lifetimes = vec![];
+            let mut generics = vec![];
+            let mut named_generics = vec![];
+            for arg in x.1.into_iter().next().unwrap_or_default() {
+                match arg {
+                    ParsedGenericArg::Lifetime(l)
+                        if generics.is_empty() && named_generics.is_empty() =>
+                    {
+                        lifetimes.push(l)
+                    }
+                    ParsedGenericArg::Lifetime(_) => {
+                        return Err(Rich::custom(
+                            span,
+                            "lifetime arguments must come before type arguments",
+                        ));
+                    }
+                    ParsedGenericArg::Type(t) => generics.push(t),
+                    ParsedGenericArg::Named(n, t) => named_generics.push((n, t)),
+                }
+            }
+            Ok(ParsedRustPathAndGenerics {
                 path: x.0,
+                lifetimes,
                 generics,
                 named_generics,
-            }
+            })
         })
+        .boxed()
+}
+
+/// Required lifetime parameters, `<'a, 'b>` (without the `'`).
+fn required_lifetime_params<'a>()
+-> impl Parser<'a, ParserInput<'a>, Vec<&'a str>, ZngParserExtra<'a>> + Clone {
+    select! { Token::Lifetime(l) => l }
+        .separated_by(just(Token::Comma))
+        .at_least(1)
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::AngleOpen), just(Token::AngleClose))
+        .boxed()
+}
+
+/// Optional lifetime parameters, `<'a, 'b>` (without the `'`), or nothing.
+fn lifetime_params<'a>()
+-> impl Parser<'a, ParserInput<'a>, Vec<&'a str>, ZngParserExtra<'a>> + Clone {
+    required_lifetime_params()
+        .or_not()
+        .map(Option::unwrap_or_default)
         .boxed()
 }
 
@@ -3586,18 +4122,57 @@ fn spanned<'a, T>(
 fn rust_trait<'a>(
     rust_type: Boxed<'a, 'a, ParserInput<'a>, ParsedRustType<'a>, ZngParserExtra<'a>>,
 ) -> impl Parser<'a, ParserInput<'a>, ParsedRustTrait<'a>, ZngParserExtra<'a>> + Clone {
-    let fn_trait = select! {
-        Token::Ident(c) => c,
-    }
-    .then(fn_args(rust_type.clone()))
-    .map(|x| ParsedRustTrait::Fn {
-        name: x.0,
-        inputs: x.1.0,
-        output: Box::new(x.1.1),
-    });
+    let for_binder = just(Token::KwFor)
+        .ignore_then(required_lifetime_params())
+        .or_not()
+        .map(Option::unwrap_or_default);
+    let fn_trait = for_binder
+        .then(select! {
+            Token::Ident(c) => c,
+        })
+        .then(fn_args(rust_type.clone()))
+        .map(
+            |((lifetimes, name), (inputs, output))| ParsedRustTrait::Fn {
+                name,
+                lifetimes,
+                inputs,
+                output: Box::new(output),
+            },
+        );
 
     let rust_trait = fn_trait.or(rust_path_and_generics(rust_type).map(ParsedRustTrait::Normal));
     rust_trait.boxed()
+}
+
+fn fn_generic_params<'a>()
+-> impl Parser<'a, ParserInput<'a>, (Vec<&'a str>, Vec<ParsedRustType<'a>>), ZngParserExtra<'a>> + Clone
+{
+    select! { Token::Lifetime(l) => Either::Left(l) }
+        .or(rust_type().map(Either::Right))
+        .separated_by(just(Token::Comma))
+        .at_least(1)
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::AngleOpen), just(Token::AngleClose))
+        .or_not()
+        .map(Option::unwrap_or_default)
+        .try_map(|params, span| {
+            let lifetimes: Vec<&str> = params
+                .iter()
+                .map_while(|p| p.as_ref().left().copied())
+                .collect();
+            let generics: Vec<ParsedRustType<'_>> = params
+                .into_iter()
+                .skip(lifetimes.len())
+                .map(|p| {
+                    p.right().ok_or_else(|| {
+                        Rich::custom(span, "lifetime parameters must come before type arguments")
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+            Ok((lifetimes, generics))
+        })
+        .boxed()
 }
 
 fn method<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedMethod<'a>, ZngParserExtra<'a>> + Clone {
@@ -3622,17 +4197,10 @@ fn method_signature<'a>()
         .then(select! {
             Token::Ident(c) => c,
         })
-        .then(
-            rust_type()
-                .separated_by(just(Token::Comma))
-                .collect::<Vec<_>>()
-                .delimited_by(just(Token::AngleOpen), just(Token::AngleClose))
-                .or(empty().to(vec![]))
-                .boxed(),
-        )
+        .then(fn_generic_params())
         .then(fn_args(rust_type()))
-        .map(|(((opt_async, name), generics), args)| {
-            parsed_method_from_signature(name, opt_async.map(|x| x.span), generics, args)
+        .map(|(((opt_async, name), (lifetimes, generics)), args)| {
+            parsed_method_from_signature(name, opt_async.map(|x| x.span), lifetimes, generics, args)
         })
         .boxed()
 }
@@ -3650,16 +4218,9 @@ fn function_signature<'a>()
         .or_not()
         .then_ignore(just(Token::KwFn))
         .then(function_path)
-        .then(
-            rust_type()
-                .separated_by(just(Token::Comma))
-                .collect::<Vec<_>>()
-                .delimited_by(just(Token::AngleOpen), just(Token::AngleClose))
-                .or(empty().to(vec![]))
-                .boxed(),
-        )
+        .then(fn_generic_params())
         .then(fn_args(rust_type()))
-        .map(|(((opt_async, path), generics), args)| {
+        .map(|(((opt_async, path), (lifetimes, generics)), args)| {
             let name = *path
                 .segments
                 .last()
@@ -3669,6 +4230,7 @@ fn function_signature<'a>()
                 signature: parsed_method_from_signature(
                     name,
                     opt_async.map(|x| x.span),
+                    lifetimes,
                     generics,
                     args,
                 ),
@@ -3680,6 +4242,7 @@ fn function_signature<'a>()
 fn parsed_method_from_signature<'a>(
     name: &'a str,
     async_span: Option<Span>,
+    lifetimes: Vec<&'a str>,
     generics: Vec<ParsedRustType<'a>>,
     args: (Vec<ParsedRustType<'a>>, ParsedRustType<'a>),
 ) -> ParsedMethod<'a> {
@@ -3687,17 +4250,21 @@ fn parsed_method_from_signature<'a>(
         if let ParsedRustType::Adt(ty) = ty {
             ty.path.start == ParsedPathStart::Relative
                 && &ty.path.segments == &["self"]
+                && ty.lifetimes.is_empty()
                 && ty.generics.is_empty()
+                && ty.named_generics.is_empty()
         } else {
             false
         }
     };
-    let (inputs, receiver) = match args.0.first() {
-        Some(ty) if is_self(ty) => (args.0[1..].to_vec(), ZngurMethodReceiver::Move),
-        Some(ParsedRustType::Ref(mutability, ty)) if is_self(ty) => {
-            (args.0[1..].to_vec(), ZngurMethodReceiver::Ref(*mutability))
-        }
-        _ => (args.0, ZngurMethodReceiver::Static),
+    let (inputs, receiver, receiver_lifetime) = match args.0.first() {
+        Some(ty) if is_self(ty) => (args.0[1..].to_vec(), ZngurMethodReceiver::Move, None),
+        Some(ParsedRustType::Ref(mutability, l, ty)) if is_self(ty) => (
+            args.0[1..].to_vec(),
+            ZngurMethodReceiver::Ref(*mutability),
+            *l,
+        ),
+        _ => (args.0, ZngurMethodReceiver::Static, None),
     };
     let mut output = args.1;
     if let Some(async_span) = async_span {
@@ -3708,6 +4275,7 @@ fn parsed_method_from_signature<'a>(
                     segments: vec!["std", "future", "Future"],
                     span: async_span,
                 },
+                lifetimes: vec![],
                 generics: vec![],
                 named_generics: vec![("Output", output)],
             }),
@@ -3716,8 +4284,10 @@ fn parsed_method_from_signature<'a>(
     }
     ParsedMethod {
         name,
+        lifetimes,
         is_safe: None,
         receiver,
+        receiver_lifetime,
         generics,
         inputs,
         output,
@@ -3923,34 +4493,55 @@ fn inner_type_item<'a>()
 }
 
 fn type_item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngParserExtra<'a>> + Clone {
-    just(Token::KwType)
-        .ignore_then(
-            (select! { Token::Ident(c) => c })
-                .map(ParsedTypeVar)
-                .separated_by(just(Token::Comma))
-                .at_least(1)
-                .allow_trailing()
-                .collect()
-                .delimited_by(just(Token::AngleOpen), just(Token::AngleClose))
-                .try_map_with(|vars, e: &mut MapExtra<_, ZngParserExtra>| {
-                    if !e.state().unstable_features.template_types {
-                        Err(Rich::custom(e.span(), "Template types are unstable. Enable them by using `#unstable(template_types)` at the top of the file."))
-                    } else {
-                        Ok(vars)
-                    }
+    // `type<'a, T>`: lifetime parameters, then type variables (which make it a template).
+    let params = select! { Token::Lifetime(l) => Either::Left(l) }
+        .or(select! { Token::Ident(c) => Either::Right(ParsedTypeVar(c)) })
+        .separated_by(just(Token::Comma))
+        .at_least(1)
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::AngleOpen), just(Token::AngleClose))
+        .or_not()
+        .try_map(|params, span| {
+            let params = params.unwrap_or_default();
+            let lifetimes: Vec<&str> = params
+                .iter()
+                .map_while(|p| p.as_ref().left().copied())
+                .collect();
+            let type_vars: HashSet<ParsedTypeVar<'_>> = params
+                .into_iter()
+                .skip(lifetimes.len())
+                .map(|p| {
+                    p.right().ok_or_else(|| {
+                        Rich::custom(span, "lifetime parameters must come before type variables")
+                    })
                 })
-                .or_not(),
-        )
+                .collect::<Result<_, _>>()?;
+            Ok((lifetimes, (!type_vars.is_empty()).then_some(type_vars)))
+        });
+    just(Token::KwType)
+        .ignore_then(params)
         .then(spanned(rust_type()))
+        .try_map_with(
+            |((lifetimes, type_vars), ty), e: &mut MapExtra<_, ZngParserExtra>| {
+                if type_vars.is_some() && !e.state().unstable_features.template_types {
+                    Err(Rich::custom(e.span(), "Template types are unstable. Enable them by using `#unstable(template_types)` at the top of the file."))
+                } else {
+                    Ok((lifetimes, type_vars, ty))
+                }
+            },
+        )
         .then(
             spanned(inner_type_item())
                 .repeated()
                 .collect::<Vec<_>>()
-                .delimited_by(just(Token::BraceOpen), just(Token::BraceClose)).boxed(),
+                .delimited_by(just(Token::BraceOpen), just(Token::BraceClose))
+                .boxed(),
         )
-        .map(|((type_vars, ty), items)| ParsedItem::Type {
+        .map(|((lifetimes, type_vars, ty), items)| ParsedItem::Type {
             ty,
             items,
+            lifetimes,
             type_vars,
         })
         .boxed()
@@ -3961,7 +4552,7 @@ fn trait_item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngParse
     just(Token::KwTrait)
         .ignore_then(spanned(rust_trait(rust_type())))
         .then(
-            method()
+            spanned(method())
                 .then_ignore(just(Token::Semicolon))
                 .repeated()
                 .collect::<Vec<_>>()
@@ -4023,7 +4614,8 @@ fn extern_cpp_item<'a>()
         .then_ignore(just(Token::Semicolon))
         .map(|(is_safe, method)| ParsedExternCppItem::Function { is_safe, method });
     let impl_block = just(Token::KwImpl)
-        .ignore_then(
+        .ignore_then(lifetime_params())
+        .then(
             rust_trait(rust_type())
                 .then_ignore(just(Token::KwFor))
                 .map(Some)
@@ -4033,14 +4625,21 @@ fn extern_cpp_item<'a>()
         )
         .then(
             safety
-                .then(method_signature())
+                .then(spanned(method_signature()))
                 .then_ignore(just(Token::Semicolon))
                 .repeated()
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::BraceOpen), just(Token::BraceClose))
                 .boxed(),
         )
-        .map(|((tr, ty), methods)| ParsedExternCppItem::Impl { tr, ty, methods });
+        .map(
+            |((lifetimes, (tr, ty)), methods)| ParsedExternCppItem::Impl {
+                lifetimes,
+                tr,
+                ty,
+                methods,
+            },
+        );
     just(Token::KwExtern)
         .then(just(Token::Str("C++")))
         .ignore_then(
