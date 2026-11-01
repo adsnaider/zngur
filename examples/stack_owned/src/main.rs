@@ -113,6 +113,12 @@ pub fn invoke_cpp_callback(
     30
 }
 
+pub fn scale_if_some<'a>(v: Option<&'a mut Cpp<i32>>, factor: i32) -> Option<&'a mut Cpp<i32>> {
+    let v = v?;
+    v.set(v.get() * factor);
+    Some(v)
+}
+
 fn main() {
     let mut c = MyCppWrapper::new(5, 6);
     c.print();
@@ -133,6 +139,13 @@ fn main() {
     // Each `const` object input has its own constness type parameter (`__C1`, `__C2`).
     let larger_mixed: &MyCppWrapper<Const> = generated::larger_x(&c, d.as_const());
     assert!(std::ptr::eq(larger_mixed, c.as_const()));
+    assert!(std::ptr::eq(
+        generated::non_negative_x(Some(&c)).unwrap(),
+        c.as_const()
+    ));
+    let neg = MyCppWrapper::new(-1, 2);
+    assert!(generated::non_negative_x(Some(&neg)).is_none());
+    assert!(generated::non_negative_x(None::<&MyCppWrapper>).is_none());
     let mut point = MyCppWrapper::new(2, 3);
     let _exclusive: &mut MyCppWrapper<Const> = point.as_const_mut();
     let _frozen: MyCppWrapper<Const> = point.into_const();
@@ -172,6 +185,7 @@ fn main() {
     assert_eq!(generated::run_with_opaque_ref(), 14);
     assert_eq!(generated::run_rust_cpp_refs(), 20);
     assert_eq!(generated::run_callback(), 30);
+    assert_eq!(generated::run_rust_nullable_refs(), 21);
 
     let mut vec = Vec::new();
     let cons = MyConservativeWrapper::new(10, 20);

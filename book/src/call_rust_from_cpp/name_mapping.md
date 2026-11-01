@@ -3,24 +3,25 @@
 Not all Rust types have the equivalent syntax in C++,
 so Zngur uses a name mapping that is explained in this table:
 
-| Zngur type                               | C++ Type                                       |
-| ---------------------------------------- | ---------------------------------------------- |
-| `uX`                                     | `uintX_t`                                      |
-| `iX`                                     | `intX_t`                                       |
-| `bool`                                   | `rust::Bool`                                   |
-| `char`                                   | `rust::Char`                                   |
-| `some_crate::some_mod::SomeAdt<A, B, C>` | `rust::some_crate::some_mod::SomeAdt<A, B, C>` |
-| `c++::some_ns::SomeCppType`              | `rust::cpp::some_ns::SomeCppType`              |
-| `&T`                                     | `rust::Ref<T>`                                 |
-| `&mut T`                                 | `rust::RefMut<T>`                              |
-| `&'a const c++::T` / `&'a var c++::T`    | `const T&` / `T&` (`rust::CppRef<..>`)         |
-| `*const T`                               | `rust::Raw<T>` or `const T*` (depends on `T`)  |
-| `*mut T`                                 | `rust::RawMut<T>` or `T*` (depends on `T`)     |
-| `[T]`                                    | `rust::Slice<T>`                               |
-| `dyn T`                                  | `rust::Dyn<T>`                                 |
-| `dyn T + Marker1 + Marker2`              | `rust::Dyn<T, rust::Marker1, rust::Marker2>`   |
-| `()`                                     | `rust::Unit` or `rust::Tuple<>`                |
-| `(A, B, C)`                              | `rust::Tuple<A, B, C>`                         |
+| Zngur type                                | C++ Type                                       |
+| ----------------------------------------- | ---------------------------------------------- |
+| `uX`                                      | `uintX_t`                                      |
+| `iX`                                      | `intX_t`                                       |
+| `bool`                                    | `rust::Bool`                                   |
+| `char`                                    | `rust::Char`                                   |
+| `some_crate::some_mod::SomeAdt<A, B, C>`  | `rust::some_crate::some_mod::SomeAdt<A, B, C>` |
+| `c++::some_ns::SomeCppType`               | `rust::cpp::some_ns::SomeCppType`              |
+| `&T`                                      | `rust::Ref<T>`                                 |
+| `&mut T`                                  | `rust::RefMut<T>`                              |
+| `&'a const c++::T` / `&'a var c++::T`     | `const T&` / `T&` (`rust::CppRef<..>`)         |
+| `::std::option::Option<&'a const c++::T>` | `const T*` (`rust::CppPtr<..>`)                |
+| `*const T`                                | `rust::Raw<T>` or `const T*` (depends on `T`)  |
+| `*mut T`                                  | `rust::RawMut<T>` or `T*` (depends on `T`)     |
+| `[T]`                                     | `rust::Slice<T>`                               |
+| `dyn T`                                   | `rust::Dyn<T>`                                 |
+| `dyn T + Marker1 + Marker2`               | `rust::Dyn<T, rust::Marker1, rust::Marker2>`   |
+| `()`                                      | `rust::Unit` or `rust::Tuple<>`                |
+| `(A, B, C)`                               | `rust::Tuple<A, B, C>`                         |
 
 ## Why `rust::Ref<T>` instead of C++ references?
 

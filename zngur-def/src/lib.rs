@@ -197,6 +197,78 @@ mod tests {
     }
 
     #[test]
+    fn test_nullable_cpp_refs() {
+        let a_b = RustType::Cpp(vec!["a".to_owned(), "B".to_owned()]);
+        let lt = Some(Lifetime("a".to_owned()));
+        let option = |root: &str, m, constness| {
+            RustType::Adt(RustPathAndGenerics {
+                path: vec![root.to_owned(), "option".to_owned(), "Option".to_owned()],
+                generics: vec![RustType::Ref(
+                    m,
+                    lt.clone(),
+                    Box::new(RustType::cpp_object(constness, a_b.clone())),
+                )],
+                ..Default::default()
+            })
+        };
+        let const_b = option("std", Mutability::Not, CppConstness::Const);
+        let unique_const_b = option("core", Mutability::Mut, CppConstness::Const);
+        let unique_var_b = option("core", Mutability::Mut, CppConstness::Var);
+        assert_eq!(
+            const_b.as_nullable_cpp_ref(),
+            Some((
+                Mutability::Not,
+                lt.as_ref(),
+                &RustType::CppConst(Box::new(a_b.clone()))
+            ))
+        );
+        assert_eq!(
+            unique_var_b.as_nullable_cpp_ref(),
+            Some((
+                Mutability::Mut,
+                lt.as_ref(),
+                &RustType::CppVar(Box::new(a_b.clone()))
+            ))
+        );
+        assert_eq!(
+            const_b.generic_const_input("__C1").as_deref(),
+            Some("::std::option::Option<&'a a::B::<__C1>>")
+        );
+        assert_eq!(
+            unique_const_b.generic_const_input("__C1").as_deref(),
+            Some("::core::option::Option<&'a mut a::B::<__C1>>")
+        );
+        assert_eq!(
+            option("std", Mutability::Not, CppConstness::Var).generic_const_input("__C1"),
+            None
+        );
+        assert_eq!(unique_var_b.generic_const_input("__C1"), None);
+        // `Option` with lifetime parameters is invalid and not a nullable C++ reference.
+        let with_lifetimes = RustType::Adt(RustPathAndGenerics {
+            path: vec!["std".to_owned(), "option".to_owned(), "Option".to_owned()],
+            lifetimes: vec![Lifetime("a".to_owned())],
+            generics: vec![RustType::Ref(
+                Mutability::Not,
+                lt.clone(),
+                Box::new(RustType::cpp_object(CppConstness::Const, a_b)),
+            )],
+            ..Default::default()
+        });
+        assert!(with_lifetimes.as_nullable_cpp_ref().is_none());
+        // `Option<&i32>` is a Rust value.
+        let rust_ref = RustType::Adt(RustPathAndGenerics {
+            path: vec!["std".to_owned(), "option".to_owned(), "Option".to_owned()],
+            generics: vec![RustType::Ref(
+                Mutability::Not,
+                None,
+                Box::new(RustType::Primitive(PrimitiveRustType::Int(32))),
+            )],
+            ..Default::default()
+        });
+        assert!(rust_ref.as_nullable_cpp_ref().is_none());
+    }
+
+    #[test]
     fn test_cpp_ptr_display() {
         let ty = RustType::cpp_ptr(
             Mutability::Not,
@@ -873,6 +945,34 @@ impl RustType {
         }
     }
 
+    /// For a nullable reference to a C++ object (`::std::option::Option<&'a const T>`,
+    /// `::core::option::Option<&'a unique var T>`, ...), the reference: whether it's `unique`
+    /// (`Mut`), its lifetime and what it refers to (a [`RustType::CppConst`] or a
+    /// [`RustType::CppVar`]). It's a `const T*` or a `T*` in C++.
+    pub fn as_nullable_cpp_ref(&self) -> Option<(Mutability, Option<&Lifetime>, &RustType)> {
+        let RustType::Adt(pg) = self else {
+            return None;
+        };
+        let is_option = matches!(
+            pg.path.as_slice(),
+            [root, opt_mod, opt_ty]
+                if matches!(root.as_str(), "std" | "core")
+                    && opt_mod == "option"
+                    && opt_ty == "Option"
+        );
+        match pg.generics.as_slice() {
+            [RustType::Ref(m, lifetime, pointee)]
+                if is_option
+                    && pg.lifetimes.is_empty()
+                    && pg.named_generics.is_empty()
+                    && pointee.as_cpp_object().is_some() =>
+            {
+                Some((*m, lifetime.as_ref(), pointee))
+            }
+            _ => None,
+        }
+    }
+
     /// The type variables in `self` (e.g. `T` in a template `crate::Foo<T>`), in order of
     /// appearance, without duplicates.
     pub fn type_vars(&self) -> Vec<&TypeVar> {
@@ -1530,11 +1630,12 @@ fn write_cpp_object(
 }
 
 impl RustType {
-    /// For an input of a C++-implemented function, if it's a reference or a C++ pointer to a
-    /// `const` C++ object (`&'a const T`, `&'a unique const T`, `const T&` or `const T*`), its
-    /// Rust type with the generic constness parameter `constness` in place of `Const`:
-    /// `&'a T<C1>`, `&'a mut T<C1>` or `*const T<C1>`. C++ only reads the object, so Rust may
-    /// pass a non-`const` one too, as C++ does implicitly.
+    /// For an input of a C++-implemented function, if it's a reference, nullable reference or C++
+    /// pointer to a `const` C++ object (`&'a const T`, `&'a unique const T`,
+    /// `Option<&'a const T>`, `Option<&'a unique const T>`, `const T&` or `const T*`), its Rust
+    /// type with the generic constness parameter `constness` in place of `Const`: `&'a T<C1>`,
+    /// `&'a mut T<C1>`, `Option<&'a T<C1>>`, `Option<&'a mut T<C1>>` or `*const T<C1>`. C++ only
+    /// reads the object, so Rust may pass a non-`const` one too, as C++ does implicitly.
     pub fn generic_const_input(&self, constness: &str) -> Option<String> {
         struct Generic<'a>(&'a RustType, &'a str);
         impl Display for Generic<'_> {
@@ -1559,6 +1660,11 @@ impl RustType {
                     return None;
                 };
                 Some(format!("*const {}", Generic(inner, constness)))
+            }
+            // `Option<&'a const T>` is `Option<&'a T<C1>>`.
+            RustType::Adt(pg) if self.as_nullable_cpp_ref().is_some() => {
+                let reference = pg.generics[0].generic_const_input(constness)?;
+                Some(format!("::{}<{reference}>", pg.path.join("::")))
             }
             _ => None,
         }

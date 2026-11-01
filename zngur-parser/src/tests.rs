@@ -4523,3 +4523,157 @@ fn cpp_pointers_and_object_refs_cannot_be_declared_as_types_or_inherent_impls() 
         );
     }
 }
+
+#[test]
+fn nullable_references_to_cpp_objects_parse() {
+    use zngur_def::{Lifetime, PrimitiveRustType};
+
+    let parsed = parse_str(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+}
+extern "C++" {
+    safe fn f<'a>(
+        ::std::option::Option<&'a const c++::B>,
+        ::core::option::Option<&'a var c++::B>,
+        ::std::option::Option<&'a unique var c++::B>,
+        ::core::option::Option<&'a unique const i32>,
+    ) -> ::std::option::Option<&'a const c++::B>;
+}
+"#,
+        NullCfg,
+        |msg| panic!("{msg}"),
+    );
+    let func = &parsed.spec.extern_cpp_funcs[0];
+    let lt_a = Lifetime("a".to_owned());
+    let b = RustType::Cpp(vec!["B".to_owned()]);
+    let i32_ty = RustType::Primitive(PrimitiveRustType::Int(32));
+    assert_eq!(
+        func.inputs[0].as_nullable_cpp_ref(),
+        Some((
+            Mutability::Not,
+            Some(&lt_a),
+            &RustType::CppConst(Box::new(b.clone()))
+        ))
+    );
+    assert_eq!(
+        func.inputs[1].as_nullable_cpp_ref(),
+        Some((
+            Mutability::Not,
+            Some(&lt_a),
+            &RustType::CppVar(Box::new(b.clone()))
+        ))
+    );
+    assert_eq!(
+        func.inputs[2].as_nullable_cpp_ref(),
+        Some((
+            Mutability::Mut,
+            Some(&lt_a),
+            &RustType::CppVar(Box::new(b.clone()))
+        ))
+    );
+    assert_eq!(
+        func.inputs[3].as_nullable_cpp_ref(),
+        Some((
+            Mutability::Mut,
+            Some(&lt_a),
+            &RustType::CppConst(Box::new(i32_ty))
+        ))
+    );
+    assert_eq!(
+        func.output.as_nullable_cpp_ref(),
+        Some((
+            Mutability::Not,
+            Some(&lt_a),
+            &RustType::CppConst(Box::new(b))
+        ))
+    );
+}
+
+#[test]
+fn nullable_references_to_cpp_objects_cant_be_declared_as_types() {
+    check_fail(
+        r#"
+type ::std::option::Option<&var c++::B> {}
+"#,
+        expect![[r#"
+            Error: a nullable reference to a C++ object (`Option<&'a const T>`, `Option<&'a var T>`, ...) is a C++ pointer in C++ (here to `c++::B`), not a type to declare: use it in signatures directly
+               ╭─[ test.zng:2:6 ]
+               │
+             2 │ type ::std::option::Option<&var c++::B> {}
+               │      ─────────────────┬────────────────  
+               │                       ╰────────────────── a nullable reference to a C++ object (`Option<&'a const T>`, `Option<&'a var T>`, ...) is a C++ pointer in C++ (here to `c++::B`), not a type to declare: use it in signatures directly
+            ───╯
+        "#]],
+    );
+    check_fail(
+        r#"
+type ::std::option::Option<&var crate::Foo> {}
+"#,
+        expect![[r#"
+            Error: only C++ objects (`c++::` types, builtins and C++ pointers) can be `const` or `var`, and `crate::Foo` is a Rust type: use `&crate::Foo`
+               ╭─[ test.zng:2:6 ]
+               │
+             2 │ type ::std::option::Option<&var crate::Foo> {}
+               │      ───────────────────┬──────────────────  
+               │                         ╰──────────────────── only C++ objects (`c++::` types, builtins and C++ pointers) can be `const` or `var`, and `crate::Foo` is a Rust type: use `&crate::Foo`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn nullable_cpp_refs_are_allowed_in_fields_and_containers_but_rejected_in_inherent_impls() {
+    check_success(
+        r#"
+type c++::B {}
+type<'a> crate::Holder<'a> {
+    #layout(size = 8, align = 8);
+    field ptr (offset = 0, type = ::std::option::Option<&'a const c++::B>);
+}
+extern "C++" {
+    safe fn tuple_and_vec<'a>(
+        (::std::option::Option<&'a const c++::B>, ::core::option::Option<&'a unique var i32>),
+        ::std::vec::Vec<::std::option::Option<&'a const c++::B>>,
+    );
+}
+mod crate {
+    fn async_ptr() -> impl ::std::future::Future<Output = ::std::option::Option<&'static const c++::B>>;
+}
+"#,
+    );
+
+    for (src, expected) in [
+        (
+            "type c++::B {}\nextern \"C++\" { impl<'a> ::std::option::Option<&'a const c++::B> { safe fn f(&self); } }\n",
+            "inherent `extern \"C++\"` impls are not supported on C++ pointers or references (`::std::option::Option<&'a const c++::B>`)",
+        ),
+        (
+            r#"
+#unstable(template_types)
+type c++::B {}
+type<T> crate::Wrap<::std::option::Option<T>> {
+    #layout(size = 8, align = 8);
+    field x (offset = 0, type = T);
+}
+type<'a> crate::Wrap<::std::option::Option<&'a const c++::B>> {}
+"#,
+            "use `::std::option::Option<&'a const c++::B>` for a nullable C++ pointer",
+        ),
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(expected),
+            "expected `{expected}` for `{src}`, got:\n{err}"
+        );
+    }
+}

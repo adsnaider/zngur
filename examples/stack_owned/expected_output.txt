@@ -3,6 +3,7 @@ CppType 5 6
 sum = 11
 CppType 6 5
 Constructed CppType 1 2
+Constructed CppType -1 2
 Constructed CppType 2 3
 Constructed CppType 1 10
 Constructed CppType 2 20

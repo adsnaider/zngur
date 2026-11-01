@@ -64,6 +64,13 @@ int32_t exported_functions::run_callback() {
   return crate::invoke_cpp_callback(::std::move(cb));
 }
 
+int32_t exported_functions::run_rust_nullable_refs() {
+  int32_t v = 7;
+  int32_t *scaled = crate::scale_if_some(&v, 3);
+  int32_t *missing = crate::scale_if_some(nullptr, 3);
+  return (scaled == &v && missing == nullptr) ? v : -1;
+}
+
 // References to C++ objects are C++ references: `const CppType&` and `int32_t&`.
 Unit exported_functions::sum_into(const ::CppType &c, int32_t &out) {
   out = c.x + c.y;
@@ -73,6 +80,10 @@ Unit exported_functions::sum_into(const ::CppType &c, int32_t &out) {
 const ::CppType &exported_functions::larger_x(const ::CppType &a,
                                               const ::CppType &b) {
   return a.x >= b.x ? a : b;
+}
+
+const ::CppType *exported_functions::non_negative_x(const ::CppType *p) {
+  return (p != nullptr && p->x >= 0) ? p : nullptr;
 }
 
 // A raw pointer (`CppPtr<MyCppWrapper>` is `CppType*`).

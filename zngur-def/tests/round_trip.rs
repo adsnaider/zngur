@@ -959,6 +959,7 @@ type crate::Foo {
 
 extern "C++" {
     safe fn refs<'a>(&'a const c++::a::B, &'a var c++::a::B, &'a unique var c++::a::B, &'a unique const c++::a::B);
+    safe fn nullable<'a>(::std::option::Option<&'a const c++::a::B>, ::core::option::Option<&'a var c++::a::B>, ::std::option::Option<&'a unique var c++::a::B>, ::core::option::Option<&'a unique const i32>) -> ::std::option::Option<&'a const c++::a::B>;
     safe fn builtins<'a>(&'a const i32, &'a var i32, &'a unique var i32, &'a unique const i32, &'a i32, &'a mut i32) -> &'a var bool;
     unsafe fn raw(c++::a::B*, const c++::a::B&, i32&, const i32*, c++::a::B**, const i32**, i32* const*);
 }
@@ -978,6 +979,7 @@ extern "C++" {
             extern "C++" {
 
                 safe fn refs<'a>(&'a const c++::a::B, &'a var c++::a::B, &'a unique var c++::a::B, &'a unique const c++::a::B);
+                safe fn nullable<'a>(::std::option::Option<&'a const c++::a::B>, ::core::option::Option<&'a var c++::a::B>, ::std::option::Option<&'a unique var c++::a::B>, ::core::option::Option<&'a unique const i32>) -> ::std::option::Option<&'a const c++::a::B>;
                 safe fn builtins<'a>(&'a const i32, &'a var i32, &'a unique var i32, &'a unique const i32, &'a i32, &'a mut i32) -> &'a var bool;
                 unsafe fn raw(c++::a::B*, const c++::a::B&, i32&, const i32*, c++::a::B**, const i32**, i32* const*);
 

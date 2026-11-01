@@ -1187,11 +1187,12 @@ fn check_cpp_objects_inner(
                     if is_valid_cpp_object_inner(t) {
                         check_cpp_objects_inner(t, false, false, heap_info)?;
                         if !allow_cpp_object_ref {
+                            let ty_str = zng_spelling(ty);
                             return Err(format!(
-                                "reference to a C++ object `{}` is a C++ reference in C++ and can \
-                                 only be a function, method, or constructor parameter or return \
-                                 type",
-                                zng_spelling(ty)
+                                "reference to a C++ object `{ty_str}` is a C++ reference in C++ \
+                                 and can only be a function, method, or constructor parameter or \
+                                 return type (use `::std::option::Option<{ty_str}>` for a \
+                                 nullable C++ pointer)"
                             ));
                         }
                         Ok(())
@@ -1364,6 +1365,9 @@ fn check_cpp_objects_inner(
         }
         RustType::Tuple(tys) => all(tys, false, false),
         RustType::Adt(pg) => {
+            if ty.as_nullable_cpp_ref().is_some() {
+                return check_cpp_objects_inner(&pg.generics[0], false, true, heap_info);
+            }
             all(&pg.generics, false, false)?;
             pg.named_generics
                 .iter()
@@ -1783,6 +1787,20 @@ impl ProcessedItem<'_> {
                              declare: use them in signatures directly (only `c++::` classes take \
                              a `type` block)",
                             zng_spelling(&rust_ty)
+                        ),
+                        ty.span,
+                    );
+                    return;
+                }
+                // It's a C++ pointer in C++, which isn't a type to declare.
+                if ty_ok && let Some((_, _, pointee)) = rust_ty.as_nullable_cpp_ref() {
+                    ctx.deferred_cpp_object_checks.truncate(deferred_before);
+                    ctx.add_error_str(
+                        &format!(
+                            "a nullable reference to a C++ object (`Option<&'a const T>`, \
+                             `Option<&'a var T>`, ...) is a C++ pointer in C++ (here to `{}`), not \
+                             a type to declare: use it in signatures directly",
+                            zng_spelling(pointee)
                         ),
                         ty.span,
                     );
@@ -2361,7 +2379,8 @@ impl ProcessedItem<'_> {
                             if ok
                                 && tr_zngur.is_none()
                                 && (matches!(ty_zngur, RustType::CppPtr(..))
-                                    || is_inherent_cpp_obj_ref)
+                                    || is_inherent_cpp_obj_ref
+                                    || ty_zngur.as_nullable_cpp_ref().is_some())
                             {
                                 ctx.deferred_cpp_object_checks.truncate(deferred_before);
                                 ctx.add_error_str(

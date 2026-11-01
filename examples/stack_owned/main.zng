@@ -74,12 +74,17 @@ mod crate {
     fn invoke_cpp_callback(
         Box<dyn for<'a> Fn(&'a const c++::MyCppWrapper, &'a unique var bool) -> &'a const c++::MyCppWrapper>,
     ) -> i32;
+    fn scale_if_some<'a>(
+        ::std::option::Option<&'a unique var i32>,
+        i32,
+    ) -> ::std::option::Option<&'a unique var i32>;
 }
 
 extern "C++" {
     safe fn run_with_opaque_ref() -> i32;
     safe fn run_rust_cpp_refs() -> i32;
     safe fn run_callback() -> i32;
+    safe fn run_rust_nullable_refs() -> i32;
 
     impl c++::MyCppWrapper {
         safe fn new(i32, i32) -> c++::MyCppWrapper;
@@ -104,6 +109,9 @@ extern "C++" {
     // CppType&`, `int32_t&`), so functions taking and returning them can be safe.
     safe fn sum_into<'a>(&'a const c++::MyCppWrapper, &'a unique var i32);
     safe fn larger_x<'a>(&'a const c++::MyCppWrapper, &'a const c++::MyCppWrapper) -> &'a const c++::MyCppWrapper;
+    safe fn non_negative_x<'a>(
+        ::std::option::Option<&'a const c++::MyCppWrapper>,
+    ) -> ::std::option::Option<&'a const c++::MyCppWrapper>;
     // C++-style pointers and references are raw pointers in Rust (`*mut T` for `T*`), which may be
     // null or invalid, and plain pointers in C++.
     unsafe fn swap_xy(c++::MyCppWrapper*);
