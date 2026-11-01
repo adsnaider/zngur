@@ -90,3 +90,12 @@ inline int read_tag(const Tag &) { return 9; }
 inline int64_t twice(int64_t v) { return 2 * v; }
 inline double twice(double v) { return 2 * v; }
 } // namespace geometry
+
+// C++ fields of different kinds: `const`, named like a zngur keyword (`type`), and a pointer.
+struct Node {
+  const int32_t id;
+  int32_t type;
+  Node *next;
+
+  explicit Node(int32_t id) : id(id), type(0), next(nullptr) {}
+};

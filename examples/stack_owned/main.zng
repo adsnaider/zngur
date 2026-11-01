@@ -40,6 +40,12 @@ type c++::MyCppWrapper {
     safe constructor(i32, i32) as from_xy;
     safe constructor(&const c++::MyCppWrapper) as copy;
     unsafe constructor(const c++::MyCppWrapper*, i32) as shifted;
+
+    // Accessors for C++ fields, which return a reference to the field (`&Cpp<i32, Const>`,
+    // `&mut Cpp<i32>`).
+    field &const x (type = i32);
+    field &unique var x (type = i32) as x_mut;
+    field &const y (type = i32);
 }
 
 type c++::MyConservativeWrapper {
@@ -64,6 +70,19 @@ mod c++::geometry {
     unsafe fn sum_from_ptr(const c++::MyCppWrapper*) -> i32;
     safe fn twice(i64) -> i64;
     safe fn twice(f64) -> f64 as twice_f64;
+}
+
+// Fields can be `const` (and then only have `const` accessors), be named like a zngur keyword,
+// and be C++ pointers (`&Cpp<*mut Node, Const>`, `&mut Cpp<*mut Node>`).
+type c++::Node {
+    #layout(size = 16, align = 8);
+    #trivially_relocatable;
+
+    safe constructor(i32) as new;
+    field &const id (type = i32);
+    field &unique var type (type = i32) as type_mut;
+    field &const next (type = c++::Node*);
+    unsafe field &unique var next (type = c++::Node*) as next_mut;
 }
 
 type c++::BoxedInt {

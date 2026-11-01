@@ -699,6 +699,14 @@ impl WriteIDL for crate::ZngurType {
                 }
             }
 
+            if !self.cpp_fields.is_empty() && p.enabled(&IDLItem::TypeField) {
+                writeln!(p)?;
+                for field in &self.cpp_fields {
+                    p.write_indent()?;
+                    p.write_idl(field)?;
+                }
+            }
+
             if !self.cpp_constructors.is_empty() && p.enabled(&IDLItem::TypeConstructor) {
                 writeln!(p)?;
                 for constructor in &self.cpp_constructors {
@@ -1004,6 +1012,30 @@ impl WriteIDL for crate::ZngurMethod {
     }
 }
 
+impl WriteIDL for crate::ZngurCppField {
+    fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
+        if p.enabled(&IDLItem::TypeField) {
+            let safety = if self.is_safe { "" } else { "unsafe " };
+            let access = match self.access {
+                crate::CppFieldAccess::Ref { unique, constness } => {
+                    let unique = if unique { "unique " } else { "" };
+                    format!("&{unique}{} ", constness.keyword())
+                }
+                crate::CppFieldAccess::Copy { constness } => format!("{} ", constness.keyword()),
+            };
+            let name = &self.name;
+            write!(p, "{safety}field {access}{name} (type = ")?;
+            p.write_idl(&self.ty)?;
+            write!(p, ")")?;
+            if let Some(rust_name) = &self.rust_name {
+                write!(p, " as {rust_name}")?;
+            }
+            writeln!(p, ";")?;
+        }
+        Ok(())
+    }
+}
+
 impl WriteIDL for crate::ZngurCppConstructor {
     fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
         if p.enabled(&IDLItem::TypeConstructor) {
@@ -1126,6 +1158,7 @@ fn print_spec() {
             }],
             cpp_methods: vec![],
             cpp_constructors: vec![],
+            cpp_fields: vec![],
             cpp_heap_allocated: None,
             cpp_ref: None,
             cpp_stack_owned: None,
@@ -1310,6 +1343,7 @@ fn test_write_cpp_type_idl() {
                 methods: vec![],
                 cpp_methods: vec![],
                 cpp_constructors: vec![],
+                cpp_fields: vec![],
                 cpp_heap_allocated: None,
                 cpp_ref: Some(crate::CppRef("::osmium::Way".into())),
                 cpp_stack_owned: None,
@@ -1341,6 +1375,7 @@ fn test_write_cpp_type_idl() {
                 }],
                 cpp_methods: vec![],
                 cpp_constructors: vec![],
+                cpp_fields: vec![],
                 cpp_heap_allocated: Some(crate::CppHeapAllocated("::x::Name".into())),
                 cpp_ref: None,
                 cpp_stack_owned: None,
@@ -1387,6 +1422,7 @@ fn print_template_type_vars_in_dyn_and_fn_traits() {
         methods: vec![],
         cpp_methods: vec![],
         cpp_constructors: vec![],
+        cpp_fields: vec![],
         cpp_heap_allocated: None,
         cpp_ref: None,
         cpp_stack_owned: None,

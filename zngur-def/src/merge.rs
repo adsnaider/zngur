@@ -54,6 +54,8 @@ pub enum ConflictSource {
     CppMethod(Box<crate::ZngurCppMethod>),
     /// A C++ constructor, by its Rust name.
     CppConstructor(String),
+    /// A C++ field accessor, by its Rust name.
+    CppField(String),
     /// A free C++ function, by its namespace and Rust name.
     CppFn(Vec<String>, String),
     Field(String),
@@ -191,6 +193,9 @@ impl Merge for ZngurType {
         merge_by_identity(self.cpp_constructors, &mut into.cpp_constructors, |a, b| {
             a.rust_name == b.rust_name
         })?;
+        merge_by_identity(self.cpp_fields, &mut into.cpp_fields, |a, b| {
+            a.rust_name() == b.rust_name()
+        })?;
         self.constructor.merge(&mut into.constructor)?;
         into.exhaustive = self.exhaustive && into.exhaustive;
         merge_by_identity(self.variants, &mut into.variants, |a, b| a.name == b.name)?;
@@ -226,6 +231,32 @@ impl Merge for crate::ZngurCppMethod {
                 (
                     ConflictSource::CppMethod(Box::new(self)),
                     ConflictSource::CppMethod(Box::new(into.clone())),
+                ),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Merge for crate::ZngurCppField {
+    fn merge(self, into: &mut Self) -> MergeResult {
+        let canonical = |f: &Self| crate::ZngurCppField {
+            name: f.name.clone(),
+            rust_name: f
+                .rust_name
+                .as_deref()
+                .filter(|&n| n != f.name)
+                .map(str::to_owned),
+            ty: f.ty.clone(),
+            access: f.access,
+            is_safe: f.is_safe,
+        };
+        if canonical(&self) != canonical(into) {
+            return Err(MergeFailure::Conflict(
+                "C++ field accessor mismatch".to_string(),
+                (
+                    ConflictSource::CppField(self.rust_name().to_owned()),
+                    ConflictSource::CppField(into.rust_name().to_owned()),
                 ),
             ));
         }

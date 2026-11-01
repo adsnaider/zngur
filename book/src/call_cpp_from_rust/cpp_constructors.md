@@ -20,7 +20,8 @@ type c++::geo::Point {
   `&'a const T` for a `const T&`, `&'a unique var T` for a `T&` that Rust uses uniquely, and
   C++-style raw pointers.
 - The name after `as` is required: Rust has no overloads, and no name is a better default than
-  another. It can't be the name of another constructor or member function of the type.
+  another. It can't be the name of another constructor, member function or field accessor of the
+  type.
 - Each constructor is `safe` or `unsafe`, like the functions in `extern "C++"` blocks. zngur warns
   about `safe` constructors that take [raw pointers](./cpp_pointers.md), which may be null or
   invalid. References are fine, so copy constructors can be `safe`.

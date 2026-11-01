@@ -1,12 +1,13 @@
-//! The C++ side of C++ functions, member functions and constructors that Rust calls
-//! (`ZngurCppFn`, `ZngurCppMethod`, `ZngurCppConstructor`): `extern "C"` functions that convert
-//! the arguments and call them directly, so that nobody has to write a forwarding body by hand.
+//! The C++ side of C++ functions, member functions, constructors and field accessors that Rust
+//! calls (`ZngurCppFn`, `ZngurCppMethod`, `ZngurCppConstructor`, `ZngurCppField`): `extern "C"`
+//! functions that convert the arguments and call them directly, so that nobody has to write a
+//! forwarding body by hand.
 
 use std::collections::HashMap;
 
 use zngur_def::{
-    CppConstness, CppIndirection, PrimitiveRustType, RustType, ZngurCppConstructor, ZngurCppFn,
-    ZngurCppMethod, ZngurMethodReceiver,
+    CppConstness, CppFieldAccess, CppIndirection, PrimitiveRustType, RustType, ZngurCppConstructor,
+    ZngurCppField, ZngurCppFn, ZngurCppMethod, ZngurMethodReceiver,
 };
 
 use crate::rust::IntoCpp;
@@ -178,6 +179,94 @@ impl BridgeRenderer<'_> {
         format!(
             "void {mangled_name}({}) {{\n  {check}{body}\n}}\n",
             params.join(", ")
+        )
+    }
+
+    /// The bridge function `mangled_name` for the accessor `field` of `owner` (whose C++ type is
+    /// `owner_cpp_type`), which returns a reference to the field or a copy of it.
+    pub fn field(
+        &self,
+        mangled_name: &str,
+        owner: &RustType,
+        owner_cpp_type: &str,
+        field: &ZngurCppField,
+    ) -> String {
+        let namespace = self.namespace;
+        let method = field.as_cpp_method();
+        let this = self.move_from_rust(&this_ptr(method.receiver_constness, owner), 0);
+        let name = &field.name;
+        let field_ty = self.cpp(&field.ty);
+        let union_check = format!(
+            "static_assert(!::std::is_union< {owner_cpp_type} >::value, \
+             \"field accessors on C++ unions aren't supported\");"
+        );
+        let member_check = format!(
+            "static_assert(::{namespace}::__zngur_non_union_member_ptr< decltype(&\
+             {owner_cpp_type}::{name}) >::value, \
+             \"`{owner_cpp_type}::{name}` must be a non-static, non-bitfield data member of a \
+             non-union C++ class\");"
+        );
+        let check_trait = if matches!(field.access, CppFieldAccess::Copy { .. })
+            && !self.stack_owned.contains_key(&field.ty)
+        {
+            format!("::{namespace}::__zngur_same_repr")
+        } else {
+            "::std::is_same".to_owned()
+        };
+        let check = format!(
+            "static_assert({check_trait}< ::std::remove_const< decltype({owner_cpp_type}::{name}) \
+             >::type, ::{namespace}::CppTypeOf< {field_ty} >::type >::value, \
+             \"`{owner_cpp_type}::{name}` doesn't have the type declared in the .zng file\");"
+        );
+        let const_check = if matches!(
+            field.access,
+            CppFieldAccess::Ref {
+                unique: true,
+                constness: CppConstness::Const,
+            }
+        ) {
+            format!(
+                "\n  static_assert(!::std::is_const< decltype({owner_cpp_type}::{name}) >::value, \
+                 \"`{owner_cpp_type}::{name}` is `const`, so `field &unique const` cannot be \
+                 used\");"
+            )
+        } else {
+            String::new()
+        };
+        let body = match field.access {
+            CppFieldAccess::Ref { constness, .. } => {
+                let mutability = match constness {
+                    CppConstness::Const => zngur_def::Mutability::Not,
+                    CppConstness::Var => zngur_def::Mutability::Mut,
+                };
+                let ptr = RustType::cpp_ptr(mutability, CppIndirection::Pointer, field.ty.clone());
+                format!(
+                    "{} __zngur_o = ::std::addressof(({this})->{name});\n  \
+                     ::{namespace}::__zngur_internal_move_to_rust(o, __zngur_o);",
+                    self.cpp(&ptr)
+                )
+            }
+            // A copy of a C++ class, constructed in place in the Rust value (whose constness is
+            // only a marker).
+            CppFieldAccess::Copy { .. } if self.stack_owned.contains_key(&field.ty) => {
+                format!(
+                    "::new (static_cast<void*>(o)) {}(({this})->{name});",
+                    self.stack_owned[&field.ty]
+                )
+            }
+            // A copy of a builtin or a pointer (`zngur_lib::Cpp<T, Const>` has the same layout as
+            // `T`), also constructed in place.
+            CppFieldAccess::Copy { .. } => {
+                format!(
+                    "::new (static_cast<void*>(o)) ::{namespace}::CppTypeOf< {field_ty} \
+                     >::type(static_cast< ::{namespace}::CppTypeOf< {field_ty} \
+                     >::type >(({this})->{name}));"
+                )
+            }
+        };
+        format!(
+            "void {mangled_name}(uint8_t* i0, uint8_t* o) {{\n  {union_check}\n  {member_check}\n  \
+             {check}{const_check}\n  {body}\n}}\n"
         )
     }
 

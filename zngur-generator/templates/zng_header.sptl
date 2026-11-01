@@ -66,6 +66,13 @@ namespace {{ self.cpp_namespace }} {
     return dest;
   }
 
+  template<typename T>
+  struct __zngur_non_union_member_ptr : ::std::false_type {};
+
+  template<typename T, typename C>
+  struct __zngur_non_union_member_ptr<T C::*>
+      : ::std::integral_constant<bool, !::std::is_union<C>::value> {};
+
   // Polyfill for C++20.
   template<typename T, typename ::std::enable_if<!::std::is_array<T>::value, bool>::type = true>
   void __zng_destroy_at(T* p) {

@@ -1732,9 +1732,7 @@ use ::std::string::String as MyString;
 
 mod c++::a {
     type Name {
-        #layout(size = 16, align = 8);
-        #cpp_heap_allocated "::x";
-        field s (offset = auto, type = MyString);
+        safe fn take<'a>(&'a const self, MyString);
     }
 }
     "#,
@@ -1744,10 +1742,10 @@ mod c++::a {
     let ty = parsed.spec.types.first().expect("no type parsed");
     // The type's own declaration still composes onto the c++:: prefix:
     assert_cpp(&["a", "Name"], &ty.ty);
-    // But the aliased field type resolves as the real Rust path, not
-    // `Cpp(["a", "s"])`:
-    let field = ty.fields.first().expect("no field parsed");
-    assert_ty_path!(["std", "string", "String"], &field.ty);
+    // But the aliased argument type resolves as the real Rust path, not
+    // `Cpp(["a", "MyString"])`:
+    let method = ty.cpp_methods.first().expect("no method parsed");
+    assert_ty_path!(["std", "string", "String"], &method.inputs[0]);
 }
 
 #[test]
@@ -1758,9 +1756,7 @@ use std::string::String as MyString;
 
 mod c++::a {
     type Name {
-        #layout(size = 16, align = 8);
-        #cpp_heap_allocated "::x";
-        field s (offset = auto, type = MyString);
+        safe fn take<'a>(&'a const self, MyString);
     }
 }
     "#,
@@ -1769,8 +1765,8 @@ mod c++::a {
     );
     let ty = parsed.spec.types.first().expect("no type parsed");
     assert_cpp(&["a", "Name"], &ty.ty);
-    let field = ty.fields.first().expect("no field parsed");
-    assert_ty_path!(["std", "string", "String"], &field.ty);
+    let method = ty.cpp_methods.first().expect("no method parsed");
+    assert_ty_path!(["std", "string", "String"], &method.inputs[0]);
 }
 
 #[test]
@@ -5038,12 +5034,12 @@ type c++::B {
 }
 "#,
         expect![[r#"
-            Error: `get` is already the Rust name of another constructor or member function of this type
+            Error: `get` is already the Rust name of another member of this type (a constructor, member function or field accessor)
                ╭─[ test.zng:4:5 ]
                │
              4 │     safe fn get<'a>(&'a unique var self) -> i32;
                │     ──────────────────────┬─────────────────────  
-               │                           ╰─────────────────────── `get` is already the Rust name of another constructor or member function of this type
+               │                           ╰─────────────────────── `get` is already the Rust name of another member of this type (a constructor, member function or field accessor)
             ───╯
         "#]],
     );
@@ -5055,12 +5051,12 @@ type c++::B {
 }
 "#,
         expect![[r#"
-            Error: `get` is already the Rust name of another constructor or member function of this type
+            Error: `get` is already the Rust name of another member of this type (a constructor, member function or field accessor)
                ╭─[ test.zng:4:5 ]
                │
              4 │     safe fn other<'a>(&'a const self) -> i32 as get;
                │     ────────────────────────┬───────────────────────  
-               │                             ╰───────────────────────── `get` is already the Rust name of another constructor or member function of this type
+               │                             ╰───────────────────────── `get` is already the Rust name of another member of this type (a constructor, member function or field accessor)
             ───╯
         "#]],
     );
@@ -5988,37 +5984,45 @@ type c++::B {
     safe fn new(&const self) -> i32;
     safe fn value(&const self) -> i32;
     safe fn value(&const self) -> i64;
+    field &const value (type = i32);
     safe constructor() as value;
 }
 "#,
         expect![[r#"
-            Error: `new` is already the Rust name of another constructor or member function of this type
+            Error: `new` is already the Rust name of another member of this type (a constructor, member function or field accessor)
                ╭─[ test.zng:7:5 ]
                │
              7 │     unsafe constructor(i64) as new;
                │     ───────────────┬───────────────  
-               │                    ╰───────────────── `new` is already the Rust name of another constructor or member function of this type
+               │                    ╰───────────────── `new` is already the Rust name of another member of this type (a constructor, member function or field accessor)
             ───╯
-            Error: `new` is already the Rust name of another constructor or member function of this type
+            Error: `new` is already the Rust name of another member of this type (a constructor, member function or field accessor)
                ╭─[ test.zng:8:5 ]
                │
              8 │     safe fn new(&const self) -> i32;
                │     ────────────────┬───────────────  
-               │                     ╰───────────────── `new` is already the Rust name of another constructor or member function of this type
+               │                     ╰───────────────── `new` is already the Rust name of another member of this type (a constructor, member function or field accessor)
             ───╯
-            Error: `value` is already the Rust name of another constructor or member function of this type
+            Error: `value` is already the Rust name of another member of this type (a constructor, member function or field accessor)
                 ╭─[ test.zng:10:5 ]
                 │
              10 │     safe fn value(&const self) -> i64;
                 │     ─────────────────┬────────────────  
-                │                      ╰────────────────── `value` is already the Rust name of another constructor or member function of this type
+                │                      ╰────────────────── `value` is already the Rust name of another member of this type (a constructor, member function or field accessor)
             ────╯
-            Error: `value` is already the Rust name of another constructor or member function of this type
+            Error: `value` is already the Rust name of another member of this type (a constructor, member function or field accessor)
                 ╭─[ test.zng:11:5 ]
                 │
-             11 │     safe constructor() as value;
+             11 │     field &const value (type = i32);
+                │     ────────────────┬───────────────  
+                │                     ╰───────────────── `value` is already the Rust name of another member of this type (a constructor, member function or field accessor)
+            ────╯
+            Error: `value` is already the Rust name of another member of this type (a constructor, member function or field accessor)
+                ╭─[ test.zng:12:5 ]
+                │
+             12 │     safe constructor() as value;
                 │     ──────────────┬─────────────  
-                │                   ╰─────────────── `value` is already the Rust name of another constructor or member function of this type
+                │                   ╰─────────────── `value` is already the Rust name of another member of this type (a constructor, member function or field accessor)
             ────╯
         "#]],
     );
@@ -6064,12 +6068,12 @@ type c++::B {
                │     ──────────────┬──────────────  
                │                   ╰──────────────── conflicts with the declaration here.
             ───╯
-            Error: `make` is already the Rust name of another constructor or member function of this type
+            Error: `make` is already the Rust name of another member of this type (a constructor, member function or field accessor)
                ╭─[ ./a.zng:5:5 ]
                │
              5 │     safe fn make() -> c++::B;
                │     ────────────┬────────────  
-               │                 ╰────────────── `make` is already the Rust name of another constructor or member function of this type
+               │                 ╰────────────── `make` is already the Rust name of another member of this type (a constructor, member function or field accessor)
                │
                ├─[ test.zng:4:5 ]
                │
@@ -6463,6 +6467,7 @@ type c++::B {
             ],
             is_safe: true,
         }],
+        cpp_fields: vec![],
         constructor: None,
         variants: vec![],
         fields: vec![],
@@ -6991,5 +6996,599 @@ safe fn c++::ext::Bar::sub::helper() -> i32;
             ───╯
         "#]],
         &resolver,
+    );
+}
+
+#[test]
+fn cpp_fields_parse() {
+    use zngur_def::{CppConstness, CppFieldAccess, PrimitiveRustType};
+
+    let parsed = parse_str(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+
+    field &const x (type = i32);
+    safe field &unique var x (type = i32) as x_mut;
+    field &var x (type = i32) as x_var;
+    field &unique const x (type = i32) as x_unique_const;
+    field const x (type = i32) as x_const_copy;
+    field var x (type = i32) as x_copy;
+    field &const flag (type = bool);
+    field &const flag_ptr (type = const bool*);
+    unsafe field &var next (type = c++::B*) as next_var;
+}
+"#,
+        NullCfg,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    let ty = parsed.spec.types.first().expect("no type parsed");
+    let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+    let bool_ty = RustType::Primitive(PrimitiveRustType::Bool);
+    let fields = &ty.cpp_fields;
+    assert_eq!(fields.len(), 9);
+    assert_eq!(fields[0].name, "x");
+    assert_eq!(fields[0].rust_name(), "x");
+    assert_eq!(fields[0].ty, i32);
+    assert!(fields[0].is_safe);
+    let reference = |unique, constness| CppFieldAccess::Ref { unique, constness };
+    assert_eq!(fields[0].access, reference(false, CppConstness::Const));
+    assert_eq!(fields[1].name, "x");
+    assert_eq!(fields[1].rust_name(), "x_mut");
+    assert_eq!(fields[1].access, reference(true, CppConstness::Var));
+    assert!(fields[1].is_safe);
+    assert_eq!(fields[2].access, reference(false, CppConstness::Var));
+    assert_eq!(fields[3].access, reference(true, CppConstness::Const));
+    assert_eq!(
+        fields[4].access,
+        CppFieldAccess::Copy {
+            constness: CppConstness::Const
+        }
+    );
+    assert_eq!(
+        fields[5].access,
+        CppFieldAccess::Copy {
+            constness: CppConstness::Var
+        }
+    );
+    assert_eq!(fields[6].ty, bool_ty);
+    assert!(!fields[8].is_safe);
+    // Fields of Rust types are unaffected.
+    assert!(ty.fields.is_empty());
+}
+
+#[test]
+fn cpp_field_without_constness_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    field x (type = i32);
+}
+"#,
+        expect![[r#"
+            Error: a C++ field accessor says what it returns: `field &const x ...` / `field &var x ...` (a reference to the field, `unique` if Rust uses it uniquely), or `field const x ...` / `field var x ...` (a copy of it)
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     field x (type = i32);
+               │     ──────────┬──────────  
+               │               ╰──────────── a C++ field accessor says what it returns: `field &const x ...` / `field &var x ...` (a reference to the field, `unique` if Rust uses it uniquely), or `field const x ...` / `field var x ...` (a copy of it)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_field_unique_without_reference_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    field unique var x (type = i32);
+}
+"#,
+        expect![[r#"
+            Error: `unique` only applies to references: `field &unique var x ...` returns a unique reference to the field, and `field var x ...` a copy of it
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     field unique var x (type = i32);
+               │     ────────────────┬───────────────  
+               │                     ╰───────────────── `unique` only applies to references: `field &unique var x ...` returns a unique reference to the field, and `field var x ...` a copy of it
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_field_copy_of_a_class_needs_a_by_value_type() {
+    check_fail(
+        r#"
+type c++::A {}
+
+type c++::B {
+    field var a (type = c++::A);
+}
+"#,
+        expect![[r#"
+            Error: the accessor `a` returns a copy of the field `a`, but Rust doesn't hold `c++::A` by value (it needs a layout and `#trivially_relocatable`); return a reference instead (`field &const a ...`)
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     field var a (type = c++::A);
+               │     ──────────────┬─────────────  
+               │                   ╰─────────────── the accessor `a` returns a copy of the field `a`, but Rust doesn't hold `c++::A` by value (it needs a layout and `#trivially_relocatable`); return a reference instead (`field &const a ...`)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_field_invalid_types_are_rejected() {
+    for (decl, expected) in [
+        (
+            "field &const s (type = ::std::string::String);",
+            "the field `s` has the type `::std::string::String`, but C++ fields are C++ objects",
+        ),
+        (
+            "field &const r (type = i32&);",
+            "the field `r` has the reference type `i32&`, and fields of reference type aren't supported",
+        ),
+        (
+            "field &const r (type = const c++::B&);",
+            "the field `r` has the reference type `const c++::B&`, and fields of reference type aren't supported",
+        ),
+        (
+            "field &const p (type = char*);",
+            "`char` can't be a C++ object",
+        ),
+        (
+            "field &const p (type = str*);",
+            "C++ pointers and references (`T*`, `T&`) can only point to C++ objects (`c++::` types, builtins and C++ pointers), not `str`",
+        ),
+        (
+            "field &const p (type = crate::Foo*);",
+            "C++ pointers and references (`T*`, `T&`) can only point to C++ objects (`c++::` types, builtins and C++ pointers), not `crate::Foo`",
+        ),
+        (
+            "field &const x (type = &'a i32);",
+            "lifetimes (`'a`) aren't supported in the signatures of C++ fields yet",
+        ),
+        (
+            "field &const x (type = crate::Ref<'a>);",
+            "lifetimes (`'a`) aren't supported in the signatures of C++ fields yet",
+        ),
+    ] {
+        let src = format!(
+            "type crate::Foo {{ #layout(size = 4, align = 4); }}\n\
+             type<'a> crate::Ref<'a> {{ #layout(size = 8, align = 8); }}\n\
+             type c++::B {{\n    {decl}\n}}\n"
+        );
+        let r = catch_unwind(|| {
+            let _ = parse_str(&src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(err.contains(expected), "expected `{expected}`, got:\n{err}");
+    }
+}
+
+#[test]
+fn cpp_field_on_rust_type_and_heap_allocated_type_are_rejected() {
+    check_fail(
+        r#"
+type crate::Foo {
+    #layout(size = 8, align = 4);
+    field const x (type = i32);
+}
+
+type c++::Heap {
+    #cpp_heap_allocated;
+    #heap_allocated;
+    field &const x (type = i32);
+}
+"#,
+        expect![[r#"
+            Error: C++ field accessors (`field name (type = T)`) can only be declared on `c++::` types
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     field const x (type = i32);
+               │     ─────────────┬─────────────  
+               │                  ╰─────────────── C++ field accessors (`field name (type = T)`) can only be declared on `c++::` types
+            ───╯
+            Error: C++ field accessors (`field name (type = T)`) cannot be declared on `#cpp_heap_allocated` types
+                ╭─[ test.zng:10:5 ]
+                │
+             10 │     field &const x (type = i32);
+                │     ──────────────┬─────────────  
+                │                   ╰─────────────── C++ field accessors (`field name (type = T)`) cannot be declared on `#cpp_heap_allocated` types
+            ────╯
+        "#]],
+    );
+}
+
+#[test]
+fn safe_mutable_cpp_ptr_field_warns_unless_unsafe_or_allowed() {
+    let mut warnings = vec![];
+    let _ = parse_str(
+        r#"
+type c++::B {
+    field &var next (type = c++::B*);
+    field &unique var prev (type = i32*);
+    field &unique const tail (type = c++::B*);
+    // Read-only and copy accessors, and `unsafe field`, do not warn.
+    field &const next_const (type = c++::B*);
+    field var next_copy (type = c++::B*);
+    unsafe field &var next_unsafe (type = c++::B*);
+    unsafe field &unique const tail_unsafe (type = c++::B*);
+}
+"#,
+        NullCfg,
+        |w| warnings.push(w.to_owned()),
+    );
+    assert_eq!(warnings.len(), 3, "{warnings:?}");
+    assert!(
+        warnings
+            .iter()
+            .all(|w| w.contains("exposes mutable access to a raw pointer")),
+        "{warnings:?}"
+    );
+
+    let mut allowed_warnings = vec![];
+    let _ = parse_str(
+        r#"
+#allow(safe_raw_pointer)
+type c++::B {
+    field &var next (type = c++::B*);
+}
+"#,
+        NullCfg,
+        |w| allowed_warnings.push(w.to_owned()),
+    );
+    assert!(allowed_warnings.is_empty(), "{allowed_warnings:?}");
+}
+
+#[test]
+fn cpp_fields_merge_and_conflict_across_files() {
+    let resolver = MockFilesystem::new(vec![(
+        "./a.zng",
+        r#"
+type c++::B {
+    field &const x (type = i32);
+    field &const y (type = i32);
+    safe fn clash<'a>(&'a const self) -> i32;
+}
+"#,
+    )]);
+
+    let parsed = parse_str_with_resolver(
+        r#"
+merge "./a.zng";
+type c++::B {
+    field &const x (type = i32);
+    field &unique var x (type = i32) as x_mut;
+}
+"#,
+        NullCfg,
+        &resolver,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    let names: Vec<_> = parsed.spec.types[0]
+        .cpp_fields
+        .iter()
+        .map(|f| f.rust_name())
+        .collect();
+    assert_eq!(names, ["x", "x_mut", "y"]);
+
+    check_import_fail(
+        r#"
+merge "./a.zng";
+type c++::B {
+    field &var y (type = i32);
+    field &const z (type = i32) as clash;
+}
+"#,
+        expect![[r#"
+            Error: C++ field accessor mismatch
+               ╭─[ ./a.zng:2:6 ]
+               │
+             2 │ type c++::B {
+               │      ───┬──  
+               │         ╰──── C++ field accessor mismatch
+               │ 
+             4 │     field &const y (type = i32);
+               │     ──────────────┬─────────────  
+               │                   ╰─────────────── declaration here ...
+               │
+               ├─[ test.zng:4:5 ]
+               │
+             4 │     field &var y (type = i32);
+               │     ─────────────┬────────────  
+               │                  ╰────────────── conflicts with the declaration here.
+            ───╯
+            Error: `clash` is already the Rust name of another member of this type (a constructor, member function or field accessor)
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     field &const z (type = i32) as clash;
+               │     ──────────────────┬──────────────────  
+               │                       ╰──────────────────── `clash` is already the Rust name of another member of this type (a constructor, member function or field accessor)
+               │
+               ├─[ ./a.zng:5:5 ]
+               │
+             5 │     safe fn clash<'a>(&'a const self) -> i32;
+               │     ────────────────────┬────────────────────  
+               │                         ╰────────────────────── also declared here
+            ───╯
+        "#]],
+        &resolver,
+    );
+}
+
+#[test]
+fn template_types_substitute_and_check_cpp_fields() {
+    use zngur_def::{CppIndirection, Mutability};
+
+    let parsed = parse_str(
+        r#"
+#unstable(template_types)
+type<T> T {
+    unsafe field &var next (type = T*) as next_var;
+}
+type c++::Node {}
+"#,
+        NullCfg,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    let node = &parsed.spec.types[0];
+    assert_eq!(node.cpp_fields.len(), 1);
+    assert_eq!(
+        node.cpp_fields[0].ty,
+        RustType::cpp_ptr(
+            Mutability::Mut,
+            CppIndirection::Pointer,
+            RustType::Cpp(vec!["Node".to_owned()])
+        )
+    );
+
+    for (inst, expected) in [
+        (
+            "char",
+            "the field `v` has the type `char`, but C++ fields are C++ objects",
+        ),
+        (
+            "::std::string::String",
+            "the field `v` has the type `::std::string::String`, but C++ fields are C++ objects",
+        ),
+    ] {
+        let src = format!(
+            "#unstable(template_types)\n\
+             type<T> crate::Box<T> {{ #layout(size = 8, align = 8); field &const v (type = T); }}\n\
+             type crate::Box<{inst}> {{}}\n"
+        );
+        let r = catch_unwind(|| {
+            let _ = parse_str(&src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(err.contains(expected), "expected `{expected}`, got:\n{err}");
+        assert!(err.contains("in template instantiated here"), "got:\n{err}");
+    }
+}
+
+#[test]
+fn cpp_names_can_be_zngur_keywords() {
+    let parsed = parse_str(
+        r#"
+type c++::a::B {
+    field &const type (type = i32) as type_;
+    unsafe fn match<'a>(&'a const self, i32) -> i32 as match_;
+}
+
+mod c++::a {
+    safe fn use(i32) as use_;
+}
+"#,
+        NullCfg,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    let ty = &parsed.spec.types[0];
+    assert_eq!(ty.cpp_fields[0].name, "type");
+    assert_eq!(ty.cpp_fields[0].rust_name(), "type_");
+    assert_eq!(ty.cpp_methods[0].cpp_name, "match");
+    assert_eq!(ty.cpp_methods[0].rust_name(), "match_");
+    assert_eq!(parsed.spec.cpp_funcs[0].cpp_name, "use");
+    assert_eq!(parsed.spec.cpp_funcs[0].rust_name(), "use_");
+
+    check_fail(
+        r#"
+type c++::a::B {
+    field &const type (type = i32);
+    field &const x (type = i32) as match;
+    field &const as_const (type = i32);
+}
+"#,
+        expect![[r#"
+            Error: `type` is a Rust keyword; give this C++ field accessor a non-keyword Rust name with `as <rust_name>`
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     field &const type (type = i32);
+               │     ───────────────┬───────────────  
+               │                    ╰───────────────── `type` is a Rust keyword; give this C++ field accessor a non-keyword Rust name with `as <rust_name>`
+            ───╯
+            Error: `match` is a Rust keyword and cannot be used as the Rust function name in `as match`
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     field &const x (type = i32) as match;
+               │     ──────────────────┬──────────────────  
+               │                       ╰──────────────────── `match` is a Rust keyword and cannot be used as the Rust function name in `as match`
+            ───╯
+            Error: `as_const` collides with an inherent conversion method on `c++::` wrappers; rename it with `as <rust_name>`
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     field &const as_const (type = i32);
+               │     ─────────────────┬─────────────────  
+               │                      ╰─────────────────── `as_const` collides with an inherent conversion method on `c++::` wrappers; rename it with `as <rust_name>`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_field_copy_with_imported_cpp_types() {
+    let resolver = MockFilesystem::new(vec![(
+        "./base.zng",
+        r#"
+#crate base_bindings
+type c++::base::ByVal {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+}
+type c++::base::RefOnly {}
+"#,
+    )]);
+
+    let parsed = parse_str_with_resolver(
+        r#"
+import "./base.zng";
+type c++::Owner {
+    field var val (type = c++::base::ByVal);
+    field const val_const (type = c++::base::ByVal);
+    field &const ref_only (type = c++::base::RefOnly);
+}
+"#,
+        NullCfg,
+        &resolver,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    assert_eq!(parsed.spec.types[0].cpp_fields.len(), 3);
+
+    check_import_fail(
+        r#"
+import "./base.zng";
+type c++::Owner {
+    field var ref_only (type = c++::base::RefOnly);
+}
+"#,
+        expect![[r#"
+            Error: the accessor `ref_only` returns a copy of the field `ref_only`, but Rust doesn't hold `c++::base::RefOnly` by value (it needs a layout and `#trivially_relocatable`); return a reference instead (`field &const ref_only ...`)
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     field var ref_only (type = c++::base::RefOnly);
+               │     ───────────────────────┬───────────────────────  
+               │                            ╰───────────────────────── the accessor `ref_only` returns a copy of the field `ref_only`, but Rust doesn't hold `c++::base::RefOnly` by value (it needs a layout and `#trivially_relocatable`); return a reference instead (`field &const ref_only ...`)
+            ───╯
+        "#]],
+        &resolver,
+    );
+
+    // Incomplete imports (e.g. an imported module whose own `import`s aren't resolved when parsed
+    // in isolation, or a file with an earlier import/merge error) do not falsely reject an
+    // imported `field var` type as non-by-value.
+    let transitive_resolver = MockFilesystem::new(vec![
+        (
+            "./base.zng",
+            r#"
+#crate base_bindings
+type c++::base::ByVal {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+}
+"#,
+        ),
+        (
+            "./mid.zng",
+            r#"
+#crate mid_bindings
+import "./base.zng";
+type c++::mid::MidOwner {
+    field var by_val (type = c++::base::ByVal);
+}
+"#,
+        ),
+    ]);
+    let via_mid = parse_str_with_resolver(
+        r#"
+import "./mid.zng";
+type c++::Top {
+    field &const m (type = c++::mid::MidOwner);
+}
+"#,
+        NullCfg,
+        &transitive_resolver,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    assert_eq!(via_mid.spec.types[0].cpp_fields.len(), 1);
+
+    // Undeclared `field var` types emit a single not-declared error rather than a duplicate
+    // not-by-value error.
+    check_fail(
+        r#"
+type c++::Owner {
+    field var u (type = c++::Unknown);
+}
+"#,
+        expect![[r#"
+            Error: `c++::Unknown` is not declared or imported
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     field var u (type = c++::Unknown);
+               │     ─────────────────┬────────────────  
+               │                      ╰────────────────── `c++::Unknown` is not declared or imported
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn rust_field_syntax_on_cpp_type_is_rejected() {
+    check_fail(
+        r#"
+type c++::Point {
+    field x (offset = 0, type = i32);
+    field y (offset = auto, type = i32);
+}
+"#,
+        expect![[r#"
+            Error: C++ field accessors omit `offset` and say what they return (e.g. `field &const x (type = ...);` or `field var x (type = ...);`)
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     field x (offset = 0, type = i32);
+               │     ────────────────┬────────────────  
+               │                     ╰────────────────── C++ field accessors omit `offset` and say what they return (e.g. `field &const x (type = ...);` or `field var x (type = ...);`)
+            ───╯
+            Error: C++ field accessors omit `offset` and say what they return (e.g. `field &const y (type = ...);` or `field var y (type = ...);`)
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     field y (offset = auto, type = i32);
+               │     ──────────────────┬─────────────────  
+               │                       ╰─────────────────── C++ field accessors omit `offset` and say what they return (e.g. `field &const y (type = ...);` or `field var y (type = ...);`)
+            ───╯
+        "#]],
+    );
+
+    let r = catch_unwind(|| {
+        let _ = parse_str(
+            r#"
+#unstable(template_types)
+type<T> T {
+    field x (offset = 0, type = i32);
+}
+type c++::Point {}
+"#,
+            NullCfg,
+            |_| {},
+        );
+    });
+    let err = r
+        .unwrap_err()
+        .downcast::<ErrorText>()
+        .expect("expected ErrorText")
+        .0;
+    assert!(
+        err.contains("C++ field accessors omit `offset` and say what they return"),
+        "unexpected error:\n{err}"
     );
 }

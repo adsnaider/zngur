@@ -25,6 +25,10 @@ Constructed CppType 0 0
 CppType 0 0
 sum_from_ptr = 7
 twice = 42 2.5
+Constructed CppType 1 2
+fields = 101 2
+CppType 101 2
+nodes = 1 -> 2, type = 5
 Constructed CppType 2 3
 const sum() = 5
 Constructed CppType 4 5

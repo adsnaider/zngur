@@ -961,6 +961,8 @@ type c++::a::B {
     safe constructor() as new;
     safe constructor(i32, i32) as from_xy;
     unsafe constructor(const c++::a::B&) as copy_from;
+    field &const x (type = i32);
+    field &unique var x (type = i32) as x_mut;
 }
 
 type crate::Foo {
@@ -976,6 +978,9 @@ type crate::Foo {
             type c++::a::B {
                 #layout(size = 8, align = 4);
                 #trivially_relocatable;
+
+                field &const x (type = i32);
+                field &unique var x (type = i32) as x_mut;
 
                 safe constructor() as new;
                 safe constructor(i32, i32) as from_xy;
@@ -1099,6 +1104,15 @@ type c++::a::B {
     safe fn builtins<'a>(&'a var self, &'a const i32, &'a var i32, &'a unique var i32, &'a unique const i32, &'a i32, &'a mut i32) -> &'a var bool;
     safe fn peek<'a>(&'a unique const self) -> &'a const c++::a::B*;
     unsafe fn raw(c++::a::B*, const i32*);
+    field &const x (type = i32);
+    field &var x (type = i32) as x_var;
+    field &unique var x (type = i32) as x_mut;
+    field &unique const x (type = i32) as x_unique_const;
+    field const x (type = i32) as x_const_copy;
+    field &const type (type = i32) as type_;
+    field var self_copy (type = c++::a::B);
+    unsafe field &var next (type = c++::a::B*) as next_var;
+    field var next (type = c++::a::B*) as next_copy;
 }
 
 type crate::Foo {
@@ -1121,6 +1135,16 @@ extern "C++" {
             type c++::a::B {
                 #layout(size = 16, align = 8);
                 #trivially_relocatable;
+
+                field &const x (type = i32);
+                field &var x (type = i32) as x_var;
+                field &unique var x (type = i32) as x_mut;
+                field &unique const x (type = i32) as x_unique_const;
+                field const x (type = i32) as x_const_copy;
+                field &const type (type = i32) as type_;
+                field var self_copy (type = c++::a::B);
+                unsafe field &var next (type = c++::a::B*) as next_var;
+                field var next (type = c++::a::B*) as next_copy;
 
                 safe fn refs<'a>(&'a const self, &'a const c++::a::B, &'a var c++::a::B, &'a unique var c++::a::B, &'a unique const c++::a::B);
                 safe fn builtins<'a>(&'a var self, &'a const i32, &'a var i32, &'a unique var i32, &'a unique const i32, &'a i32, &'a mut i32) -> &'a var bool;

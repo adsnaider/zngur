@@ -10,13 +10,13 @@ use chumsky::{input::MapExtra, prelude::*};
 use itertools::{Either, Itertools};
 
 use zngur_def::{
-    AdditionalIncludes, ConflictSource, ConvertPanicToException, CppConstness, CppHeapAllocated,
-    CppIndirection, CppRef, CppStackOwned, Import, LayoutPolicy, Lifetime, Merge, MergeFailure,
-    ModuleImport, Mutability, PrimitiveRustType, RustPathAndGenerics, RustTrait, RustType,
-    TriviallyRelocatable, TypeVar, ZngurConstructor, ZngurCppConstructor, ZngurCppFn,
-    ZngurCppMethod, ZngurExternCppFn, ZngurExternCppImpl, ZngurField, ZngurFn, ZngurMethod,
-    ZngurMethodDetails, ZngurMethodReceiver, ZngurSpec, ZngurTrait, ZngurType, ZngurVariant,
-    ZngurWellknownTrait, cpp_handle_field_name, cpp_handle_keyword,
+    AdditionalIncludes, ConflictSource, ConvertPanicToException, CppConstness, CppFieldAccess,
+    CppHeapAllocated, CppIndirection, CppRef, CppStackOwned, Import, LayoutPolicy, Lifetime, Merge,
+    MergeFailure, ModuleImport, Mutability, PrimitiveRustType, RustPathAndGenerics, RustTrait,
+    RustType, TriviallyRelocatable, TypeVar, ZngurConstructor, ZngurCppConstructor, ZngurCppField,
+    ZngurCppFn, ZngurCppMethod, ZngurExternCppFn, ZngurExternCppImpl, ZngurField, ZngurFn,
+    ZngurMethod, ZngurMethodDetails, ZngurMethodReceiver, ZngurSpec, ZngurTrait, ZngurType,
+    ZngurVariant, ZngurWellknownTrait, cpp_handle_field_name, cpp_handle_keyword,
 };
 
 pub type Span = SimpleSpan<usize>;
@@ -576,6 +576,19 @@ enum ParsedTypeItem<'a> {
         inputs: Vec<ParsedRustType<'a>>,
         rust_name: Option<&'a str>,
     },
+    /// An accessor for a field of a C++ type:
+    /// `[safe | unsafe] field [& [unique]] (const | var) name (type = T) [as rust_name];`.
+    /// `constness` is `None` if it's missing, and `unique` without `&` is an error, both reported
+    /// when it's processed.
+    CppField {
+        is_safe: bool,
+        is_ref: bool,
+        unique: bool,
+        constness: Option<CppConstness>,
+        name: &'a str,
+        ty: ParsedRustType<'a>,
+        rust_name: Option<&'a str>,
+    },
     CppValue {
         field: &'a str,
         cpp_type: &'a str,
@@ -1092,14 +1105,14 @@ fn is_rust_keyword(name: &str) -> bool {
     )
 }
 
-fn rust_keyword_fn_error(name: &str, has_rename: bool) -> String {
+fn rust_keyword_fn_error(what: &str, name: &str, has_rename: bool) -> String {
     if has_rename {
         format!(
             "`{name}` is a Rust keyword and cannot be used as the Rust function name in `as {name}`"
         )
     } else {
         format!(
-            "`{name}` is a Rust keyword; give this C++ function a non-keyword Rust name with \
+            "`{name}` is a Rust keyword; give this {what} a non-keyword Rust name with \
              `as <rust_name>`"
         )
     }
@@ -1108,12 +1121,13 @@ fn rust_keyword_fn_error(name: &str, has_rename: bool) -> String {
 fn check_rust_fn_name(
     ctx: &mut ParseContext,
     span: Span,
+    what: &str,
     name: &str,
     has_rename: bool,
     is_type_member: bool,
 ) -> bool {
     if is_rust_keyword(name) {
-        ctx.add_error_str(&rust_keyword_fn_error(name, has_rename), span);
+        ctx.add_error_str(&rust_keyword_fn_error(what, name, has_rename), span);
         return false;
     }
     if is_type_member && matches!(name, "as_const" | "as_const_mut" | "into_const") {
@@ -1248,6 +1262,46 @@ fn check_cpp_signature_lints_at(
     }
 }
 
+fn check_cpp_field_lints(ctx: &mut ParseContext, span: Span, field: &ZngurCppField) {
+    if !ctx.allows("safe_raw_pointer")
+        && field.is_safe
+        && matches!(
+            field.access,
+            CppFieldAccess::Ref {
+                unique,
+                constness,
+            } if unique || constness == CppConstness::Var
+        )
+        && contains_raw_ptr(&field.ty)
+    {
+        ctx.add_warning_str(
+            "this C++ field accessor is `safe` but exposes mutable access to a raw pointer, which \
+             may be set to a null or invalid pointer; declare it `unsafe field` (or silence this \
+             with `#allow(safe_raw_pointer)`)",
+            span,
+        );
+    }
+}
+
+/// Reports named lifetimes in `types`, for constructs like C++ fields that don't support them.
+fn reject_lifetimes<'t>(
+    ctx: &mut ParseContext,
+    span: Span,
+    what: &str,
+    types: impl IntoIterator<Item = &'t RustType>,
+) -> bool {
+    match types.into_iter().flat_map(RustType::free_lifetimes).next() {
+        Some(l) => {
+            ctx.add_error_str(
+                &format!("lifetimes (`{l}`) aren't supported in the signatures of {what} yet"),
+                span,
+            );
+            false
+        }
+        None => true,
+    }
+}
+
 /// Whether `ty` is or contains a raw pointer (a C++-style `T&` / `T*`, or `*const T` / `*mut T`),
 /// which may be null or invalid.
 fn contains_raw_ptr(ty: &RustType) -> bool {
@@ -1271,17 +1325,19 @@ fn contains_raw_ptr(ty: &RustType) -> bool {
     }
 }
 
-/// Reports a C++ member whose Rust name `name` an earlier constructor or member function of the
-/// same type already has, and returns whether there was none.
+/// Reports a C++ member whose Rust name `name` an earlier constructor, member function or field
+/// accessor of the same type already has, and returns whether there was none.
 fn check_member_name(
     ctx: &mut ParseContext,
     span: Span,
     name: &str,
     constructors: &[ZngurCppConstructor],
     methods: &[ZngurCppMethod],
+    fields: &[ZngurCppField],
 ) -> bool {
     let taken = constructors.iter().any(|c| c.rust_name == name)
-        || methods.iter().any(|m| m.rust_name() == name);
+        || methods.iter().any(|m| m.rust_name() == name)
+        || fields.iter().any(|f| f.rust_name() == name);
     if taken {
         ctx.add_error_str(&duplicate_member_name(name), span);
     }
@@ -1290,7 +1346,8 @@ fn check_member_name(
 
 fn duplicate_member_name(name: &str) -> String {
     format!(
-        "`{name}` is already the Rust name of another constructor or member function of this type"
+        "`{name}` is already the Rust name of another member of this type \
+         (a constructor, member function or field accessor)"
     )
 }
 
@@ -1441,8 +1498,8 @@ fn is_valid_cpp_object_inner(ty: &RustType) -> bool {
 }
 
 /// Checks `RustType::Cpp(_)` occurrences in the signature of a direct C++ item (member function,
-/// constructor, free function): every `c++::` type must be declared locally or imported (when
-/// `check_undeclared` is true), and can only appear by value if it is held by value in Rust
+/// constructor, free function, field): every `c++::` type must be declared locally or imported
+/// (when `check_undeclared` is true), and can only appear by value if it is held by value in Rust
 /// (`#layout(...)` and `#trivially_relocatable`).
 fn check_cpp_signature_type(
     ty: &RustType,
@@ -1896,6 +1953,40 @@ fn report_cpp_objects<'t>(
     }
 }
 
+/// Checks the type of a C++ field accessor: a C++ object (a `c++::` type, a builtin or a C++
+/// pointer), or a type variable of a template (checked once it's substituted).
+fn check_cpp_field(
+    field: &ZngurCppField,
+    heap_info: Option<&CppHeapAllocatedInfo<'_>>,
+) -> Result<(), String> {
+    match &field.ty {
+        RustType::CppPtr(CppIndirection::Reference, _) => Err(format!(
+            "the field `{}` has the reference type `{}`, and fields of reference type aren't \
+             supported",
+            field.name,
+            zng_spelling(&field.ty)
+        )),
+        ty if is_valid_cpp_object_inner(ty) => {
+            if let RustType::Cpp(segs) = ty
+                && heap_info.and_then(|i| i.is_heap_allocated(segs)) == Some(true)
+            {
+                let inner_str = zng_spelling(ty);
+                return Err(format!(
+                    "`{inner_str}` is `#cpp_heap_allocated` (its Rust wrapper holds an owning \
+                     pointer rather than the C++ object inline), so it cannot be a C++ field type"
+                ));
+            }
+            check_cpp_objects_inner(ty, false, false, heap_info)
+        }
+        ty => Err(format!(
+            "the field `{}` has the type `{}`, but C++ fields are C++ objects: `c++::` types, \
+             builtins (other than `char` and `str`) or C++ pointers",
+            field.name,
+            zng_spelling(ty)
+        )),
+    }
+}
+
 struct MergeContext {
     outer_ty: RustType,
     variant: Option<String>,
@@ -2196,6 +2287,7 @@ impl ProcessedItem<'_> {
                 let mut methods = vec![];
                 let mut cpp_methods: Vec<ZngurCppMethod> = vec![];
                 let mut cpp_constructors: Vec<ZngurCppConstructor> = vec![];
+                let mut cpp_fields: Vec<ZngurCppField> = vec![];
                 let mut constructor = None;
                 let mut variants = vec![];
                 let mut fields = vec![];
@@ -2487,6 +2579,17 @@ impl ProcessedItem<'_> {
                             });
                         }
                         ParsedTypeItem::Field { name, ty, offset } => {
+                            if matches!(rust_ty, RustType::Cpp(_)) {
+                                ctx.add_error_str(
+                                    &format!(
+                                        "C++ field accessors omit `offset` and say what they \
+                                         return (e.g. `field &const {name} (type = ...);` or \
+                                         `field var {name} (type = ...);`)"
+                                    ),
+                                    item_span,
+                                );
+                                continue;
+                            }
                             let field = ZngurField {
                                 name: name.to_owned(),
                                 ty: ty.to_zngur(scope, ctx),
@@ -2702,6 +2805,7 @@ impl ProcessedItem<'_> {
                                 if !check_rust_fn_name(
                                     ctx,
                                     item_span,
+                                    "C++ function",
                                     method.rust_name(),
                                     rust_name.is_some(),
                                     true,
@@ -2728,6 +2832,7 @@ impl ProcessedItem<'_> {
                                     method.rust_name(),
                                     &cpp_constructors,
                                     &cpp_methods,
+                                    &cpp_fields,
                                 ) {
                                     continue;
                                 }
@@ -2887,7 +2992,14 @@ impl ProcessedItem<'_> {
                             ) {
                                 continue;
                             }
-                            if !check_rust_fn_name(ctx, item_span, rust_name, true, true) {
+                            if !check_rust_fn_name(
+                                ctx,
+                                item_span,
+                                "C++ function",
+                                rust_name,
+                                true,
+                                true,
+                            ) {
                                 continue;
                             }
                             check_cpp_signature_lints(
@@ -2906,6 +3018,7 @@ impl ProcessedItem<'_> {
                                 rust_name,
                                 &cpp_constructors,
                                 &cpp_methods,
+                                &cpp_fields,
                             ) {
                                 continue;
                             }
@@ -2923,6 +3036,89 @@ impl ProcessedItem<'_> {
                                 item_span.into_range(),
                             );
                             cpp_constructors.push(constructor);
+                        }
+                        ParsedTypeItem::CppField {
+                            is_safe,
+                            is_ref,
+                            unique,
+                            constness,
+                            name,
+                            ty,
+                            rust_name,
+                        } => {
+                            let Some(constness) = constness else {
+                                let unique = if unique { "unique " } else { "" };
+                                ctx.add_error_str(
+                                    &format!(
+                                        "a C++ field accessor says what it returns: \
+                                         `field &{unique}const {name} ...` / \
+                                         `field &{unique}var {name} ...` (a reference to the \
+                                         field, `unique` if Rust uses it uniquely), or \
+                                         `field const {name} ...` / `field var {name} ...` (a \
+                                         copy of it)"
+                                    ),
+                                    item_span,
+                                );
+                                continue;
+                            };
+                            let access = match (is_ref, unique) {
+                                (true, unique) => CppFieldAccess::Ref { unique, constness },
+                                (false, false) => CppFieldAccess::Copy { constness },
+                                (false, true) => {
+                                    let c = constness.keyword();
+                                    ctx.add_error_str(
+                                        &format!(
+                                            "`unique` only applies to references: \
+                                             `field &unique {c} {name} ...` returns a unique \
+                                             reference to the field, and `field {c} {name} ...` \
+                                             a copy of it"
+                                        ),
+                                        item_span,
+                                    );
+                                    continue;
+                                }
+                            };
+                            let has_rename = rust_name.is_some();
+                            let field = ZngurCppField {
+                                name: name.to_owned(),
+                                rust_name: rust_name.filter(|&n| n != name).map(str::to_owned),
+                                ty: ty.to_zngur(scope, ctx),
+                                access,
+                                is_safe,
+                            };
+                            if !reject_lifetimes(ctx, item_span, "C++ fields", [&field.ty]) {
+                                continue;
+                            }
+                            if let Err(e) = check_cpp_field(&field, None) {
+                                ctx.add_error_str(&e, item_span);
+                                continue;
+                            }
+                            if !check_rust_fn_name(
+                                ctx,
+                                item_span,
+                                "C++ field accessor",
+                                field.rust_name(),
+                                has_rename,
+                                true,
+                            ) {
+                                continue;
+                            }
+                            check_cpp_field_lints(ctx, item_span, &field);
+                            if !check_member_name(
+                                ctx,
+                                item_span,
+                                field.rust_name(),
+                                &cpp_constructors,
+                                &cpp_methods,
+                                &cpp_fields,
+                            ) {
+                                continue;
+                            }
+                            ctx.record_span(
+                                &field.into_span_key_with(rust_ty.clone()),
+                                item_span.into_range(),
+                            );
+                            cpp_fields.push(field);
                         }
                         ParsedTypeItem::CppValue { field: _, cpp_type } => {
                             ctx.add_warning_str(
@@ -3082,6 +3278,7 @@ impl ProcessedItem<'_> {
                     methods,
                     cpp_methods,
                     cpp_constructors,
+                    cpp_fields,
                     wellknown_traits: wt,
                     exhaustive,
                     constructor,
@@ -3292,8 +3489,14 @@ impl ProcessedItem<'_> {
                             output,
                             is_safe,
                         };
-                        if !check_rust_fn_name(ctx, item_span, func.rust_name(), has_rename, false)
-                        {
+                        if !check_rust_fn_name(
+                            ctx,
+                            item_span,
+                            "C++ function",
+                            func.rust_name(),
+                            has_rename,
+                            false,
+                        ) {
                             return;
                         }
                         check_cpp_signature_lints(
@@ -3750,6 +3953,9 @@ enum PartialSpanKey {
     /// a [`CppConstructor`](zngur_def::ZngurCppConstructor)
     /// outer_ty, rust_name
     CppConstructor(RustType, String),
+    /// a [`ZngurCppField`](zngur_def::ZngurCppField)
+    /// outer_ty, rust_name
+    CppField(RustType, String),
     /// a [`ZngurCppFn`](zngur_def::ZngurCppFn)
     /// namespace, rust_name
     CppFn(Vec<String>, String),
@@ -3837,6 +4043,10 @@ impl PartialSpanKey {
 
     fn cpp_constructor(outer_ty: RustType, name: String) -> Self {
         Self::CppConstructor(outer_ty.with_erased_lifetimes(), name)
+    }
+
+    fn cpp_field(outer_ty: RustType, name: String) -> Self {
+        Self::CppField(outer_ty.with_erased_lifetimes(), name)
     }
 }
 
@@ -3941,6 +4151,9 @@ impl VariantQualifiedSpanKeyExt for zngur_def::ConflictSource {
             zngur_def::ConflictSource::CppConstructor(name) => {
                 PartialSpanKey::cpp_constructor(outer_ty, name.clone())
             }
+            zngur_def::ConflictSource::CppField(name) => {
+                PartialSpanKey::cpp_field(outer_ty, name.clone())
+            }
             zngur_def::ConflictSource::CppFn(namespace, name) => {
                 PartialSpanKey::CppFn(namespace.clone(), name.clone())
             }
@@ -3976,6 +4189,12 @@ impl QualifiedSpanKeyExt for zngur_def::ZngurMethod {
 impl QualifiedSpanKeyExt for zngur_def::ZngurCppMethod {
     fn into_span_key_with(&self, outer_ty: RustType) -> PartialSpanKey {
         PartialSpanKey::cpp_method(outer_ty, self.clone())
+    }
+}
+
+impl QualifiedSpanKeyExt for zngur_def::ZngurCppField {
+    fn into_span_key_with(&self, outer_ty: RustType) -> PartialSpanKey {
+        PartialSpanKey::cpp_field(outer_ty, self.rust_name().to_owned())
     }
 }
 
@@ -5225,6 +5444,11 @@ impl ZngurSpecBuilder {
                             .try_for_each(|t| {
                                 check_cpp_objects_inner(t, false, false, Some(&heap_info))
                             })
+                    })
+                    .and_then(|()| {
+                        ty.cpp_fields
+                            .iter()
+                            .try_for_each(|f| check_cpp_field(f, Some(&heap_info)))
                     });
                 if let Err(err) = check_res {
                     let report_span = ctx
@@ -5693,6 +5917,7 @@ impl ZngurSpecBuilder {
                         if is_from_template {
                             if is_rust_keyword(method.rust_name()) {
                                 let msg = rust_keyword_fn_error(
+                                    "C++ function",
                                     method.rust_name(),
                                     method.rust_name.is_some(),
                                 );
@@ -5836,6 +6061,123 @@ impl ZngurSpecBuilder {
                     }
                 }
             }
+            if let Some(first_rust_field) = ty.fields.first()
+                && matches!(ty.ty, RustType::Cpp(_))
+            {
+                let field_key = first_rust_field.into_span_key_with_variant(ty.ty.clone(), None);
+                let span = ctx
+                    .fetch_spans_global(&field_key)
+                    .first()
+                    .copied()
+                    .cloned()
+                    .or_else(|| ctx.fetch_spans_global(ty).first().copied().cloned())
+                    .or_else(|| template_locations.last().cloned())
+                    .unwrap_or((0, 0usize..0));
+                let name = &first_rust_field.name;
+                let msg = format!(
+                    "C++ field accessors omit `offset` and say what they return (e.g. \
+                     `field &const {name} (type = ...);` or `field var {name} (type = ...);`)"
+                );
+                ctx.add_fatal_report(
+                    Report::build(ReportKind::Error, span.clone())
+                        .with_message(&msg)
+                        .with_label(Label::new(span).with_message(&msg).with_color(Color::Red))
+                        .finish(),
+                );
+            }
+            if let Some(first_field) = ty.cpp_fields.first() {
+                let field_key = first_field.into_span_key_with(ty.ty.clone());
+                let field_span = || {
+                    ctx.fetch_spans_global(&field_key)
+                        .first()
+                        .copied()
+                        .cloned()
+                        .or_else(|| template_locations.last().cloned())
+                        .or_else(|| ctx.fetch_spans_global(ty).first().copied().cloned())
+                        .unwrap_or((0, 0usize..0))
+                };
+                if !matches!(ty.ty, RustType::Cpp(_)) {
+                    let span = field_span();
+                    let msg = "C++ field accessors (`field name (type = T)`) can only be declared \
+                               on `c++::` types";
+                    ctx.add_fatal_report(
+                        Report::build(ReportKind::Error, span.clone())
+                            .with_message(msg)
+                            .with_label(Label::new(span).with_message(msg).with_color(Color::Red))
+                            .finish(),
+                    );
+                } else if ty.cpp_heap_allocated.is_some() {
+                    let span = field_span();
+                    let msg = "C++ field accessors (`field name (type = T)`) cannot be declared \
+                               on `#cpp_heap_allocated` types";
+                    ctx.add_fatal_report(
+                        Report::build(ReportKind::Error, span.clone())
+                            .with_message(msg)
+                            .with_label(Label::new(span).with_message(msg).with_color(Color::Red))
+                            .finish(),
+                    );
+                } else {
+                    for field in &ty.cpp_fields {
+                        let f_key = field.into_span_key_with(ty.ty.clone());
+                        let f_span = ctx
+                            .fetch_spans_global(&f_key)
+                            .first()
+                            .copied()
+                            .cloned()
+                            .or_else(|| template_locations.last().cloned())
+                            .or_else(|| ctx.fetch_spans_global(ty).first().copied().cloned())
+                            .unwrap_or((0, 0usize..0));
+                        let check = if template_locations.is_empty() {
+                            check_cpp_field(field, Some(&heap_info))
+                        } else {
+                            Ok(())
+                        }
+                        .and_then(|()| {
+                            check_cpp_signature_type(
+                                &field.ty,
+                                true,
+                                &known_cpp_types,
+                                &by_value_cpp_types,
+                                !had_incomplete_imports,
+                            )
+                        })
+                        // Copies of fields of C++ class types are constructed in Rust's memory, so
+                        // Rust must hold them by value.
+                        .and_then(|()| {
+                            if matches!(field.access, CppFieldAccess::Copy { .. })
+                                && let RustType::Cpp(segs) = &field.ty
+                                && known_cpp_types.contains(segs)
+                                && !by_value_cpp_types.contains(segs)
+                            {
+                                Err(format!(
+                                    "the accessor `{}` returns a copy of the field `{}`, but Rust \
+                                     doesn't hold `{}` by value (it needs a layout and \
+                                     `#trivially_relocatable`); return a reference instead \
+                                     (`field &const {} ...`)",
+                                    field.rust_name(),
+                                    field.name,
+                                    zng_spelling(&field.ty),
+                                    field.name,
+                                ))
+                            } else {
+                                Ok(())
+                            }
+                        });
+                        if let Err(msg) = check {
+                            ctx.add_fatal_report(
+                                Report::build(ReportKind::Error, f_span.clone())
+                                    .with_message(&msg)
+                                    .with_label(
+                                        Label::new(f_span)
+                                            .with_message(&msg)
+                                            .with_color(Color::Red),
+                                    )
+                                    .finish(),
+                            );
+                        }
+                    }
+                }
+            }
             // Members of the same kind are merged by their Rust name, and duplicates in a
             // declaration were reported there, so this finds C++ members of different kinds with
             // the same Rust name (or a C++ member colliding with a Rust `fn` method).
@@ -5854,6 +6196,11 @@ impl ZngurSpecBuilder {
                     ty.cpp_methods
                         .iter()
                         .map(|m| (m.rust_name(), m.into_span_key_with(ty.ty.clone()))),
+                )
+                .chain(
+                    ty.cpp_fields
+                        .iter()
+                        .map(|f| (f.rust_name(), f.into_span_key_with(ty.ty.clone()))),
                 )
             {
                 let spans = ctx.fetch_spans_global(&key);
@@ -6968,6 +7315,37 @@ fn inner_type_item<'a>()
         )
         .map(|(name, (offset, ty))| ParsedTypeItem::Field { name, ty, offset }),
     );
+    // Unlike fields of Rust types, accessors for fields of C++ types have no offset (C++ knows
+    // it), so they're told apart by `(type = ...)`.
+    let cpp_field = just(Token::Ident("field"))
+        .ignore_then(just(Token::And).or_not().map(|a| a.is_some()))
+        .then(just(Token::Ident("unique")).or_not().map(|u| u.is_some()))
+        .then(
+            choice((
+                just(Token::KwConst).to(CppConstness::Const),
+                just(Token::Ident("var")).to(CppConstness::Var),
+            ))
+            .or_not(),
+        )
+        .then(cpp_name())
+        .then(
+            just(Token::KwType)
+                .then(just(Token::Eq))
+                .ignore_then(rust_type())
+                .delimited_by(just(Token::ParenOpen), just(Token::ParenClose)),
+        )
+        .then(just(Token::KwAs).ignore_then(cpp_name()).or_not())
+        .map(
+            |(((((is_ref, unique), constness), name), ty), rust_name)| ParsedTypeItem::CppField {
+                is_safe: true,
+                is_ref,
+                unique,
+                constness,
+                name,
+                ty,
+                rust_name,
+            },
+        );
     let cpp_value = just(Token::Sharp)
         .then(just(Token::Ident("cpp_value")))
         .ignore_then(select! {
@@ -7048,22 +7426,31 @@ fn inner_type_item<'a>()
             .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(just(Token::ParenOpen), just(Token::ParenClose));
-        let cpp_constructor = choice((
+        let cpp_constructor = just(Token::Ident("constructor"))
+            .ignore_then(lifetime_params())
+            .then(fn_params.clone())
+            .then(just(Token::KwAs).ignore_then(cpp_name()).or_not())
+            .map(
+                |((lifetimes, inputs), rust_name)| ParsedTypeItem::CppConstructor {
+                    is_safe: true,
+                    lifetimes,
+                    inputs,
+                    rust_name,
+                },
+            );
+        let safe_or_unsafe = choice((
             just(Token::KwSafe).to(true),
             just(Token::KwUnsafe).to(false),
         ))
-        .then_ignore(just(Token::Ident("constructor")))
-        .then(lifetime_params())
-        .then(fn_params.clone())
-        .then(just(Token::KwAs).ignore_then(cpp_name()).or_not())
-        .map(
-            |(((is_safe, lifetimes), inputs), rust_name)| ParsedTypeItem::CppConstructor {
-                is_safe,
-                lifetimes,
-                inputs,
-                rust_name,
-            },
-        );
+        .then(choice((cpp_constructor, cpp_field.clone())))
+        .map(|(safe, mut item)| {
+            match &mut item {
+                ParsedTypeItem::CppConstructor { is_safe, .. }
+                | ParsedTypeItem::CppField { is_safe, .. } => *is_safe = safe,
+                _ => unreachable!(),
+            }
+            item
+        });
         let safety_and_static = choice((
             just(Token::KwSafe).to(true),
             just(Token::KwUnsafe).to(false),
@@ -7138,12 +7525,13 @@ fn inner_type_item<'a>()
             non_exhaustive.boxed(),
             constructor.boxed(),
             field.boxed(),
+            cpp_field.boxed(),
             cpp_value.boxed(),
             cpp_heap_allocated.boxed(),
             cpp_ref.boxed(),
             cpp_stack_owned.boxed(),
             trivially_relocatable.boxed(),
-            cpp_constructor.boxed(),
+            safe_or_unsafe.boxed(),
             type_fn.boxed(),
         ));
 

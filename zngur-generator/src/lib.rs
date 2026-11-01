@@ -217,6 +217,33 @@ impl ZngurGenerator {
                         method,
                     ));
                 }
+                // Field accessors: like member functions that return a reference to the field or
+                // a copy of it.
+                for field in &ty_def.cpp_fields {
+                    let method = field.as_cpp_method();
+                    let ZngurMethodReceiver::Ref(mutability) = method.receiver else {
+                        unreachable!("field accessors have a receiver");
+                    };
+                    let mangled_name = rust_file.add_cpp_method(
+                        ty,
+                        field.rust_name(),
+                        &[],
+                        CppRustReceiver::Ref {
+                            mutability,
+                            constness: method.receiver_constness,
+                            lifetime: None,
+                        },
+                        &[],
+                        &method.output,
+                        field.is_safe,
+                    );
+                    cpp_file.cpp_method_bridges.push(bridges.field(
+                        &mangled_name,
+                        ty,
+                        owner_cpp_type,
+                        field,
+                    ));
+                }
                 // C++ constructors (by-value types only, checked by the parser): an associated
                 // function returning a `CppCtor`, and a C++ function that runs the constructor in
                 // place.
@@ -866,6 +893,7 @@ mod tests {
             methods: vec![],
             cpp_methods: vec![],
             cpp_constructors: vec![],
+            cpp_fields: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -891,6 +919,7 @@ mod tests {
             methods: vec![],
             cpp_methods: vec![],
             cpp_constructors: vec![],
+            cpp_fields: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -911,6 +940,7 @@ mod tests {
             methods: vec![],
             cpp_methods: vec![],
             cpp_constructors: vec![],
+            cpp_fields: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -932,6 +962,7 @@ mod tests {
             methods: vec![],
             cpp_methods: vec![],
             cpp_constructors: vec![],
+            cpp_fields: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -976,6 +1007,7 @@ mod tests {
             methods,
             cpp_methods: vec![],
             cpp_constructors: vec![],
+            cpp_fields: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -1018,6 +1050,7 @@ mod tests {
             methods: vec![],
             cpp_methods: vec![],
             cpp_constructors: vec![],
+            cpp_fields: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -1148,6 +1181,7 @@ mod tests {
                 methods: vec![],
                 cpp_methods: vec![],
                 cpp_constructors: vec![],
+                cpp_fields: vec![],
                 constructor: None,
                 variants: vec![],
                 fields: vec![],
@@ -1477,6 +1511,7 @@ pub type Handle = super::Handle;
                     methods: vec![],
                     cpp_methods: vec![],
                     cpp_constructors: vec![],
+                    cpp_fields: vec![],
                     constructor: None,
                     variants: vec![],
                     fields: vec![],
@@ -1498,6 +1533,7 @@ pub type Handle = super::Handle;
                     methods: vec![],
                     cpp_methods: vec![],
                     cpp_constructors: vec![],
+                    cpp_fields: vec![],
                     constructor: None,
                     variants: vec![],
                     fields: vec![],
@@ -1523,6 +1559,7 @@ pub type Handle = super::Handle;
                     methods: vec![],
                     cpp_methods: vec![],
                     cpp_constructors: vec![],
+                    cpp_fields: vec![],
                     constructor: None,
                     variants: vec![],
                     fields: vec![],
@@ -1540,6 +1577,7 @@ pub type Handle = super::Handle;
                     methods: vec![],
                     cpp_methods: vec![],
                     cpp_constructors: vec![],
+                    cpp_fields: vec![],
                     constructor: None,
                     variants: vec![ZngurVariant {
                         name: "Val".to_owned(),
@@ -1596,6 +1634,7 @@ pub type Handle = super::Handle;
             methods: vec![],
             cpp_methods: vec![],
             cpp_constructors: vec![],
+            cpp_fields: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -2032,6 +2071,7 @@ pub type Handle = super::Handle;
                     methods: vec![],
                     cpp_methods: vec![],
                     cpp_constructors: vec![],
+                    cpp_fields: vec![],
                     constructor: None,
                     variants: vec![],
                     fields: vec![],
@@ -2319,6 +2359,7 @@ pub type Handle = super::Handle;
             methods: vec![],
             cpp_methods: vec![],
             cpp_constructors: vec![],
+            cpp_fields: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -2339,6 +2380,7 @@ pub type Handle = super::Handle;
                     methods: vec![],
                     cpp_methods: vec![],
                     cpp_constructors: vec![],
+                    cpp_fields: vec![],
                     constructor: None,
                     variants: vec![],
                     fields: vec![],
@@ -2356,6 +2398,7 @@ pub type Handle = super::Handle;
                     methods: vec![],
                     cpp_methods: vec![],
                     cpp_constructors: vec![],
+                    cpp_fields: vec![],
                     constructor: Some(ZngurConstructor {
                         inputs: vec![
                             ("first".to_owned(), ref_a_str.clone()),
@@ -2393,6 +2436,7 @@ pub type Handle = super::Handle;
                     methods: vec![],
                     cpp_methods: vec![],
                     cpp_constructors: vec![],
+                    cpp_fields: vec![],
                     constructor: None,
                     variants: vec![],
                     fields: vec![],
@@ -2824,6 +2868,221 @@ pub type Handle = super::Handle;
         );
         assert!(h.contains("::std::move(i0)"), "{h}");
         assert!(!h.contains("return *o;"), "{h}");
+    }
+
+    #[test]
+    fn cpp_fields_get_accessors_and_cpp_bridges() {
+        let b = cpp(&["a", "B"]);
+        let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+        let bool_ty = RustType::Primitive(PrimitiveRustType::Bool);
+        let const_bool_ptr =
+            RustType::cpp_ptr(Mutability::Not, CppIndirection::Pointer, bool_ty.clone());
+        let b_ptr = RustType::cpp_ptr(Mutability::Mut, CppIndirection::Pointer, b.clone());
+        let mut ty = minimal_by_value_cpp_type(b.clone(), 8, 4);
+        let field = |rust_name: &str, ty: &RustType, access, is_safe| ZngurCppField {
+            name: "x".to_owned(),
+            rust_name: Some(rust_name.to_owned()),
+            ty: ty.clone(),
+            access,
+            is_safe,
+        };
+        ty.cpp_fields = vec![
+            field(
+                "x_mut",
+                &i32,
+                CppFieldAccess::Ref {
+                    unique: true,
+                    constness: CppConstness::Var,
+                },
+                true,
+            ),
+            field(
+                "x_unique_const",
+                &i32,
+                CppFieldAccess::Ref {
+                    unique: true,
+                    constness: CppConstness::Const,
+                },
+                true,
+            ),
+            field(
+                "x_var",
+                &i32,
+                CppFieldAccess::Ref {
+                    unique: false,
+                    constness: CppConstness::Var,
+                },
+                true,
+            ),
+            field(
+                "x_copy",
+                &i32,
+                CppFieldAccess::Copy {
+                    constness: CppConstness::Var,
+                },
+                true,
+            ),
+            field(
+                "b_copy",
+                &b,
+                CppFieldAccess::Copy {
+                    constness: CppConstness::Const,
+                },
+                true,
+            ),
+            field(
+                "flag_ref",
+                &bool_ty,
+                CppFieldAccess::Ref {
+                    unique: false,
+                    constness: CppConstness::Const,
+                },
+                true,
+            ),
+            field(
+                "flag_ptr",
+                &const_bool_ptr,
+                CppFieldAccess::Ref {
+                    unique: false,
+                    constness: CppConstness::Const,
+                },
+                true,
+            ),
+            field(
+                "next_var",
+                &b_ptr,
+                CppFieldAccess::Ref {
+                    unique: false,
+                    constness: CppConstness::Var,
+                },
+                false,
+            ),
+        ];
+        let spec = ZngurSpec {
+            types: vec![ty],
+            ..Default::default()
+        };
+        let (rust_code, _h, cpp_code) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let cpp_code = cpp_code.expect("C++ field accessors need a C++ file");
+
+        assert!(
+            rust_code.contains(
+                "impl a::B {\n#[allow(non_snake_case, clippy::too_many_arguments)]\npub fn \
+                 x_mut(&mut self, ) -> &mut ::zngur_lib::Cpp<i32>"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "impl a::B {\n#[allow(non_snake_case, clippy::too_many_arguments)]\npub fn \
+                 x_unique_const(&mut self, ) -> &mut ::zngur_lib::Cpp<i32, ::zngur_lib::Const>"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "impl a::B {\n#[allow(non_snake_case, clippy::too_many_arguments)]\npub fn \
+                 x_var(&self, ) -> &::zngur_lib::Cpp<i32>"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "impl<__C0: ::zngur_lib::Constness> a::B<__C0> {\n#[allow(non_snake_case, \
+                 clippy::too_many_arguments)]\npub fn x_copy(&self, ) -> i32"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains("pub fn b_copy(&self, ) -> a::B::<::zngur_lib::Const>"),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "pub fn flag_ref(&self, ) -> &::zngur_lib::Cpp<bool, ::zngur_lib::Const>"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "pub fn flag_ptr(&self, ) -> &::zngur_lib::Cpp<*const ::zngur_lib::Cpp<bool, \
+                 ::zngur_lib::Const>, ::zngur_lib::Const>"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "impl a::B {\n#[allow(non_snake_case, clippy::too_many_arguments)]\npub unsafe fn \
+                 next_var(&self, ) -> &::zngur_lib::Cpp<*mut a::B>"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            cpp_code.contains(
+                "static_assert(!::std::is_union< ::a::B >::value, \
+                 \"field accessors on C++ unions aren't supported\");"
+            ),
+            "{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains(
+                "static_assert(::rust::__zngur_non_union_member_ptr< decltype(&::a::B::x) >::value,"
+            ),
+            "{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains(
+                "static_assert(::std::is_same< ::std::remove_const< decltype(::a::B::x) >::type, "
+            ),
+            "{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains(
+                "static_assert(::rust::__zngur_same_repr< ::std::remove_const< \
+                 decltype(::a::B::x) >::type, "
+            ),
+            "{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains("static_assert(!::std::is_const< decltype(::a::B::x) >::value,"),
+            "{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains("::rust::CppTypeOf< ::rust::Bool >::type"),
+            "{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains(
+                "::rust::CppTypeOf< ::rust::CppPtr< ::rust::CppConst< ::rust::Bool > > >::type"
+            ),
+            "{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains(
+                "::rust::CppPtr< ::int32_t > __zngur_o = \
+                 ::std::addressof((::rust::__zngur_internal_move_from_rust< ::rust::CppPtr< \
+                 ::rust::cpp::a::B > >(i0))->x);"
+            ),
+            "{cpp_code}"
+        );
+        // Copies are constructed in place, through a `const` `this`.
+        assert!(
+            cpp_code.contains(
+                "::new (static_cast<void*>(o)) ::rust::CppTypeOf< ::int32_t \
+                 >::type(static_cast< ::rust::CppTypeOf< ::int32_t >::type \
+                 >((::rust::__zngur_internal_move_from_rust< ::rust::CppPtr< \
+                 ::rust::CppConst< ::rust::cpp::a::B > > >(i0))->x));"
+            ),
+            "{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains(
+                "::new (static_cast<void*>(o)) ::a::B((::rust::__zngur_internal_move_from_rust< \
+                 ::rust::CppPtr< ::rust::CppConst< ::rust::cpp::a::B > > >(i0))->x);"
+            ),
+            "{cpp_code}"
+        );
     }
 
     #[test]

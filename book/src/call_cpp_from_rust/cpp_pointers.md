@@ -58,7 +58,7 @@ Every C++ class gets a constness parameter in Rust, which defaults to non-`const
   it: `&'a const Point` is a `&'a Point<C1>` there (for any `C1: Constness`),
   `&'a unique const Point` a `&'a mut Point<C1>`, and a raw `const Point&` a `*const Point<C1>`, so
   `distance(&p, &q)` works whether `p` and `q` are `const` or not. C++ only reads them, so that's
-  sound. Return values and receivers keep their constness.
+  sound. Return values, receivers and fields keep their constness.
 - Builtins have the same parameter through `zngur_lib::Cpp<T, C>`: `const int32_t&` is
   `&'a Cpp<i32, Const>` (and `&'a Cpp<i32, C1>` as an argument).
 
@@ -98,8 +98,9 @@ can pass `&x` / `&mut x` directly (for a `const T&`, whether `x` is `const` or n
 
 Whether a function is `safe` is up to the `.zng` file: functions that dereference raw pointers
 should be `unsafe`, and zngur warns (`safe_raw_pointer`) when a `safe` C++ function that zngur
-calls directly (member function, free function, or constructor) takes a raw pointer, which
-`#allow(safe_raw_pointer)` silences.
+calls directly (member function, free function, or constructor) takes a raw pointer or a `safe`
+[field](./cpp_fields.md) accessor exposes mutable access to one, which `#allow(safe_raw_pointer)`
+silences.
 
 ```rust
 let mut p: Point = generated::geo::origin();

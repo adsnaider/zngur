@@ -218,6 +218,28 @@ fn main() {
         generated::geometry::twice_f64(1.25)
     );
 
+    // C++ field accessors, which return a reference to the field.
+    let mut point = MyCppWrapper::from_xy(1, 2).build();
+    *point.x_mut().get_mut() += 100;
+    let x = point.x().get();
+    let y = point.y().get();
+    println!("fields = {x} {y}");
+    point.print();
+
+    // Fields of pointer type.
+    let mut first = generated::Node::new(1).build();
+    let mut second = generated::Node::new(2).build();
+    second.type_mut().set(5);
+    unsafe { first.next_mut() }.set(&mut second);
+    let next = unsafe { first.next().get().as_mut() }.expect("null");
+    let next_type = next.type_mut().get();
+    println!(
+        "nodes = {} -> {}, type = {}",
+        first.id().get(),
+        next.id().get(),
+        next_type
+    );
+
     // `const` is part of the type: `MyCppWrapper<Const>` is a `const` object, which only has the
     // `const` member functions. Going from a `T` to a `T<Const>` is explicit, apart from passing
     // it to C++ as a `const` object.

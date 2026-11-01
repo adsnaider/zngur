@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use zngur_def::{
     CppConstness, Lifetime, Merge, RustPathAndGenerics, RustTrait, RustType, TypeVar,
-    ZngurConstructor, ZngurCppConstructor, ZngurCppMethod, ZngurField, ZngurMethod,
+    ZngurConstructor, ZngurCppConstructor, ZngurCppField, ZngurCppMethod, ZngurField, ZngurMethod,
     ZngurMethodDetails, ZngurMethodReceiver, ZngurType, ZngurVariant,
 };
 
@@ -948,6 +948,7 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
         methods,
         cpp_methods,
         cpp_constructors,
+        cpp_fields,
         constructor,
         variants,
         fields,
@@ -1055,6 +1056,28 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
                     Err(OwnedSubstitutionError::UnboundVar(var)) => unreachable!(
                         "Unbound type variable {} in C++ constructor {} in template {} for type {}",
                         var.0, ctor.rust_name, template.ty, ty
+                    ),
+                }
+            })
+            .collect(),
+        cpp_fields: cpp_fields
+            .iter()
+            .map(|f| {
+                match substitute_vars(
+                    &f.ty,
+                    &mapping,
+                    &lt_mapping,
+                    &target_lts,
+                    &fresh_avoid,
+                    &outer_in_scope,
+                ) {
+                    Ok(fty) => ZngurCppField {
+                        ty: fty,
+                        ..f.clone()
+                    },
+                    Err(SubstitutionError::UnboundVar(var)) => unreachable!(
+                        "Unbound type variable {} in C++ field {} in template {} for type {}",
+                        var.0, f.name, template.ty, ty
                     ),
                 }
             })
