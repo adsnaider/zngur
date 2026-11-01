@@ -567,7 +567,7 @@ impl CoroSupport {
 }
 
 impl RustFile {
-    fn mangle_name(&self, name: &str) -> String {
+    pub(crate) fn mangle_name(&self, name: &str) -> String {
         mangle_name(name, &self.mangling_base)
     }
 

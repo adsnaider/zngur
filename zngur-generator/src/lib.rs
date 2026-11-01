@@ -162,14 +162,20 @@ impl ZngurGenerator {
                     vec![],
                 ),
             };
-            if let Some(_cpp_stack_owned) = &ty_def.cpp_stack_owned {
-                let destructor_name = format!("_zngur_crate_{type_name}_destructor");
-                let mangled_name = rust_file.add_extern_cpp_function(
-                    &destructor_name,
-                    &[RustType::Ref(Mutability::Mut, Box::new(ty.clone()))],
-                    &RustType::Tuple(vec![]),
-                    true,
-                );
+            let mut cpp_stack_owned_data = None;
+            if let Some(cpp_stack_owned) = &ty_def.cpp_stack_owned {
+                // Derive the destructor symbol via `RustFile::mangle_name` so it includes the
+                // mangling base and position-encodes `c++::` / module boundaries / generics
+                // without colliding across modules or emitting a public Rust wrapper.
+                let destructor_key = match &ty {
+                    RustType::Cpp(_) => format!("_c++::{ty}=cpp_stack_owned_destructor"),
+                    _ => format!("_{ty}=cpp_stack_owned_destructor"),
+                };
+                let mangled_name = rust_file.mangle_name(&destructor_key);
+                cpp_stack_owned_data = Some(CppStackOwnedData {
+                    destructor_fn: mangled_name.clone(),
+                    cpp_type: cpp_stack_owned.0.clone(),
+                });
                 let (buf_size, align) = match layout {
                     LayoutPolicy::StackAllocated { size, align } => (size, align),
                     LayoutPolicy::Conservative { size, align } => {
@@ -195,11 +201,10 @@ impl ZngurGenerator {
     unsafe impl ::zngur_lib::ZngCppDestruct for {type_name} {{
         unsafe fn destruct(&mut self) {{
             unsafe extern "C" {{
-                fn {mangled_name}(i0: *mut u8, o: *mut u8);
+                fn {mangled_name}(i0: *mut u8);
             }}
-            let mut dummy = ();
             unsafe {{
-                {mangled_name}(self.buffer.get() as *mut _, &mut dummy as *mut () as *mut u8);
+                {mangled_name}(self.buffer.get() as *mut _);
             }}
         }}
     }}
@@ -418,7 +423,7 @@ impl ZngurGenerator {
                     }
                 }),
                 cpp_ref: ty_def.cpp_ref,
-                cpp_stack_owned: ty_def.cpp_stack_owned,
+                cpp_stack_owned: cpp_stack_owned_data,
                 from_trait: if let RustType::Boxed(b) = &ty {
                     if let RustType::Dyn(tr, _) = b.as_ref() {
                         if let RustTrait::Fn {
@@ -954,6 +959,70 @@ pub type Box2d = super::Box2d;
         assert!(rust_code.contains("pub mod geo {"));
         assert!(rust_code.contains("pub struct Point"));
         assert!(!rust_code.contains("pub type Point = super::Point;"));
+    }
+
+    #[test]
+    fn cpp_stack_owned_destructor_names_match_and_are_unique() {
+        let cases = [
+            (cpp(&["a", "Point"]), "::a::Point"),
+            (cpp(&["b", "Point"]), "::b::Point<int>"),
+            (cpp(&["a", "b", "Point"]), "::a::b::Point"),
+            (cpp(&["a__b", "Point"]), "::a__b::Point"),
+            (adt(&["crate", "Point"]), "::crate_ns::Point"),
+            (cpp(&["crate__Point"]), "::std::pair<int, int>"),
+        ];
+        let spec = ZngurSpec {
+            types: cases
+                .iter()
+                .map(|(ty, cpp_ty)| minimal_stack_owned_type(ty.clone(), cpp_ty, 16, 8))
+                .collect(),
+            mangling_base: "my_base".to_owned(),
+            ..Default::default()
+        };
+        let rust_ref = crate::RustFile::new("my_base");
+        let expected: Vec<(String, &str)> = cases
+            .iter()
+            .map(|(ty, cpp_ty)| {
+                let key = match ty {
+                    RustType::Cpp(_) => format!("_c++::{ty}=cpp_stack_owned_destructor"),
+                    _ => format!("_{ty}=cpp_stack_owned_destructor"),
+                };
+                (rust_ref.mangle_name(&key), *cpp_ty)
+            })
+            .collect();
+        let unique_names: std::collections::HashSet<&str> =
+            expected.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            unique_names.len(),
+            expected.len(),
+            "destructor symbols collided: {expected:?}"
+        );
+
+        let (rust_code, _h, cpp) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let cpp = cpp.expect("stack owned types need a C++ file for their destructors");
+        assert!(
+            !rust_code.contains("pub fn _zngur_"),
+            "unexpected safe wrapper emitted in:\n{rust_code}"
+        );
+        for (name, cpp_type) in &expected {
+            assert!(
+                rust_code.contains(&format!("fn {name}(i0: *mut u8);")),
+                "{name} extern decl not in:\n{rust_code}"
+            );
+            assert!(
+                rust_code.contains(&format!("{name}(self.buffer.get() as *mut _);")),
+                "{name} destruct call not in:\n{rust_code}"
+            );
+            assert!(
+                cpp.contains(&format!("void {name}(uint8_t* i0)")),
+                "{name} C++ definition not in:\n{cpp}"
+            );
+            assert!(
+                cpp.contains(&format!("using __zngur_T = {cpp_type};")),
+                "type alias for {cpp_type} not in:\n{cpp}"
+            );
+        }
     }
 
     #[test]
