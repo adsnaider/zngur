@@ -138,7 +138,6 @@ fn main() {
 
     // C++ functions taking and returning references to C++ objects, which are safe: Rust
     // references in Rust (`Cpp::from_mut` makes a Rust `i32` a C++ object), C++ references in C++.
-    // Like in C++, an argument that is a `const` object takes a non-`const` one too.
     let mut sum = 0;
     generated::sum_into(&c, Cpp::from_mut(&mut sum));
     println!("sum = {sum}");
@@ -200,6 +199,24 @@ fn main() {
     let constructed: &mut MyCppWrapper = MyCppWrapper::from_xy(8, 9).init(&mut slot);
     constructed.print();
     MyConservativeWrapper::from_values(30, 40).build().print();
+
+    // Free C++ functions.
+    let dot = generated::geometry::dot(&built, constructed);
+    println!("dot = {dot}");
+    generated::geometry::origin().print();
+    assert!(std::ptr::eq(
+        generated::geometry::pick_first(&built, constructed),
+        built.as_const()
+    ));
+    println!("sum_from_ptr = {}", unsafe {
+        generated::geometry::sum_from_ptr(&raw const built)
+    });
+    let _tag_fn: fn(&generated::geometry::Tag<Const>) -> i32 = generated::geometry::Tag::<Const>;
+    println!(
+        "twice = {} {}",
+        generated::geometry::twice(21),
+        generated::geometry::twice_f64(1.25)
+    );
 
     // `const` is part of the type: `MyCppWrapper<Const>` is a `const` object, which only has the
     // `const` member functions. Going from a `T` to a `T<Const>` is explicit, apart from passing

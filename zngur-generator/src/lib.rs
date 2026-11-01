@@ -397,12 +397,12 @@ impl ZngurGenerator {
                     r#"
     /// `{type_name}<::zngur_lib::Const>` is a `const` object (see `zngur_lib::Constness`).
     #[allow(non_camel_case_types)]
-    pub struct {type_name}<C: ::zngur_lib::Constness = ::zngur_lib::NonConst>(
-        ::core::marker::PhantomData<C>,
-        ::core::cell::UnsafeCell<()>,
-        ::core::marker::PhantomData<*mut ()>,
-        ::core::marker::PhantomPinned,
-    );
+    pub struct {type_name}<C: ::zngur_lib::Constness = ::zngur_lib::NonConst> {{
+        _constness: ::core::marker::PhantomData<C>,
+        _cell: ::core::cell::UnsafeCell<()>,
+        _no_auto_traits: ::core::marker::PhantomData<*mut ()>,
+        _pinned: ::core::marker::PhantomPinned,
+    }}
 
     unsafe impl<C: ::zngur_lib::Constness> ::zngur_lib::ZngCppObject for {type_name}<C> {{}}
 
@@ -629,6 +629,15 @@ impl ZngurGenerator {
         // `c++::` types of imported modules are defined in their own crate (at
         // `::<crate>::generated::<path>`). Re-exporting them at the same relative path as local
         // `c++::` types lets this module's generated code refer to both the same way.
+        let local_cpp_fn_paths: std::collections::HashSet<Vec<String>> = zng
+            .cpp_funcs
+            .iter()
+            .map(|func| {
+                let mut p = func.namespace.clone();
+                p.push(func.rust_name().to_owned());
+                p
+            })
+            .collect();
         let mut reexported = std::collections::HashSet::new();
         for module in &zng.imported_modules {
             let Some(crate_name) = &module.crate_name else {
@@ -636,20 +645,57 @@ impl ZngurGenerator {
             };
             let module_crate = crate_name.replace('-', "_");
             for segs in &module.cpp_types {
-                let Some((_, module_path)) = segs.split_last() else {
+                let Some((type_name, module_path)) = segs.split_last() else {
                     continue;
                 };
                 if !reexported.insert((module_crate.clone(), segs.clone())) {
                     continue;
                 }
-                cpp_tree.insert(
-                    module_path,
-                    &format!(
+                let item = if local_cpp_fn_paths.contains(segs) {
+                    let is_heap = module.cpp_heap_allocated_types.contains(segs);
+                    if is_heap {
+                        format!(
+                            "\n#[allow(dead_code, non_camel_case_types)]\npub type {type_name} = \
+                             ::{module_crate}::generated::{};\n",
+                            segs.join("::")
+                        )
+                    } else {
+                        format!(
+                            "\n#[allow(dead_code, non_camel_case_types)]\npub type {type_name}<C = \
+                             ::zngur_lib::NonConst> = ::{module_crate}::generated::{}<C>;\n",
+                            segs.join("::")
+                        )
+                    }
+                } else {
+                    format!(
                         "\n#[allow(unused_imports)]\npub use ::{module_crate}::generated::{};\n",
                         segs.join("::")
-                    ),
-                );
+                    )
+                };
+                cpp_tree.insert(module_path, &item);
             }
+        }
+        // Free C++ functions: a Rust function that calls a C++ function that calls the C++
+        // function. The Rust function is defined at the top level, where the generated code's
+        // paths resolve, and re-exported in the `c++::` tree, at the C++ namespace's path.
+        for func in &zng.cpp_funcs {
+            let rust_name = func.rust_name();
+            let (hidden_name, mangled_name) = rust_file.add_cpp_function(
+                &func.namespace,
+                rust_name,
+                &func.lifetimes,
+                &func.inputs,
+                &func.output,
+                func.is_safe,
+            );
+            let supers = "super::".repeat(func.namespace.len());
+            cpp_tree.insert(
+                &func.namespace,
+                &format!("\npub use {supers}{hidden_name} as {rust_name};\n"),
+            );
+            cpp_file
+                .cpp_method_bridges
+                .push(bridges.function(&mangled_name, func));
         }
         rust_file.text.push_str(&cpp_tree.render());
         for func in zng.funcs {
@@ -1330,7 +1376,7 @@ pub type Box2d = super::Box2d;
         // Old-style: top-level struct + deprecated shim.
         assert!(
             rust_code
-                .contains("pub struct Handle<C: ::zngur_lib::Constness = ::zngur_lib::NonConst>(")
+                .contains("pub struct Handle<C: ::zngur_lib::Constness = ::zngur_lib::NonConst> {")
         );
         assert!(rust_code.contains("::core::cell::UnsafeCell<()>"));
         assert!(rust_code.contains("::core::marker::PhantomData<*mut ()>"));
@@ -1641,11 +1687,11 @@ pub type Handle = super::Handle;
         // Zero-sized in Rust...
         assert!(
             rust_code
-                .contains("pub struct Point<C: ::zngur_lib::Constness = ::zngur_lib::NonConst>(")
+                .contains("pub struct Point<C: ::zngur_lib::Constness = ::zngur_lib::NonConst> {")
         );
         assert!(
             rust_code
-                .contains("pub struct Box2d<C: ::zngur_lib::Constness = ::zngur_lib::NonConst>(")
+                .contains("pub struct Box2d<C: ::zngur_lib::Constness = ::zngur_lib::NonConst> {")
         );
         assert!(!rust_code.contains("ZngCppStackObject"));
         // ...but exact (`==`) and conservative (`<=`) layouts are still checked in C++.
@@ -1708,7 +1754,7 @@ pub type Handle = super::Handle;
             ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
         assert!(
             rust_code
-                .contains("pub struct Point<C: ::zngur_lib::Constness = ::zngur_lib::NonConst>(")
+                .contains("pub struct Point<C: ::zngur_lib::Constness = ::zngur_lib::NonConst> {")
         );
         assert!(!rust_code.contains("ZngCppStackObject"));
         assert!(!h.contains("sizeof(::geo::Point)"));
@@ -1735,6 +1781,16 @@ pub type Handle = super::Handle;
         };
         let spec = ZngurSpec {
             types: vec![minimal_opaque_cpp_type(b.clone())],
+            // C++ functions that Rust calls.
+            cpp_funcs: vec![ZngurCppFn {
+                lifetimes: vec![Lifetime("a".to_owned())],
+                namespace: vec!["a".to_owned()],
+                cpp_name: "f".to_owned(),
+                rust_name: None,
+                inputs: vec![option(r(Mutability::Not, CppConstness::Const, &a))],
+                output: option(r(Mutability::Not, CppConstness::Var, &a)),
+                is_safe: true,
+            }],
             // Functions that Rust calls and C++ implements.
             extern_cpp_funcs: vec![
                 ZngurExternCppFn {
@@ -1785,9 +1841,28 @@ pub type Handle = super::Handle;
         };
         let (rust_code, h, cpp_code) =
             ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
-        let cpp_code = cpp_code.expect("extern C++ functions need a C++ file");
+        let cpp_code = cpp_code.expect("C++ functions need a C++ file");
         let b = "::rust::cpp::a::B";
         let const_b = format!("::rust::CppConst< {b} >");
+
+        // C++ functions: Rust sees `Option<&'a ...>` (with the implicit-`const` generic), and the
+        // C++ function takes and returns pointers.
+        assert!(
+            rust_code.contains(
+                "pub fn __zngur__c___a_cpp_fn_f_l9l10s11e13e20<'a, __C1: \
+                 ::zngur_lib::Constness>(i0: ::std::option::Option<&'a a::B::<__C1>>, ) -> \
+                 ::std::option::Option::<&'a a::B>"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            cpp_code.contains(&format!(
+                "::rust::CppPtr< {b} > __zngur_o = ::a::f(::rust::__zngur_internal_move_from_rust< \
+                 ::rust::CppPtr< {const_b} > >(i0));"
+            )),
+            "{cpp_code}"
+        );
+        assert!(cpp_code.contains(&format!("), ::rust::CppPtr< {b} > >::value")));
 
         // `extern "C++"` functions: the C++ definition takes and returns C++ references and
         // pointers; inputs are generic over constness while outputs keep fixed `Const`.
@@ -1844,6 +1919,259 @@ pub type Handle = super::Handle;
         );
         assert!(h.contains(&format!("::rust::CppPtr< {b} > o{{}};")));
         assert!(h.contains("return o;"));
+    }
+
+    #[test]
+    fn cpp_functions_get_rust_functions_in_the_cpp_tree_and_cpp_bridges() {
+        let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+        let spec = ZngurSpec {
+            cpp_funcs: vec![
+                ZngurCppFn {
+                    lifetimes: vec![],
+                    namespace: vec!["a".to_owned(), "b".to_owned()],
+                    cpp_name: "f".to_owned(),
+                    rust_name: Some("g".to_owned()),
+                    inputs: vec![i32.clone()],
+                    output: i32.clone(),
+                    is_safe: true,
+                },
+                ZngurCppFn {
+                    lifetimes: vec![],
+                    namespace: vec!["a".to_owned(), "b".to_owned()],
+                    cpp_name: "raw_step".to_owned(),
+                    rust_name: None,
+                    inputs: vec![RustType::cpp_ptr(
+                        Mutability::Not,
+                        CppIndirection::Pointer,
+                        i32.clone(),
+                    )],
+                    output: i32,
+                    is_safe: false,
+                },
+            ],
+            ..Default::default()
+        };
+        let (rust_code, _h, cpp_code) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let cpp_code = cpp_code.expect("C++ functions need a C++ file");
+
+        assert!(
+            rust_code
+                .contains("pub fn __zngur__c___a_b_cpp_fn_g_l9l10s11s13e15e22(i0: i32, ) -> i32"),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "pub unsafe fn __zngur__c___a_b_cpp_fn_raw_step_l9l10s11s13e15e22<__C1: \
+                 ::zngur_lib::Constness>(i0: *const ::zngur_lib::Cpp<i32, __C1>, ) -> i32"
+            ),
+            "{rust_code}"
+        );
+        assert!(rust_code.contains("pub mod a {"));
+        assert!(rust_code.contains("pub mod b {"));
+        assert!(
+            rust_code.contains(
+                "pub use super::super::__zngur__c___a_b_cpp_fn_g_l9l10s11s13e15e22 as g;"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "pub use super::super::__zngur__c___a_b_cpp_fn_raw_step_l9l10s11s13e15e22 as \
+                 raw_step;"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            cpp_code.contains(
+                "::int32_t __zngur_o = ::a::b::f(::rust::__zngur_internal_move_from_rust< \
+                 ::int32_t >(i0));"
+            ),
+            "{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains(
+                "::int32_t __zngur_o = ::a::b::raw_step(::rust::__zngur_internal_move_from_rust< \
+                 ::rust::CppPtr< ::rust::CppConst< ::int32_t > > >(i0));"
+            ),
+            "{cpp_code}"
+        );
+    }
+
+    #[test]
+    fn cpp_functions_with_underscores_do_not_collide() {
+        let mk = |ns: &[&str], cpp_name: &str, rust_name: Option<&str>| ZngurCppFn {
+            lifetimes: vec![],
+            namespace: ns.iter().map(|s| (*s).to_owned()).collect(),
+            cpp_name: cpp_name.to_owned(),
+            rust_name: rust_name.map(str::to_owned),
+            inputs: vec![],
+            output: RustType::UNIT,
+            is_safe: true,
+        };
+        let b_cpp_fn = cpp(&["a", "b_cpp_fn"]);
+        let dyn_fn_ty = RustType::Boxed(Box::new(RustType::Dyn(
+            RustTrait::Fn {
+                name: "Fn".to_owned(),
+                lifetimes: vec![],
+                inputs: vec![],
+                output: Box::new(b_cpp_fn.clone()),
+            },
+            vec![],
+        )));
+        let spec = ZngurSpec {
+            types: vec![
+                minimal_by_value_cpp_type(b_cpp_fn, 8, 4),
+                ZngurType {
+                    ty: dyn_fn_ty,
+                    lifetimes: vec![],
+                    layout: Some(LayoutPolicy::StackAllocated { size: 16, align: 8 }),
+                    trivially_relocatable: TriviallyRelocatable::No,
+                    wellknown_traits: vec![],
+                    exhaustive: true,
+                    methods: vec![],
+                    cpp_methods: vec![],
+                    cpp_constructors: vec![],
+                    constructor: None,
+                    variants: vec![],
+                    fields: vec![],
+                    cpp_heap_allocated: None,
+                    cpp_ref: None,
+                    cpp_stack_owned: None,
+                },
+            ],
+            cpp_funcs: vec![
+                mk(&["a"], "b", None),
+                mk(&["a"], "f", Some("b__c")),
+                mk(&["a", "b"], "c", None),
+                mk(&["a_"], "_b", None),
+                mk(&["a", "_"], "b", None),
+            ],
+            ..Default::default()
+        };
+        let (rust_code, _h, cpp_code) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let cpp_code = cpp_code.expect("C++ functions need a C++ file");
+
+        let mut extern_fns = std::collections::HashSet::new();
+        let mut hidden_fns = std::collections::HashSet::new();
+        for line in rust_code.lines() {
+            if let Some(rest) = line
+                .strip_prefix("unsafe extern \"C\" { fn ")
+                .or_else(|| line.strip_prefix("pub extern \"C\" fn "))
+            {
+                let name = rest.split('(').next().unwrap();
+                assert!(extern_fns.insert(name), "duplicate extern symbol `{name}`");
+            }
+            if let Some(rest) = line.strip_prefix("pub fn ") {
+                let name = rest.split('(').next().unwrap();
+                assert!(hidden_fns.insert(name), "duplicate hidden fn `{name}`");
+            }
+        }
+        assert_eq!(extern_fns.len(), 6);
+        assert_eq!(hidden_fns.len(), 5);
+        assert!(extern_fns.is_disjoint(&hidden_fns));
+        assert!(cpp_code.contains("::a::b()"));
+        assert!(cpp_code.contains("::a::f()"));
+        assert!(cpp_code.contains("::a::b::c()"));
+        assert!(cpp_code.contains("::a_::_b()"));
+        assert!(cpp_code.contains("::a::_::b()"));
+    }
+
+    #[test]
+    fn cpp_function_sharing_name_with_cpp_type_avoids_value_namespace_collision() {
+        let local_foo = cpp(&["ns", "Foo"]);
+        let imported_bar = cpp(&["ns", "Bar"]);
+        let spec = ZngurSpec {
+            types: vec![minimal_opaque_cpp_type(local_foo.clone())],
+            imported_modules: vec![ModuleImport {
+                path: "./base.zng".into(),
+                crate_name: Some("base".to_owned()),
+                cpp_types: vec![vec!["ns".to_owned(), "Bar".to_owned()]],
+                cpp_heap_allocated_types: vec![],
+                cpp_by_value_types: vec![],
+            }],
+            cpp_funcs: vec![
+                ZngurCppFn {
+                    lifetimes: vec![Lifetime("a".to_owned())],
+                    namespace: vec!["ns".to_owned()],
+                    cpp_name: "Foo".to_owned(),
+                    rust_name: None,
+                    inputs: vec![RustType::Ref(
+                        Mutability::Not,
+                        Some(Lifetime("a".to_owned())),
+                        Box::new(RustType::CppConst(Box::new(local_foo))),
+                    )],
+                    output: RustType::UNIT,
+                    is_safe: true,
+                },
+                ZngurCppFn {
+                    lifetimes: vec![Lifetime("a".to_owned())],
+                    namespace: vec!["ns".to_owned()],
+                    cpp_name: "Bar".to_owned(),
+                    rust_name: None,
+                    inputs: vec![RustType::Ref(
+                        Mutability::Not,
+                        Some(Lifetime("a".to_owned())),
+                        Box::new(RustType::CppConst(Box::new(imported_bar))),
+                    )],
+                    output: RustType::UNIT,
+                    is_safe: true,
+                },
+            ],
+            ..Default::default()
+        };
+        let (rust_code, _h, _cpp_code) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        assert!(
+            rust_code
+                .contains("pub struct Foo<C: ::zngur_lib::Constness = ::zngur_lib::NonConst> {"),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "pub type Bar<C = ::zngur_lib::NonConst> = ::base::generated::ns::Bar<C>;"
+            ),
+            "{rust_code}"
+        );
+        assert!(!rust_code.contains("pub use ::base::generated::ns::Bar;"));
+    }
+
+    #[test]
+    fn cpp_functions_move_imported_by_value_types_like_local_ones() {
+        let point = cpp(&["geo", "Point"]);
+        let spec = ZngurSpec {
+            imported_modules: vec![ModuleImport {
+                path: "./geo.zng".into(),
+                crate_name: Some("geo".to_owned()),
+                cpp_types: vec![vec!["geo".to_owned(), "Point".to_owned()]],
+                cpp_heap_allocated_types: vec![],
+                cpp_by_value_types: vec![(point.clone(), "::geo::Point".to_owned())],
+            }],
+            cpp_funcs: vec![ZngurCppFn {
+                lifetimes: vec![],
+                namespace: vec!["shapes".to_owned()],
+                cpp_name: "Mirror".to_owned(),
+                rust_name: None,
+                inputs: vec![point.clone()],
+                output: point,
+                is_safe: true,
+            }],
+            ..Default::default()
+        };
+        let (_rust_code, _h, cpp_code) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let cpp_code = cpp_code.expect("C++ functions need a C++ file");
+
+        // Constructed in place in the Rust value, from the argument moved out of its wrapper.
+        assert!(
+            cpp_code.contains(
+                "::new (static_cast<void*>(o)) \
+                 ::geo::Point(::shapes::Mirror(::rust::__zngur_internal_move_from_rust< \
+                 ::rust::cpp::geo::Point >(i0).cpp()));"
+            ),
+            "{cpp_code}"
+        );
     }
 
     #[test]

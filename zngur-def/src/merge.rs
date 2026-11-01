@@ -54,6 +54,8 @@ pub enum ConflictSource {
     CppMethod(Box<crate::ZngurCppMethod>),
     /// A C++ constructor, by its Rust name.
     CppConstructor(String),
+    /// A free C++ function, by its namespace and Rust name.
+    CppFn(Vec<String>, String),
     Field(String),
 }
 
@@ -790,6 +792,48 @@ fn canonicalize_extern_cpp_fn(f: &ZngurExternCppFn) -> ZngurExternCppFn {
             .collect(),
         output: f.output.canonicalize_lifetimes(outer),
         is_safe: f.is_safe,
+    }
+}
+
+fn canonicalize_cpp_fn(f: &crate::ZngurCppFn) -> crate::ZngurCppFn {
+    let outer = &f.lifetimes;
+    crate::ZngurCppFn {
+        namespace: f.namespace.clone(),
+        cpp_name: f.cpp_name.clone(),
+        rust_name: f.rust_name.clone(),
+        lifetimes: (0..outer.len())
+            .map(|i| Lifetime(format!("__outer_{i}")))
+            .collect(),
+        inputs: f
+            .inputs
+            .iter()
+            .map(|t| t.canonicalize_lifetimes(outer))
+            .collect(),
+        output: f.output.canonicalize_lifetimes(outer),
+        is_safe: f.is_safe,
+    }
+}
+
+impl Merge for crate::ZngurCppFn {
+    fn merge(self, into: &mut Self) -> MergeResult {
+        if canonicalize_cpp_fn(&self) != canonicalize_cpp_fn(into) {
+            let source =
+                |f: &Self| ConflictSource::CppFn(f.namespace.clone(), f.rust_name().to_owned());
+            return Err(MergeFailure::Conflict(
+                "C++ function mismatch".to_string(),
+                (source(&self), source(into)),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Merge<ZngurSpec> for crate::ZngurCppFn {
+    /// Merges a C++ function into a specification's C++ function list.
+    fn merge(self, into: &mut ZngurSpec) -> MergeResult {
+        merge_by_identity(vec![self], &mut into.cpp_funcs, |a, b| {
+            a.namespace == b.namespace && a.rust_name() == b.rust_name()
+        })
     }
 }
 

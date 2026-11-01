@@ -838,6 +838,40 @@ pub struct ZngurCppConstructor {
     pub is_safe: bool,
 }
 
+/// A free C++ function, declared with a `c++::` path or in a `c++::` scope like
+/// `mod c++::ns { unsafe fn f(const c++::ns::Bar&) -> i32; }`. zngur generates a Rust function
+/// for it, at the same path in the `c++::` tree as the C++ function's namespace, which calls it.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct ZngurCppFn {
+    /// The C++ namespace (`["ns"]` for `::ns::f`). Never empty.
+    pub namespace: Vec<String>,
+    /// The name of the C++ function.
+    pub cpp_name: String,
+    /// The name of the Rust function (from `as`), if it isn't `cpp_name`.
+    pub rust_name: Option<String>,
+    /// The lifetime parameters that it declares.
+    pub lifetimes: Vec<Lifetime>,
+    pub inputs: Vec<RustType>,
+    pub output: RustType,
+    pub is_safe: bool,
+}
+
+impl ZngurCppFn {
+    /// The name of the Rust function.
+    pub fn rust_name(&self) -> &str {
+        self.rust_name.as_deref().unwrap_or(&self.cpp_name)
+    }
+
+    /// The qualified C++ name, e.g. `::ns::f`.
+    pub fn cpp_path(&self) -> String {
+        self.namespace
+            .iter()
+            .chain([&self.cpp_name])
+            .map(|s| format!("::{s}"))
+            .collect()
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub struct ZngurTrait {
     pub tr: RustTrait,
@@ -874,6 +908,7 @@ pub struct ZngurSpec {
     pub types: Vec<ZngurType>,
     pub traits: IndexMap<RustTrait, ZngurTrait>,
     pub funcs: Vec<ZngurFn>,
+    pub cpp_funcs: Vec<ZngurCppFn>,
     pub extern_cpp_funcs: Vec<ZngurExternCppFn>,
     pub extern_cpp_impls: Vec<ZngurExternCppImpl>,
     pub additional_includes: AdditionalIncludes,

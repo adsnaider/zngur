@@ -13,10 +13,10 @@ use zngur_def::{
     AdditionalIncludes, ConflictSource, ConvertPanicToException, CppConstness, CppHeapAllocated,
     CppIndirection, CppRef, CppStackOwned, Import, LayoutPolicy, Lifetime, Merge, MergeFailure,
     ModuleImport, Mutability, PrimitiveRustType, RustPathAndGenerics, RustTrait, RustType,
-    TriviallyRelocatable, TypeVar, ZngurConstructor, ZngurCppConstructor, ZngurCppMethod,
-    ZngurExternCppFn, ZngurExternCppImpl, ZngurField, ZngurFn, ZngurMethod, ZngurMethodDetails,
-    ZngurMethodReceiver, ZngurSpec, ZngurTrait, ZngurType, ZngurVariant, ZngurWellknownTrait,
-    cpp_handle_field_name, cpp_handle_keyword,
+    TriviallyRelocatable, TypeVar, ZngurConstructor, ZngurCppConstructor, ZngurCppFn,
+    ZngurCppMethod, ZngurExternCppFn, ZngurExternCppImpl, ZngurField, ZngurFn, ZngurMethod,
+    ZngurMethodDetails, ZngurMethodReceiver, ZngurSpec, ZngurTrait, ZngurType, ZngurVariant,
+    ZngurWellknownTrait, cpp_handle_field_name, cpp_handle_keyword,
 };
 
 pub type Span = SimpleSpan<usize>;
@@ -455,10 +455,7 @@ enum ParsedItem<'a> {
         tr: Spanned<ParsedRustTrait<'a>>,
         methods: Vec<Spanned<ParsedMethod<'a>>>,
     },
-    Fn {
-        is_safe: Option<bool>,
-        function: Spanned<ParsedFunction<'a>>,
-    },
+    Fn(Spanned<ParsedFunction<'a>>),
     ExternCpp(Vec<ParsedExternCppItem<'a>>),
     Alias(ParsedAlias<'a>),
     Import(ParsedImportPath),
@@ -490,10 +487,7 @@ enum ProcessedItem<'a> {
         tr: Spanned<ParsedRustTrait<'a>>,
         methods: Vec<Spanned<ParsedMethod<'a>>>,
     },
-    Fn {
-        is_safe: Option<bool>,
-        function: Spanned<ParsedFunction<'a>>,
-    },
+    Fn(Spanned<ParsedFunction<'a>>),
     ExternCpp(Vec<ParsedExternCppItem<'a>>),
     Import(ParsedImportPath),
     ModuleImport {
@@ -622,10 +616,20 @@ struct ParsedMethod<'a> {
     output: ParsedRustType<'a>,
 }
 
+/// A free function item (Rust or C++), disambiguated after resolving `path` in scope:
+/// `[safe | unsafe] [async] fn path[<'a, ..., T, ...>](types...) [-> type] [as alias];`
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedFunction<'a> {
+    is_safe: Option<bool>,
+    async_span: Option<Span>,
     path: ParsedPath<'a>,
-    signature: ParsedMethod<'a>,
+    name_is_ident: bool,
+    lifetimes: Vec<&'a str>,
+    generics: Vec<ParsedRustType<'a>>,
+    inputs: Vec<ParsedRustType<'a>>,
+    output: ParsedRustType<'a>,
+    alias: Option<(&'a str, bool)>,
+    sig_span: Span,
 }
 
 impl ParsedMethod<'_> {
@@ -1202,10 +1206,10 @@ fn check_cpp_signature_lints_at(
     if !is_allowed(ctx, "elided_lifetimes")
         && (elided_receiver || inputs.iter().chain([output]).any(has_elided_ref))
     {
-        let example = if what == "constructor" {
-            "safe constructor<'a>(&'a const c++::T) as from_ref"
-        } else {
-            "fn f<'a>(&'a const self) -> &'a const T"
+        let example = match what {
+            "constructor" => "safe constructor<'a>(&'a const c++::T) as from_ref",
+            "member function" => "fn f<'a>(&'a const self) -> &'a const T",
+            _ => "fn f<'a>(&'a const T) -> &'a const U",
         };
         let warning = format!(
             "this C++ {what} has a reference without a lifetime, which can't be checked \
@@ -1437,9 +1441,9 @@ fn is_valid_cpp_object_inner(ty: &RustType) -> bool {
 }
 
 /// Checks `RustType::Cpp(_)` occurrences in the signature of a direct C++ item (member function,
-/// constructor): every `c++::` type must be declared locally or imported (when `check_undeclared`
-/// is true), and can only appear by value if it is held by value in Rust (`#layout(...)` and
-/// `#trivially_relocatable`).
+/// constructor, free function): every `c++::` type must be declared locally or imported (when
+/// `check_undeclared` is true), and can only appear by value if it is held by value in Rust
+/// (`#layout(...)` and `#trivially_relocatable`).
 fn check_cpp_signature_type(
     ty: &RustType,
     in_indirection: bool,
@@ -2109,7 +2113,11 @@ impl ProcessedItem<'_> {
                 // anchored paths only at the file root and require nested mods
                 // to be relative.
                 let anchor = match path.start {
-                    ParsedPathStart::Cpp => Some("c++::"),
+                    ParsedPathStart::Cpp => Some(if path.segments.is_empty() {
+                        "c++"
+                    } else {
+                        "c++::"
+                    }),
                     ParsedPathStart::Crate => Some("crate::"),
                     ParsedPathStart::Absolute => Some("::"),
                     ParsedPathStart::Relative => None,
@@ -3139,45 +3147,190 @@ impl ProcessedItem<'_> {
                 ctx.record_span(&trt, tr.span.into_range());
                 checked_merge(trt, &mut r.spec, tr.span, ctx, None);
             }
-            ProcessedItem::Fn {
-                is_safe,
-                function: f,
-            } => {
-                let function = f.inner;
-                let method = function.signature.to_zngur(scope, ctx);
-                let target = if function.path.start == ParsedPathStart::Relative
-                    && function.path.segments.len() == 1
-                {
-                    scope.base.child(function.path.segments[0])
-                } else {
-                    scope.resolve_path(function.path)
-                };
-                let path = match target {
-                    EntityPath::Rust(v) => v,
-                    EntityPath::Cpp(_) => {
-                        ctx.add_error_str(
-                            "a free function cannot be declared inside a c++:: scope",
-                            f.span,
-                        );
-                        return;
+            ProcessedItem::Fn(f) => {
+                let item_span = f.span;
+                let f = f.inner;
+                let target =
+                    if f.path.start == ParsedPathStart::Relative && f.path.segments.len() == 1 {
+                        scope.base.child(f.path.segments[0])
+                    } else {
+                        scope.resolve_path(f.path.clone())
+                    };
+                match target {
+                    EntityPath::Rust(path) => {
+                        let sig_span = f.sig_span;
+                        if !f.name_is_ident {
+                            let name = f.path.segments.last().expect("at_least(1)");
+                            ctx.add_error_str(
+                                &format!(
+                                    "`{name}` is a keyword and cannot be used as a Rust function name"
+                                ),
+                                sig_span,
+                            );
+                            return;
+                        }
+                        if f.alias.is_some() {
+                            ctx.add_error_str(
+                                "Rust free functions cannot be renamed with `as`",
+                                sig_span,
+                            );
+                            return;
+                        }
+                        let name = *f.path.segments.last().expect("at_least(1)");
+                        let parsed_method = match parsed_method_from_signature(
+                            name,
+                            f.async_span,
+                            f.lifetimes,
+                            f.generics,
+                            (f.inputs, f.output),
+                            sig_span,
+                        ) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                ctx.add_error_str(&e.reason().to_string(), *e.span());
+                                return;
+                            }
+                        };
+                        let method = parsed_method.to_zngur(scope, ctx);
+                        if !check_method_types(ctx, sig_span, &[], &method, []) {
+                            return;
+                        }
+                        let func = ZngurFn {
+                            path: RustPathAndGenerics {
+                                path,
+                                generics: method.generics,
+                                ..Default::default()
+                            },
+                            lifetimes: method.lifetimes,
+                            inputs: method.inputs,
+                            output: method.output,
+                            is_safe: f.is_safe,
+                        };
+                        ctx.record_span(&func, sig_span.into_range());
+                        checked_merge(func, &mut r.spec, sig_span, ctx, None);
                     }
-                };
-                if !check_method_types(ctx, f.span, &[], &method, []) {
-                    return;
+                    EntityPath::Cpp(mut segments) => {
+                        let cpp_name = segments.pop().expect("at_least(1)");
+                        let namespace = segments;
+                        let Some(is_safe) = f.is_safe else {
+                            let is_bare_relative = f.path.start == ParsedPathStart::Relative
+                                && (f.path.segments.len() == 1 || !scope.has_alias(&f.path));
+                            let report_span = ctx.report_span_for_range(item_span.into_range());
+                            let msg = "C++ functions must be marked `safe` or `unsafe`";
+                            let mut report = Report::build(ReportKind::Error, report_span.clone())
+                                .with_message(msg)
+                                .with_label(
+                                    Label::new(report_span)
+                                        .with_message(msg)
+                                        .with_color(Color::Red),
+                                );
+                            if is_bare_relative && matches!(scope.base, EntityPath::Cpp(_)) {
+                                report = report.with_help(
+                                    "inside a `c++::` module, prefix Rust functions with `::` or `crate::`",
+                                );
+                            }
+                            ctx.add_fatal_report(report.finish());
+                            return;
+                        };
+                        if f.async_span.is_some() {
+                            ctx.add_error_str("C++ functions cannot be `async`", item_span);
+                            return;
+                        }
+                        if !f.generics.is_empty() {
+                            ctx.add_error_str(
+                                "C++ functions do not support generic type arguments",
+                                item_span,
+                            );
+                            return;
+                        }
+                        if namespace.is_empty() {
+                            ctx.add_error_str(
+                                "C++ functions in the global namespace aren't supported",
+                                item_span,
+                            );
+                            return;
+                        }
+                        if f.inputs
+                            .iter()
+                            .chain([&f.output])
+                            .any(contains_relative_self)
+                        {
+                            ctx.add_error_str(
+                                "free C++ functions do not take a `self` receiver (declare member \
+                                 functions inside a `type c++::... { ... }` block)",
+                                item_span,
+                            );
+                            return;
+                        }
+                        let inputs: Vec<RustType> = f
+                            .inputs
+                            .into_iter()
+                            .map(|x| x.to_zngur(scope, ctx))
+                            .collect();
+                        let output = f.output.to_zngur(scope, ctx);
+                        let fn_lifetimes = lifetimes(&f.lifetimes);
+                        if !check_types(
+                            ctx,
+                            item_span,
+                            &fn_lifetimes,
+                            inputs.iter().chain([&output]),
+                            [],
+                            LifetimeContext::Item,
+                            true,
+                            true,
+                        ) {
+                            return;
+                        }
+                        let rust_name = f.alias.map(|(s, _)| s);
+                        let has_rename = rust_name.is_some();
+                        let func = ZngurCppFn {
+                            namespace,
+                            cpp_name: cpp_name.clone(),
+                            rust_name: rust_name.filter(|&n| n != cpp_name).map(str::to_owned),
+                            lifetimes: fn_lifetimes,
+                            inputs,
+                            output,
+                            is_safe,
+                        };
+                        if !check_rust_fn_name(ctx, item_span, func.rust_name(), has_rename, false)
+                        {
+                            return;
+                        }
+                        check_cpp_signature_lints(
+                            ctx,
+                            item_span,
+                            "function",
+                            is_safe,
+                            false,
+                            false,
+                            &func.inputs,
+                            &func.output,
+                        );
+                        if !ctx.fetch_spans_current(&func).is_empty() {
+                            ctx.add_error_str(
+                                &format!(
+                                    "`{}` is already the Rust name of another C++ function in `c++::{}` \
+                                     (use `as <rust_name>` to give C++ overloads distinct Rust names)",
+                                    func.rust_name(),
+                                    func.namespace.join("::")
+                                ),
+                                item_span,
+                            );
+                            return;
+                        }
+                        ctx.record_span(&func, item_span.into_range());
+                        checked_merge(
+                            func,
+                            &mut r.spec,
+                            item_span,
+                            ctx,
+                            Some(MergeContext {
+                                outer_ty: RustType::UNIT,
+                                variant: None,
+                            }),
+                        );
+                    }
                 }
-                let func = ZngurFn {
-                    path: RustPathAndGenerics {
-                        path,
-                        generics: method.generics,
-                        ..Default::default()
-                    },
-                    lifetimes: method.lifetimes,
-                    inputs: method.inputs,
-                    output: method.output,
-                    is_safe,
-                };
-                ctx.record_span(&func, f.span.into_range());
-                checked_merge(func, &mut r.spec, f.span, ctx, None);
             }
             ProcessedItem::ExternCpp(items) => {
                 for item in items {
@@ -3597,6 +3750,9 @@ enum PartialSpanKey {
     /// a [`CppConstructor`](zngur_def::ZngurCppConstructor)
     /// outer_ty, rust_name
     CppConstructor(RustType, String),
+    /// a [`ZngurCppFn`](zngur_def::ZngurCppFn)
+    /// namespace, rust_name
+    CppFn(Vec<String>, String),
     /// a [`Field`](`zngur_def::ZngurField`) on a [`Type`](zngur_def::ZngurType)
     /// or it's internal [`Variant`](zngur_def::ZngurVariant)
     /// outer_ty, variant?, field_name
@@ -3739,6 +3895,12 @@ impl IntoSpanKey for zngur_def::ZngurFn {
     }
 }
 
+impl IntoSpanKey for zngur_def::ZngurCppFn {
+    fn into_span_key(&self) -> PartialSpanKey {
+        PartialSpanKey::CppFn(self.namespace.clone(), self.rust_name().to_owned())
+    }
+}
+
 /// trait to impl for type that require variant and type qualifications for lookup
 trait VariantQualifiedSpanKeyExt {
     fn into_span_key_with_variant(
@@ -3778,6 +3940,9 @@ impl VariantQualifiedSpanKeyExt for zngur_def::ConflictSource {
             }
             zngur_def::ConflictSource::CppConstructor(name) => {
                 PartialSpanKey::cpp_constructor(outer_ty, name.clone())
+            }
+            zngur_def::ConflictSource::CppFn(namespace, name) => {
+                PartialSpanKey::CppFn(namespace.clone(), name.clone())
             }
             zngur_def::ConflictSource::Field(name) => {
                 PartialSpanKey::field(outer_ty, variant, name.clone())
@@ -4824,9 +4989,7 @@ fn process_parsed_item<'a>(
             type_vars,
         }),
         ParsedItem::Trait { tr, methods } => Ret::Processed(ProcessedItem::Trait { tr, methods }),
-        ParsedItem::Fn { is_safe, function } => {
-            Ret::Processed(ProcessedItem::Fn { is_safe, function })
-        }
+        ParsedItem::Fn(function) => Ret::Processed(ProcessedItem::Fn(function)),
         ParsedItem::ExternCpp(items) => Ret::Processed(ProcessedItem::ExternCpp(items)),
         ParsedItem::Import(path) => Ret::Processed(ProcessedItem::Import(path)),
         ParsedItem::ModuleImport { path, span } => {
@@ -5741,6 +5904,50 @@ impl ZngurSpecBuilder {
                 }
             }
         }
+        for func in &spec.cpp_funcs {
+            let f_span = ctx
+                .fetch_spans_global(func)
+                .first()
+                .copied()
+                .cloned()
+                .unwrap_or((0, 0usize..0));
+            if let Some(len) = (1..=func.namespace.len())
+                .find(|&len| known_cpp_types.contains(&func.namespace[..len]))
+            {
+                let prefix = func.namespace[..len].join("::");
+                let msg = if len == func.namespace.len() {
+                    format!(
+                        "`c++::{prefix}` is a C++ type, not a namespace \
+                         (declare static member functions inside `type c++::{prefix} {{ ... }}`)"
+                    )
+                } else {
+                    format!("`c++::{prefix}` is a C++ type, not a namespace")
+                };
+                ctx.add_fatal_report(
+                    Report::build(ReportKind::Error, f_span.clone())
+                        .with_message(&msg)
+                        .with_label(Label::new(f_span).with_message(&msg).with_color(Color::Red))
+                        .finish(),
+                );
+                continue;
+            }
+            if let Err(msg) = func.inputs.iter().chain([&func.output]).try_for_each(|t| {
+                check_cpp_signature_type(
+                    t,
+                    false,
+                    &known_cpp_types,
+                    &by_value_cpp_types,
+                    !had_incomplete_imports,
+                )
+            }) {
+                ctx.add_fatal_report(
+                    Report::build(ReportKind::Error, f_span.clone())
+                        .with_message(&msg)
+                        .with_label(Label::new(f_span).with_message(&msg).with_color(Color::Red))
+                        .finish(),
+                );
+            }
+        }
         // Check that imported `c++::` types do not collide with local `c++::` declarations or
         // with `c++::` types imported from a different crate.
         let mut seen_reexports: HashSet<(String, Vec<String>)> = HashSet::new();
@@ -6594,41 +6801,6 @@ fn method_signature<'a>()
         .boxed()
 }
 
-fn function_signature<'a>()
--> impl Parser<'a, ParserInput<'a>, ParsedFunction<'a>, ZngParserExtra<'a>> + Clone {
-    let function_path = path().try_map_with(|path, extra| {
-        if path.segments.is_empty() {
-            Err(Rich::custom(extra.span(), "expected function name"))
-        } else {
-            Ok(path)
-        }
-    });
-    spanned(just(Token::KwAsync))
-        .or_not()
-        .then_ignore(just(Token::KwFn))
-        .then(function_path)
-        .then(fn_generic_params())
-        .then(fn_args(rust_type()))
-        .try_map(|(((opt_async, path), (lifetimes, generics)), args), span| {
-            let name = *path
-                .segments
-                .last()
-                .expect("function paths must contain a name");
-            Ok(ParsedFunction {
-                path,
-                signature: parsed_method_from_signature(
-                    name,
-                    opt_async.map(|x| x.span),
-                    lifetimes,
-                    generics,
-                    args,
-                    span,
-                )?,
-            })
-        })
-        .boxed()
-}
-
 fn parsed_method_from_signature<'a>(
     name: &'a str,
     async_span: Option<Span>,
@@ -7066,15 +7238,84 @@ fn trait_item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngParse
 }
 
 fn fn_item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngParserExtra<'a>> + Clone {
-    choice((
+    let safety = choice((
         just(Token::KwSafe).to(true),
         just(Token::KwUnsafe).to(false),
     ))
-    .or_not()
-    .then(spanned(function_signature()))
-    .then_ignore(just(Token::Semicolon))
-    .map(|(is_safe, function)| ParsedItem::Fn { is_safe, function })
-    .boxed()
+    .or_not();
+    let start = choice((
+        just(Token::ColonColon).to(ParsedPathStart::Absolute),
+        just([Token::KwCrate, Token::ColonColon]).to(ParsedPathStart::Crate),
+        just([Token::CppPathStart, Token::ColonColon]).to(ParsedPathStart::Cpp),
+        empty().to(ParsedPathStart::Relative),
+    ));
+    let fn_path = start
+        .then(
+            cpp_name_with_ident_flag()
+                .separated_by(just(Token::ColonColon))
+                .at_least(1)
+                .collect::<Vec<_>>()
+                .boxed(),
+        )
+        .try_map_with(|(start, segs), extra| {
+            for &(seg, is_ident) in &segs[..segs.len() - 1] {
+                if !is_ident {
+                    return Err(Rich::custom(
+                        extra.span(),
+                        format!("expected identifier in path, found keyword `{seg}`"),
+                    ));
+                }
+            }
+            let name_is_ident = segs.last().expect("at_least(1)").1;
+            let segments = segs.into_iter().map(|(s, _)| s).collect();
+            Ok((
+                ParsedPath {
+                    start,
+                    segments,
+                    span: extra.span(),
+                },
+                name_is_ident,
+            ))
+        });
+    let sig = spanned(
+        spanned(just(Token::KwAsync))
+            .or_not()
+            .then_ignore(just(Token::KwFn))
+            .then(fn_path)
+            .then(fn_generic_params())
+            .then(fn_args(rust_type()))
+            .then(
+                just(Token::KwAs)
+                    .ignore_then(cpp_name_with_ident_flag())
+                    .or_not(),
+            ),
+    );
+    spanned(safety.then(sig))
+        .then_ignore(just(Token::Semicolon))
+        .map(|outer| {
+            let (is_safe, sig) = outer.inner;
+            let sig_span = sig.span;
+            let (
+                (((opt_async, (path, name_is_ident)), (lifetimes, generics)), (inputs, output)),
+                alias,
+            ) = sig.inner;
+            ParsedItem::Fn(Spanned {
+                inner: ParsedFunction {
+                    is_safe,
+                    async_span: opt_async.map(|x| x.span),
+                    path,
+                    name_is_ident,
+                    lifetimes,
+                    generics,
+                    inputs,
+                    output,
+                    alias,
+                    sig_span,
+                },
+                span: outer.span,
+            })
+        })
+        .boxed()
 }
 
 fn word_token<'a>() -> impl Parser<'a, ParserInput<'a>, &'a str, ZngParserExtra<'a>> + Clone {
@@ -7257,7 +7498,7 @@ fn item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngParserExtra
             unstable_feature(),
             allow_item(),
             just(Token::KwMod)
-                .ignore_then(path())
+                .ignore_then(mod_path())
                 .then(
                     item.clone()
                         .repeated()
@@ -7306,6 +7547,16 @@ fn module_import_item<'a>()
             path: std::path::PathBuf::from(path),
             span: extra.span(),
         })
+        .boxed()
+}
+
+fn mod_path<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedPath<'a>, ZngParserExtra<'a>> + Clone {
+    path()
+        .or(just(Token::CppPathStart).map_with(|_, extra| ParsedPath {
+            start: ParsedPathStart::Cpp,
+            segments: vec![],
+            span: extra.span(),
+        }))
         .boxed()
 }
 

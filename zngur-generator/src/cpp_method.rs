@@ -1,12 +1,12 @@
-//! The C++ side of C++ member functions and constructors that Rust calls (`ZngurCppMethod`,
-//! `ZngurCppConstructor`): `extern "C"` functions that convert the arguments and call them
-//! directly, so that nobody has to write a forwarding body by hand.
+//! The C++ side of C++ functions, member functions and constructors that Rust calls
+//! (`ZngurCppFn`, `ZngurCppMethod`, `ZngurCppConstructor`): `extern "C"` functions that convert
+//! the arguments and call them directly, so that nobody has to write a forwarding body by hand.
 
 use std::collections::HashMap;
 
 use zngur_def::{
-    CppConstness, CppIndirection, PrimitiveRustType, RustType, ZngurCppConstructor, ZngurCppMethod,
-    ZngurMethodReceiver,
+    CppConstness, CppIndirection, PrimitiveRustType, RustType, ZngurCppConstructor, ZngurCppFn,
+    ZngurCppMethod, ZngurMethodReceiver,
 };
 
 use crate::rust::IntoCpp;
@@ -106,6 +106,16 @@ impl BridgeRenderer<'_> {
             &method.output,
             &format!("{owner_cpp_type}::{name}"),
         )
+    }
+
+    /// The bridge function `mangled_name` for the free C++ function `func`.
+    pub fn function(&self, mangled_name: &str, func: &ZngurCppFn) -> String {
+        let mut params = vec![];
+        let args = self.args(&func.inputs, &mut params);
+        params.push("uint8_t* o".to_owned());
+        let cpp_path = func.cpp_path();
+        let call = format!("{cpp_path}({args})");
+        self.call(mangled_name, &params, &call, &func.output, &cpp_path)
     }
 
     /// A bridge function that makes the C++ call `call`, of the function `callee`, and passes its

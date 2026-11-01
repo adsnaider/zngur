@@ -1376,6 +1376,52 @@ pub {}fn {rust_name}{params}("#,
         mangled_name
     }
 
+    /// Adds the top-level `#[doc(hidden)]` Rust function for a free C++ function in `namespace`,
+    /// which calls the C++ bridge function, and returns `(hidden_name, mangled_name)`. `inputs`
+    /// and `output` are their Rust types.
+    pub fn add_cpp_function(
+        &mut self,
+        namespace: &[String],
+        rust_name: &str,
+        lifetimes: &[Lifetime],
+        inputs: &[RustType],
+        output: &RustType,
+        is_safe: bool,
+    ) -> (String, String) {
+        let mangled_name = self.mangle_name(&format!(
+            "_c++::{}=cpp_fn={rust_name}",
+            namespace.join("::")
+        ));
+        // `mangled_name` always starts with single `_zngur_`, so `_{mangled_name}` (`__zngur_...`)
+        // never collides with any `extern "C"` bridge symbol while keeping every path distinct.
+        let hidden_name = format!("_{mangled_name}");
+        w!(
+            self,
+            r#"
+unsafe extern "C" {{ fn {mangled_name}("#
+        );
+        for n in 0..inputs.len() {
+            w!(self, "i{n}: *mut u8, ");
+        }
+        wln!(self, r#"o: *mut u8); }}"#);
+        let (params, input_tys) = cpp_fn_inputs(lifetimes, inputs);
+        w!(
+            self,
+            r#"
+#[doc(hidden)]
+#[allow(non_snake_case, clippy::too_many_arguments)]
+pub {}fn {hidden_name}{params}("#,
+            if is_safe { "" } else { "unsafe " },
+        );
+        for (n, ty) in input_tys.iter().enumerate() {
+            w!(self, "i{n}: {ty}, ");
+        }
+        wln!(self, ") -> {output} {{ unsafe {{");
+        self.call_cpp_function(&format!("{mangled_name}("), inputs.len());
+        wln!(self, "}} }}");
+        (hidden_name, mangled_name)
+    }
+
     /// Adds the associated function of `owner` for the C++ constructor `constructor`, which
     /// returns the constructor call as a `zngur_lib::CppCtor` that calls the C++ bridge function
     /// whose (mangled) name is returned. Only non-`const` objects are constructed (`into_const()` makes them `const`).

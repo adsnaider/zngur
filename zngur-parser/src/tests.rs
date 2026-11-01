@@ -1625,22 +1625,26 @@ mod crate::foo {
 #[test]
 fn free_fn_rejected_inside_cpp_scope() {
     // There's no real Rust function living in the generated c++::-only
-    // module tree, so a top-level `fn` declaration inside `mod c++::a {
-    // ... }` must be rejected rather than silently misinterpreting the
-    // c++::-only path as if it were a real, absolute Rust path.
+    // module tree, so a bare `fn` declaration inside `mod c++::a { ... }`
+    // must be rejected (requiring `safe`/`unsafe` for C++ functions, or
+    // `::`/`crate::` for Rust functions), even if an unrelated `use ... as foo`
+    // alias is in scope.
     check_fail(
         r#"
+use crate::other as foo;
 mod c++::a {
     fn foo(i32) -> bool;
 }
     "#,
         expect![[r#"
-            Error: a free function cannot be declared inside a c++:: scope
-               ╭─[ test.zng:3:5 ]
+            Error: C++ functions must be marked `safe` or `unsafe`
+               ╭─[ test.zng:4:5 ]
                │
-             3 │     fn foo(i32) -> bool;
+             4 │     fn foo(i32) -> bool;
                │     ─────────┬─────────  
-               │              ╰─────────── a free function cannot be declared inside a c++:: scope
+               │              ╰─────────── C++ functions must be marked `safe` or `unsafe`
+               │ 
+               │ Help: inside a `c++::` module, prefix Rust functions with `::` or `crate::`
             ───╯
         "#]],
     );
@@ -3886,17 +3890,28 @@ extern "C++" {
 fn mutable_reference_to_cpp_class_is_rejected() {
     check_fail(
         r#"
+type c++::B {}
 extern "C++" {
+    safe fn e<'a>(&'a mut c++::B);
+}
+mod c++::ns {
     safe fn f<'a>(&'a mut c++::B);
 }
 "#,
         expect![[r#"
             Error: a reference to a C++ class must say whether the object is `const`: `&'a unique var c++::B` (a `T&` that Rust uses uniquely, `&mut T` in Rust)
-               ╭─[ test.zng:3:10 ]
+               ╭─[ test.zng:4:10 ]
                │
-             3 │     safe fn f<'a>(&'a mut c++::B);
+             4 │     safe fn e<'a>(&'a mut c++::B);
                │          ────────────┬───────────  
                │                      ╰───────────── a reference to a C++ class must say whether the object is `const`: `&'a unique var c++::B` (a `T&` that Rust uses uniquely, `&mut T` in Rust)
+            ───╯
+            Error: a reference to a C++ class must say whether the object is `const`: `&'a unique var c++::B` (a `T&` that Rust uses uniquely, `&mut T` in Rust)
+               ╭─[ test.zng:7:5 ]
+               │
+             7 │     safe fn f<'a>(&'a mut c++::B);
+               │     ──────────────┬──────────────  
+               │                   ╰──────────────── a reference to a C++ class must say whether the object is `const`: `&'a unique var c++::B` (a `T&` that Rust uses uniquely, `&mut T` in Rust)
             ───╯
         "#]],
     );
@@ -6518,4 +6533,463 @@ type c++::RefOnly {}
             "unexpected error for `{src}`:\n{err}"
         );
     }
+}
+
+#[test]
+fn cpp_functions_parse() {
+    use zngur_def::{CppIndirection, Mutability, PrimitiveRustType};
+
+    let parsed = parse_str(
+        r#"
+use c++::a::b as ab;
+
+mod c++::a {
+    type B {
+        #layout(size = 8, align = 4);
+        #trivially_relocatable;
+    }
+
+    mod b {
+        unsafe fn f(const c++::a::B&) -> i32;
+        safe fn g(i32) -> c++::a::B as make_b;
+        safe fn h();
+        safe fn type(i32) -> i32 as get_type;
+    }
+
+    safe fn b::sub_fn(i32) -> i32;
+}
+
+safe fn c++::a::b::top_fn();
+safe fn ab::alias_fn();
+
+safe fn crate::rust_root(i32);
+mod crate::r {
+    unsafe fn rust_unsafe(i32);
+    fn rust_default(i32);
+}
+"#,
+        NullCfg,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    let funcs = &parsed.spec.cpp_funcs;
+    assert_eq!(funcs.len(), 7);
+    let b = RustType::Cpp(vec!["a".to_owned(), "B".to_owned()]);
+    let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+
+    assert_eq!(funcs[0].namespace, ["a", "b"]);
+    assert_eq!(funcs[0].cpp_path(), "::a::b::f");
+    assert_eq!(funcs[0].rust_name(), "f");
+    assert_eq!(
+        funcs[0].inputs,
+        vec![RustType::cpp_ptr(
+            Mutability::Not,
+            CppIndirection::Reference,
+            b.clone()
+        )]
+    );
+    assert_eq!(funcs[0].output, i32);
+    assert!(!funcs[0].is_safe);
+
+    assert_eq!(funcs[1].cpp_name, "g");
+    assert_eq!(funcs[1].rust_name(), "make_b");
+    assert_eq!(funcs[1].output, b);
+    assert!(funcs[1].is_safe);
+
+    assert_eq!(funcs[2].output, RustType::UNIT);
+
+    assert_eq!(funcs[3].cpp_name, "type");
+    assert_eq!(funcs[3].rust_name(), "get_type");
+
+    assert_eq!(funcs[4].namespace, ["a", "b"]);
+    assert_eq!(funcs[4].cpp_path(), "::a::b::sub_fn");
+
+    assert_eq!(funcs[5].namespace, ["a", "b"]);
+    assert_eq!(funcs[5].cpp_path(), "::a::b::top_fn");
+
+    assert_eq!(funcs[6].namespace, ["a", "b"]);
+    assert_eq!(funcs[6].cpp_path(), "::a::b::alias_fn");
+
+    let rust_funcs = &parsed.spec.funcs;
+    assert_eq!(rust_funcs.len(), 3);
+    assert_eq!(rust_funcs[0].is_safe, Some(true));
+    assert_eq!(rust_funcs[1].is_safe, Some(false));
+    assert_eq!(rust_funcs[2].is_safe, None);
+}
+
+#[test]
+fn cpp_function_in_global_namespace_or_invalid_modifiers_are_rejected() {
+    check_fail(
+        r#"
+mod c++ {
+    safe fn global_fn(i32);
+}
+safe fn c++::global_fn2(i32);
+fn c++::a::bare_fn(i32);
+safe async fn c++::a::async_fn();
+safe fn c++::a::gen_fn<T>(T);
+fn crate::a::f(i32) as g;
+"#,
+        expect![[r#"
+            Error: C++ functions in the global namespace aren't supported
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     safe fn global_fn(i32);
+               │     ───────────┬──────────  
+               │                ╰──────────── C++ functions in the global namespace aren't supported
+            ───╯
+            Error: C++ functions in the global namespace aren't supported
+               ╭─[ test.zng:5:1 ]
+               │
+             5 │ safe fn c++::global_fn2(i32);
+               │ ──────────────┬─────────────  
+               │               ╰─────────────── C++ functions in the global namespace aren't supported
+            ───╯
+            Error: C++ functions must be marked `safe` or `unsafe`
+               ╭─[ test.zng:6:1 ]
+               │
+             6 │ fn c++::a::bare_fn(i32);
+               │ ───────────┬───────────  
+               │            ╰───────────── C++ functions must be marked `safe` or `unsafe`
+            ───╯
+            Error: C++ functions cannot be `async`
+               ╭─[ test.zng:7:1 ]
+               │
+             7 │ safe async fn c++::a::async_fn();
+               │ ────────────────┬───────────────  
+               │                 ╰───────────────── C++ functions cannot be `async`
+            ───╯
+            Error: C++ functions do not support generic type arguments
+               ╭─[ test.zng:8:1 ]
+               │
+             8 │ safe fn c++::a::gen_fn<T>(T);
+               │ ──────────────┬─────────────  
+               │               ╰─────────────── C++ functions do not support generic type arguments
+            ───╯
+            Error: Rust free functions cannot be renamed with `as`
+               ╭─[ test.zng:9:1 ]
+               │
+             9 │ fn crate::a::f(i32) as g;
+               │ ────────────┬───────────  
+               │             ╰───────────── Rust free functions cannot be renamed with `as`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn safe_cpp_function_with_cpp_ptr_and_elided_lifetime_warn() {
+    check_warnings(
+        r#"
+mod c++::a {
+    safe fn f(i32*);
+    safe fn g(&const i32) -> &const i32;
+    safe fn h<'a>(::std::option::Option<&'a const i32>);
+}
+"#,
+        expect![[r#"
+            Warning: this C++ function is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     safe fn f(i32*);
+               │     ───────┬───────  
+               │            ╰───────── this C++ function is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
+            ───╯
+            Warning: this C++ function has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `fn f<'a>(&'a const T) -> &'a const U`), or silence this with `#allow(elided_lifetimes)`
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     safe fn g(&const i32) -> &const i32;
+               │     ─────────────────┬─────────────────  
+               │                      ╰─────────────────── this C++ function has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `fn f<'a>(&'a const T) -> &'a const U`), or silence this with `#allow(elided_lifetimes)`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_function_keyword_rust_names_are_rejected() {
+    for (src, expected) in [
+        (
+            "mod c++::a { safe fn type(i32) -> i32; }\n",
+            "`type` is a Rust keyword; give this C++ function a non-keyword Rust name with `as <rust_name>`",
+        ),
+        (
+            "mod c++::a { safe fn f(i32) -> i32 as type; }\n",
+            "`type` is a Rust keyword and cannot be used as the Rust function name in `as type`",
+        ),
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(expected),
+            "expected `{expected}` for `{src}`, got:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn duplicate_cpp_function_name_is_rejected() {
+    check_fail(
+        r#"
+mod c++::geo {
+    safe fn scale(f64) -> f64;
+    safe fn scale(i32) -> i32;
+    safe fn other() as scale;
+}
+"#,
+        expect![[r#"
+            Error: `scale` is already the Rust name of another C++ function in `c++::geo` (use `as <rust_name>` to give C++ overloads distinct Rust names)
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     safe fn scale(i32) -> i32;
+               │     ────────────┬────────────  
+               │                 ╰────────────── `scale` is already the Rust name of another C++ function in `c++::geo` (use `as <rust_name>` to give C++ overloads distinct Rust names)
+            ───╯
+            Error: `scale` is already the Rust name of another C++ function in `c++::geo` (use `as <rust_name>` to give C++ overloads distinct Rust names)
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     safe fn other() as scale;
+               │     ────────────┬───────────  
+               │                 ╰───────────── `scale` is already the Rust name of another C++ function in `c++::geo` (use `as <rust_name>` to give C++ overloads distinct Rust names)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_functions_merge_and_conflict_across_files() {
+    let resolver = MockFilesystem::new(vec![(
+        "./a.zng",
+        r#"
+mod c++::geo {
+    safe fn origin() -> i32;
+    safe fn scale(f64) -> f64;
+}
+"#,
+    )]);
+    let parsed = parse_str_with_resolver(
+        r#"
+merge "./a.zng";
+mod c++::geo {
+    safe fn origin() -> i32;
+    safe fn scale(i32) -> i32 as scale_i32;
+}
+"#,
+        NullCfg,
+        &resolver,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    let names: Vec<_> = parsed
+        .spec
+        .cpp_funcs
+        .iter()
+        .map(|f| f.rust_name())
+        .collect();
+    assert_eq!(names, ["origin", "scale_i32", "scale"]);
+
+    check_import_fail(
+        r#"
+merge "./a.zng";
+mod c++::geo {
+    safe fn scale(i32) -> i32;
+}
+"#,
+        expect![[r#"
+            Error: C++ function mismatch
+               ╭─[ ./a.zng:4:5 ]
+               │
+             4 │     safe fn scale(f64) -> f64;
+               │     ────────────┬────────────  
+               │                 ╰────────────── C++ function mismatch
+               │                 │              
+               │                 ╰────────────── declaration here ...
+               │
+               ├─[ test.zng:4:5 ]
+               │
+             4 │     safe fn scale(i32) -> i32;
+               │     ────────────┬────────────  
+               │                 ╰────────────── conflicts with the declaration here.
+            ───╯
+        "#]],
+        &resolver,
+    );
+}
+
+#[test]
+fn cpp_function_with_self_is_rejected() {
+    check_fail(
+        r#"
+mod c++::ns {
+    safe fn f<'a>(&'a const self);
+    safe fn g() -> &const self;
+}
+"#,
+        expect![[r#"
+            Error: free C++ functions do not take a `self` receiver (declare member functions inside a `type c++::... { ... }` block)
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     safe fn f<'a>(&'a const self);
+               │     ──────────────┬──────────────  
+               │                   ╰──────────────── free C++ functions do not take a `self` receiver (declare member functions inside a `type c++::... { ... }` block)
+            ───╯
+            Error: free C++ functions do not take a `self` receiver (declare member functions inside a `type c++::... { ... }` block)
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     safe fn g() -> &const self;
+               │     ─────────────┬────────────  
+               │                  ╰────────────── free C++ functions do not take a `self` receiver (declare member functions inside a `type c++::... { ... }` block)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_function_redundant_as_same_name_merges() {
+    let resolver = MockFilesystem::new(vec![(
+        "./a.zng",
+        r#"
+mod c++::geo {
+    safe fn scale(f64) -> f64;
+    safe fn pick<'a>(&'a const i32) -> &'a const i32;
+}
+"#,
+    )]);
+    let parsed = parse_str_with_resolver(
+        r#"
+merge "./a.zng";
+mod c++::geo {
+    safe fn scale(f64) -> f64 as scale;
+    safe fn pick<'b>(&'b const i32) -> &'b const i32;
+}
+"#,
+        NullCfg,
+        &resolver,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    assert_eq!(parsed.spec.cpp_funcs.len(), 2);
+    assert_eq!(parsed.spec.cpp_funcs[0].cpp_name, "scale");
+    assert_eq!(parsed.spec.cpp_funcs[0].rust_name, None);
+    assert_eq!(parsed.spec.cpp_funcs[0].rust_name(), "scale");
+}
+
+#[test]
+fn cpp_function_undeclared_or_non_by_value_cpp_type_is_rejected() {
+    check_fail(
+        r#"
+type c++::geo::RefOnly {
+    #layout(size = 8, align = 4);
+}
+mod c++::geo {
+    safe fn f(&const c++::geo::Missing);
+    safe fn g(c++::geo::RefOnly);
+}
+"#,
+        expect![[r#"
+            Error: `c++::geo::Missing` is not declared or imported
+               ╭─[ test.zng:6:5 ]
+               │
+             6 │     safe fn f(&const c++::geo::Missing);
+               │     ─────────────────┬─────────────────  
+               │                      ╰─────────────────── `c++::geo::Missing` is not declared or imported
+            ───╯
+            Error: `c++::geo::RefOnly` cannot be passed or returned by value without `#layout(...)` and `#trivially_relocatable`
+               ╭─[ test.zng:7:5 ]
+               │
+             7 │     safe fn g(c++::geo::RefOnly);
+               │     ──────────────┬─────────────  
+               │                   ╰─────────────── `c++::geo::RefOnly` cannot be passed or returned by value without `#layout(...)` and `#trivially_relocatable`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_function_can_share_name_with_cpp_type_in_same_namespace() {
+    let parsed = parse_str(
+        r#"
+mod c++::ns {
+    type Foo {}
+    safe fn Foo<'a>(&'a const Foo);
+}
+"#,
+        NullCfg,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    assert_eq!(parsed.spec.types.len(), 1);
+    assert_eq!(parsed.spec.cpp_funcs.len(), 1);
+    assert_eq!(parsed.spec.cpp_funcs[0].cpp_name, "Foo");
+}
+
+#[test]
+fn cpp_function_with_cpp_type_as_namespace_is_rejected() {
+    check_fail(
+        r#"
+type c++::ns::Foo {}
+safe fn c++::ns::Foo::bar() -> i32;
+safe fn c++::ns::Foo::detail::baz() -> i32;
+mod c++::ns::Foo {
+    safe fn qux();
+}
+"#,
+        expect![[r#"
+            Error: `c++::ns::Foo` is a C++ type, not a namespace (declare static member functions inside `type c++::ns::Foo { ... }`)
+               ╭─[ test.zng:3:1 ]
+               │
+             3 │ safe fn c++::ns::Foo::bar() -> i32;
+               │ ─────────────────┬────────────────  
+               │                  ╰────────────────── `c++::ns::Foo` is a C++ type, not a namespace (declare static member functions inside `type c++::ns::Foo { ... }`)
+            ───╯
+            Error: `c++::ns::Foo` is a C++ type, not a namespace
+               ╭─[ test.zng:4:1 ]
+               │
+             4 │ safe fn c++::ns::Foo::detail::baz() -> i32;
+               │ ─────────────────────┬────────────────────  
+               │                      ╰────────────────────── `c++::ns::Foo` is a C++ type, not a namespace
+            ───╯
+            Error: `c++::ns::Foo` is a C++ type, not a namespace (declare static member functions inside `type c++::ns::Foo { ... }`)
+               ╭─[ test.zng:6:5 ]
+               │
+             6 │     safe fn qux();
+               │     ──────┬──────  
+               │           ╰──────── `c++::ns::Foo` is a C++ type, not a namespace (declare static member functions inside `type c++::ns::Foo { ... }`)
+            ───╯
+        "#]],
+    );
+
+    let resolver = MockFilesystem::new(vec![(
+        "./bar.zng",
+        r#"
+#crate bar_bindings
+type c++::ext::Bar {}
+"#,
+    )]);
+    check_import_fail(
+        r#"
+import "./bar.zng";
+safe fn c++::ext::Bar::make() -> i32;
+safe fn c++::ext::Bar::sub::helper() -> i32;
+"#,
+        expect![[r#"
+            Error: `c++::ext::Bar` is a C++ type, not a namespace (declare static member functions inside `type c++::ext::Bar { ... }`)
+               ╭─[ test.zng:3:1 ]
+               │
+             3 │ safe fn c++::ext::Bar::make() -> i32;
+               │ ──────────────────┬─────────────────  
+               │                   ╰─────────────────── `c++::ext::Bar` is a C++ type, not a namespace (declare static member functions inside `type c++::ext::Bar { ... }`)
+            ───╯
+            Error: `c++::ext::Bar` is a C++ type, not a namespace
+               ╭─[ test.zng:4:1 ]
+               │
+             4 │ safe fn c++::ext::Bar::sub::helper() -> i32;
+               │ ─────────────────────┬─────────────────────  
+               │                      ╰─────────────────────── `c++::ext::Bar` is a C++ type, not a namespace
+            ───╯
+        "#]],
+        &resolver,
+    );
 }

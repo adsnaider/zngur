@@ -411,6 +411,30 @@ impl WriteIDL for crate::ZngurSpec {
                 write_mod_close(p, prev)?;
             }
         }
+        if !self.cpp_funcs.is_empty() && p.enabled(&IDLItem::Function) {
+            separate(p)?;
+            // Consecutive C++ functions in the same namespace share a `mod c++::` block.
+            let mut open_namespace: Option<&[String]> = None;
+            for func in &self.cpp_funcs {
+                if open_namespace != Some(&func.namespace) {
+                    if open_namespace.is_some() {
+                        p.dedent();
+                        p.write_indent()?;
+                        writeln!(p, "}}")?;
+                    }
+                    p.write_indent()?;
+                    writeln!(p, "mod c++::{} {{", func.namespace.join("::"))?;
+                    p.indent();
+                    open_namespace = Some(&func.namespace);
+                }
+                write_cpp_fn_decl(p, func)?;
+            }
+            if open_namespace.is_some() {
+                p.dedent();
+                p.write_indent()?;
+                writeln!(p, "}}")?;
+            }
+        }
         if !self.traits.is_empty() && p.enabled(&IDLItem::Trait) {
             separate(p)?;
             for (i, trt) in self.traits.values().enumerate() {
@@ -541,6 +565,46 @@ impl WriteIDL for crate::ZngurFn {
             write_mod_open(p, parent)?;
             write_fn_decl(p, name, self)?;
             write_mod_close(p, parent)?;
+        }
+        Ok(())
+    }
+}
+
+/// Writes `(safe | unsafe) fn <name>(..) -> .. [as ..];`, i.e. the part of a free C++
+/// function that goes inside its `mod c++::<namespace>` block.
+fn write_cpp_fn_decl<W: Write>(
+    p: &mut IDLPrinter<W>,
+    func: &crate::ZngurCppFn,
+) -> std::io::Result<()> {
+    p.write_indent()?;
+    let safety = if func.is_safe { "safe" } else { "unsafe" };
+    let name = &func.cpp_name;
+    write!(p, "{safety} fn {name}")?;
+    write_lifetimes_and_generics(p, &func.lifetimes, &[])?;
+    write!(p, "(")?;
+    p.write_idl(&func.inputs)?;
+    write!(p, ")")?;
+    if func.output != crate::RustType::UNIT {
+        write!(p, " -> ")?;
+        p.write_idl(&func.output)?;
+    }
+    if let Some(rust_name) = &func.rust_name {
+        write!(p, " as {rust_name}")?;
+    }
+    writeln!(p, ";")
+}
+
+impl WriteIDL for crate::ZngurCppFn {
+    /// Free C++ functions are printed inside a `mod c++::<namespace>` block.
+    fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
+        if p.enabled(&IDLItem::Function) && !self.namespace.is_empty() {
+            p.write_indent()?;
+            writeln!(p, "mod c++::{} {{", self.namespace.join("::"))?;
+            p.indent();
+            write_cpp_fn_decl(p, self)?;
+            p.dedent();
+            p.write_indent()?;
+            writeln!(p, "}}")?;
         }
         Ok(())
     }

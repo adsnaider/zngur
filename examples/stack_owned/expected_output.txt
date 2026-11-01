@@ -20,6 +20,11 @@ CppType 8 9
 Constructed CppConservativeType 30 40
 CppConservativeType 30 40
 Destructed CppConservativeType 30 40
+dot = 60
+Constructed CppType 0 0
+CppType 0 0
+sum_from_ptr = 7
+twice = 42 2.5
 Constructed CppType 2 3
 const sum() = 5
 Constructed CppType 4 5
