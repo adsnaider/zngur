@@ -103,6 +103,15 @@ impl IntoCpp for RustType {
                 generic_args: vec![t.into_cpp(namespace, crate_name)],
                 tail: None,
             },
+            // References to C++ objects (in Rust-facing items) are C++ references: `const T&` or
+            // `T&` (`CppRef<W>` from zngur.h), and so are the receivers (`&self`) of `extern
+            // "C++"` impls of C++ types.
+            RustType::Ref(_, _, t) if t.as_cpp_object().is_some() => CppType {
+                path: CppPath::from(&*format!("{namespace}::CppRef")),
+                generic_args: vec![t.into_cpp(namespace, crate_name)],
+                tail: None,
+            },
+            // References to Rust values are `rust::Ref<T>` / `rust::RefMut<T>`.
             RustType::Ref(m, _, t) => CppType {
                 path: match m {
                     Mutability::Mut => CppPath::from(&*format!("{}::RefMut", namespace)),
@@ -134,6 +143,25 @@ impl IntoCpp for RustType {
                 ..Default::default()
             }
             .into_cpp(namespace, crate_name),
+            // `CppPtr<W>` and `CppRef<W>` (from zngur.h) are aliases for `T*` and `T&`, where `T`
+            // is the C++ type that `W` (the Rust wrapper, or a builtin) stands for, and
+            // `CppConst<W>` stands for `const T`.
+            RustType::CppPtr(indirection, t) => CppType {
+                path: match indirection {
+                    CppIndirection::Pointer => CppPath::from(&*format!("{namespace}::CppPtr")),
+                    CppIndirection::Reference => CppPath::from(&*format!("{namespace}::CppRef")),
+                },
+                generic_args: vec![t.into_cpp(namespace, crate_name)],
+                tail: None,
+            },
+            RustType::CppConst(t) => CppType {
+                path: CppPath::from(&*format!("{namespace}::CppConst")),
+                generic_args: vec![t.into_cpp(namespace, crate_name)],
+                tail: None,
+            },
+            // `zngur_lib::Cpp<T>` has the same layout as `T`, and non-`const` C++ classes are
+            // their wrappers.
+            RustType::CppVar(t) => t.into_cpp(namespace, crate_name),
             RustType::Tuple(v) => {
                 if v.is_empty() {
                     return CppType::from(&*format!("{namespace}::Unit"));
@@ -1565,5 +1593,29 @@ mod tests {
         let cpp = RustType::Cpp(vec!["a".to_owned(), "Name".to_owned()]);
         let cpp_type = cpp.into_cpp("rust", "my_crate");
         assert_eq!(cpp_type.to_string(), "::rust::cpp::a::Name");
+    }
+
+    #[test]
+    fn test_mangle_name_encodes_pointers() {
+        let mut_fn = mangle_name("Fn(*mut ::zngur_lib::Cpp<i32>)", "base");
+        let const_fn = mangle_name(
+            "Fn(*const ::zngur_lib::Cpp<i32, ::zngur_lib::Const>)",
+            "base",
+        );
+        assert!(!mut_fn.contains('*'), "{mut_fn}");
+        assert!(!const_fn.contains('*'), "{const_fn}");
+        assert!(
+            mut_fn
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "{mut_fn}"
+        );
+        assert!(
+            const_fn
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "{const_fn}"
+        );
+        assert_ne!(mut_fn, const_fn);
     }
 }

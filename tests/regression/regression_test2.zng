@@ -30,11 +30,11 @@ type crate::RustTask {
 
 extern "C++" {
     impl c++::task::CppTask {
-        safe fn constructor(&mut self);
+        unsafe fn constructor(c++::task::CppTask*);
     }
 
     impl c++::task::Dispatcher {
-        safe fn constructor(&mut self);
+        unsafe fn constructor(c++::task::Dispatcher*);
         safe fn run_task(&self, &mut crate::RustTask);
     }
 }

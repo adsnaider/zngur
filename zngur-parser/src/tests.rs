@@ -2,8 +2,8 @@ use std::panic::catch_unwind;
 
 use expect_test::{Expect, expect};
 use zngur_def::{
-    CppHeapAllocated, CppRef, CppStackOwned, LayoutPolicy, Mutability, RustPathAndGenerics,
-    RustType, TriviallyRelocatable, ZngurSpec,
+    CppHeapAllocated, CppIndirection, CppRef, CppStackOwned, LayoutPolicy, Mutability,
+    PrimitiveRustType, RustPathAndGenerics, RustType, TriviallyRelocatable, ZngurSpec,
 };
 
 use crate::{
@@ -1564,12 +1564,12 @@ type c ++ :: Name {
 }
     "#,
         expect![[r#"
-            Error: found '+' expected '::', '<', or '{'
+            Error: found '+' expected '::', '<', 'const', '*', '&', or '{'
                ╭─[ test.zng:2:8 ]
                │
              2 │ type c ++ :: Name {
                │        ┬  
-               │        ╰── found '+' expected '::', '<', or '{'
+               │        ╰── found '+' expected '::', '<', 'const', '*', '&', or '{'
             ───╯
         "#]],
     );
@@ -2580,7 +2580,7 @@ type c++::ns::BarExtra {
 import "./bar.zng";
 
 mod crate {
-    fn use_bar(&c++::ns::Bar, &c++::ns::BarExtra);
+    fn use_bar(&const c++::ns::Bar, &const c++::ns::BarExtra);
 }
 "#,
         NullCfg,
@@ -3669,6 +3669,857 @@ extern "C++" {
         assert!(
             err.contains(needle),
             "expected `{needle}` in error for:\n{src}\ngot:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn cpp_pointers_and_references_parse() {
+    let parsed = parse_str(
+        r#"
+type c++::a::B {
+}
+
+extern "C++" {
+    unsafe fn f(const c++::a::B&, c++::a::B&, const i32*, i32*) -> const c++::a::B*;
+    unsafe fn multi(c++::a::B**, const i32**, i32* const*);
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let f = &parsed.spec.extern_cpp_funcs[0];
+    let b = || RustType::Cpp(vec!["a".to_owned(), "B".to_owned()]);
+    let i32 = || RustType::Primitive(PrimitiveRustType::Int(32));
+    assert_eq!(
+        f.inputs,
+        vec![
+            RustType::cpp_ptr(Mutability::Not, CppIndirection::Reference, b()),
+            RustType::cpp_ptr(Mutability::Mut, CppIndirection::Reference, b()),
+            RustType::cpp_ptr(Mutability::Not, CppIndirection::Pointer, i32()),
+            RustType::cpp_ptr(Mutability::Mut, CppIndirection::Pointer, i32()),
+        ]
+    );
+    assert_eq!(
+        f.output,
+        RustType::CppPtr(
+            CppIndirection::Pointer,
+            Box::new(RustType::CppConst(Box::new(b())))
+        )
+    );
+
+    let multi = &parsed.spec.extern_cpp_funcs[1];
+    let mut_ptr = |ty| RustType::cpp_ptr(Mutability::Mut, CppIndirection::Pointer, ty);
+    let const_ptr = |ty| RustType::cpp_ptr(Mutability::Not, CppIndirection::Pointer, ty);
+    assert_eq!(
+        multi.inputs,
+        vec![
+            mut_ptr(mut_ptr(b())),
+            mut_ptr(const_ptr(i32())),
+            const_ptr(mut_ptr(i32())),
+        ]
+    );
+}
+
+#[test]
+fn const_type_by_value_is_rejected() {
+    check_fail(
+        r#"
+extern "C++" {
+    safe fn f(const i32);
+}
+"#,
+        expect![[r#"
+            Error: `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`, `&'a const T`)
+               ╭─[ test.zng:3:15 ]
+               │
+             3 │     safe fn f(const i32);
+               │               ────┬────  
+               │                   ╰────── `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`, `&'a const T`)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn const_rust_generic_argument_is_rejected() {
+    check_fail(
+        r#"
+type ::std::vec::Vec<const i32> {
+    #layout(size = 24, align = 8);
+}
+"#,
+        expect![[r#"
+            Error: `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`, `&'a const T`)
+               ╭─[ test.zng:2:6 ]
+               │
+             2 │ type ::std::vec::Vec<const i32> {
+               │      ─────────────┬────────────  
+               │                   ╰────────────── `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`, `&'a const T`)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn const_non_cpp_type_is_rejected() {
+    check_fail(
+        r#"
+extern "C++" {
+    safe fn f(const (i32, i32)&);
+}
+"#,
+        expect![[r#"
+            Error: only C++ types and builtins can be `const`
+               ╭─[ test.zng:3:15 ]
+               │
+             3 │     safe fn f(const (i32, i32)&);
+               │               ────────┬────────  
+               │                       ╰────────── only C++ types and builtins can be `const`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn references_to_cpp_objects_parse() {
+    use zngur_def::CppConstness;
+
+    let parsed = parse_str(
+        r#"
+type c++::B {
+}
+
+extern "C++" {
+    safe fn f<'a>(&'a const c++::B, &'a var c++::B, &'a unique var c++::B, &'a unique const c++::B);
+    safe fn g<'a>(&'a const i32, &'a var i32, &'a unique var i32, &'a i32, &'a mut i32) -> &'a var bool;
+    unsafe fn h<'a>(&'a const c++::B*, c++::B*, const i32*);
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let funcs = &parsed.spec.extern_cpp_funcs;
+    let b = RustType::Cpp(vec!["B".to_owned()]);
+    let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+    let reference = |m, constness, ty: &RustType| {
+        RustType::Ref(
+            m,
+            Some(zngur_def::Lifetime("a".to_owned())),
+            Box::new(RustType::cpp_object(constness, ty.clone())),
+        )
+    };
+    assert_eq!(
+        funcs[0].inputs,
+        [
+            reference(Mutability::Not, CppConstness::Const, &b),
+            reference(Mutability::Not, CppConstness::Var, &b),
+            reference(Mutability::Mut, CppConstness::Var, &b),
+            reference(Mutability::Mut, CppConstness::Const, &b),
+        ]
+    );
+    let rust_ref = |m| {
+        RustType::Ref(
+            m,
+            Some(zngur_def::Lifetime("a".to_owned())),
+            Box::new(i32.clone()),
+        )
+    };
+    assert_eq!(
+        funcs[1].inputs,
+        [
+            reference(Mutability::Not, CppConstness::Const, &i32),
+            reference(Mutability::Not, CppConstness::Var, &i32),
+            reference(Mutability::Mut, CppConstness::Var, &i32),
+            rust_ref(Mutability::Not),
+            rust_ref(Mutability::Mut),
+        ]
+    );
+    let b_ptr = RustType::cpp_ptr(Mutability::Mut, CppIndirection::Pointer, b.clone());
+    assert_eq!(
+        funcs[2].inputs,
+        [
+            // `&'a const c++::B*` is a reference to a `const` pointer (`B* const&`).
+            reference(Mutability::Not, CppConstness::Const, &b_ptr),
+            b_ptr.clone(),
+            RustType::cpp_ptr(Mutability::Not, CppIndirection::Pointer, i32.clone()),
+        ]
+    );
+}
+
+#[test]
+fn reference_to_cpp_class_without_constness_is_rejected() {
+    check_fail(
+        r#"
+extern "C++" {
+    safe fn f<'a>(&'a c++::B);
+}
+"#,
+        expect![[r#"
+            Error: a reference to a C++ class must say whether the object is `const`: `&'a const c++::B` (a C++ `const T&`, `&T<Const>` in Rust) or `&'a var c++::B` (a shared `T&`, `&T` in Rust)
+               ╭─[ test.zng:3:10 ]
+               │
+             3 │     safe fn f<'a>(&'a c++::B);
+               │          ──────────┬─────────  
+               │                    ╰─────────── a reference to a C++ class must say whether the object is `const`: `&'a const c++::B` (a C++ `const T&`, `&T<Const>` in Rust) or `&'a var c++::B` (a shared `T&`, `&T` in Rust)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn mutable_reference_to_cpp_class_is_rejected() {
+    check_fail(
+        r#"
+extern "C++" {
+    safe fn f<'a>(&'a mut c++::B);
+}
+"#,
+        expect![[r#"
+            Error: a reference to a C++ class must say whether the object is `const`: `&'a unique var c++::B` (a `T&` that Rust uses uniquely, `&mut T` in Rust)
+               ╭─[ test.zng:3:10 ]
+               │
+             3 │     safe fn f<'a>(&'a mut c++::B);
+               │          ────────────┬───────────  
+               │                      ╰───────────── a reference to a C++ class must say whether the object is `const`: `&'a unique var c++::B` (a `T&` that Rust uses uniquely, `&mut T` in Rust)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn reference_to_cpp_class_through_an_alias_without_constness_is_rejected() {
+    check_fail(
+        r#"
+use c++::a::B as B;
+
+extern "C++" {
+    safe fn f<'a>(&'a B);
+}
+"#,
+        expect![[r#"
+            Error: a reference to a C++ class must say whether the object is `const`: `&'a const c++::a::B` (a C++ `const T&`, `&T<Const>` in Rust) or `&'a var c++::a::B` (a shared `T&`, `&T` in Rust)
+               ╭─[ test.zng:5:10 ]
+               │
+             5 │     safe fn f<'a>(&'a B);
+               │          ───────┬───────  
+               │                 ╰───────── a reference to a C++ class must say whether the object is `const`: `&'a const c++::a::B` (a C++ `const T&`, `&T<Const>` in Rust) or `&'a var c++::a::B` (a shared `T&`, `&T` in Rust)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn reference_to_cpp_class_in_a_rust_item_without_constness_is_rejected() {
+    check_fail(
+        r#"
+type crate::Foo {
+    #layout(size = 0, align = 1);
+    fn f(&self, &c++::B);
+}
+"#,
+        expect![[r#"
+            Error: a reference to a C++ class must say whether the object is `const`: `&const c++::B` (a C++ `const T&`, `&T<Const>` in Rust) or `&var c++::B` (a shared `T&`, `&T` in Rust)
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     fn f(&self, &c++::B);
+               │     ──────────┬──────────  
+               │               ╰──────────── a reference to a C++ class must say whether the object is `const`: `&const c++::B` (a C++ `const T&`, `&T<Const>` in Rust) or `&var c++::B` (a shared `T&`, `&T` in Rust)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn const_reference_to_rust_type_is_rejected() {
+    check_fail(
+        r#"
+extern "C++" {
+    safe fn f<'a>(&'a const crate::Foo);
+}
+"#,
+        expect![[r#"
+            Error: only C++ objects (`c++::` types, builtins and C++ pointers) can be `const` or `var`, and `crate::Foo` is a Rust type: use `&'a crate::Foo`
+               ╭─[ test.zng:3:10 ]
+               │
+             3 │     safe fn f<'a>(&'a const crate::Foo);
+               │          ───────────────┬──────────────  
+               │                         ╰──────────────── only C++ objects (`c++::` types, builtins and C++ pointers) can be `const` or `var`, and `crate::Foo` is a Rust type: use `&'a crate::Foo`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn var_reference_to_str_is_rejected() {
+    check_fail(
+        r#"
+extern "C++" {
+    safe fn f<'a>(&'a unique var str);
+}
+"#,
+        expect![[r#"
+            Error: only C++ objects (`c++::` types, builtins and C++ pointers) can be `const` or `var`, and `str` is a Rust type: use `&'a mut str`
+               ╭─[ test.zng:3:10 ]
+               │
+             3 │     safe fn f<'a>(&'a unique var str);
+               │          ──────────────┬─────────────  
+               │                        ╰─────────────── only C++ objects (`c++::` types, builtins and C++ pointers) can be `const` or `var`, and `str` is a Rust type: use `&'a mut str`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn const_reference_to_char_is_rejected() {
+    check_fail(
+        r#"
+extern "C++" {
+    safe fn f<'a>() -> &'a const char;
+}
+"#,
+        expect![[r#"
+            Error: `char` can't be a C++ object (C++ can store invalid code points in it), so references to it can't be `const` or `var`: use `&'a char` (a Rust value)
+               ╭─[ test.zng:3:10 ]
+               │
+             3 │     safe fn f<'a>() -> &'a const char;
+               │          ──────────────┬─────────────  
+               │                        ╰─────────────── `char` can't be a C++ object (C++ can store invalid code points in it), so references to it can't be `const` or `var`: use `&'a char` (a Rust value)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn unique_reference_without_constness_is_rejected() {
+    check_fail(
+        r#"
+extern "C++" {
+    safe fn f<'a>(&'a unique c++::B);
+}
+"#,
+        expect![[r#"
+            Error: a `unique` reference is a reference to a C++ object, which says whether it's `const`: `&'a unique var T` (a C++ `T&` that Rust uses uniquely, `&mut T` in Rust) or `&'a unique const T`; a reference to a Rust value is `&'a mut T`
+               ╭─[ test.zng:3:19 ]
+               │
+             3 │     safe fn f<'a>(&'a unique c++::B);
+               │                   ────────┬────────  
+               │                           ╰────────── a `unique` reference is a reference to a C++ object, which says whether it's `const`: `&'a unique var T` (a C++ `T&` that Rust uses uniquely, `&mut T` in Rust) or `&'a unique const T`; a reference to a Rust value is `&'a mut T`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn mut_const_reference_is_rejected() {
+    check_fail(
+        r#"
+extern "C++" {
+    safe fn f<'a>(&'a mut const c++::B);
+}
+"#,
+        expect![[r#"
+            Error: references to C++ objects say `unique` rather than `mut`: write `&'a unique const T` (or `&'a const T` for a shared reference)
+               ╭─[ test.zng:3:19 ]
+               │
+             3 │     safe fn f<'a>(&'a mut const c++::B);
+               │                   ──────────┬─────────  
+               │                             ╰─────────── references to C++ objects say `unique` rather than `mut`: write `&'a unique const T` (or `&'a const T` for a shared reference)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn const_receiver_on_rust_method_is_rejected() {
+    check_fail(
+        r#"
+type crate::Foo {
+    #layout(size = 0, align = 1);
+    fn f(&const self);
+}
+"#,
+        expect![[r#"
+            Error: methods of Rust types and `extern "C++"` impls take `&self` or `&mut self`, not `&const self` / `&var self`
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     fn f(&const self);
+               │     ────────┬────────  
+               │             ╰────────── methods of Rust types and `extern "C++"` impls take `&self` or `&mut self`, not `&const self` / `&var self`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn unique_and_var_are_only_keywords_after_a_reference() {
+    check_success(
+        r#"
+type crate::var {
+    #layout(size = 0, align = 1);
+    fn unique(&self, &crate::var) -> crate::var;
+}
+"#,
+    );
+}
+
+#[test]
+fn invalid_cpp_pointer_and_reference_combinations_are_rejected() {
+    for (src, expected) in [
+        (
+            "extern \"C++\" { unsafe fn f<'a>(&'a const i32&); }\n",
+            "references to C++ references aren't valid",
+        ),
+        (
+            "extern \"C++\" { unsafe fn f<'a>(&'a i32&); }\n",
+            "references to C++ references aren't valid",
+        ),
+        (
+            "extern \"C++\" { unsafe fn f(i32&*); }\n",
+            "pointers to C++ references (`T&*`) aren't valid",
+        ),
+        (
+            "extern \"C++\" { unsafe fn f(i32&&); }\n",
+            "references to C++ references (`T&&`) aren't valid",
+        ),
+        (
+            "extern \"C++\" { unsafe fn f(i32& const); }\n",
+            "a C++ reference cannot be `const`-qualified (`T& const`)",
+        ),
+        (
+            "extern \"C++\" { unsafe fn f(crate::Foo*); }\n",
+            "C++ pointers and references (`T*`, `T&`) can only point to C++ objects",
+        ),
+        (
+            "extern \"C++\" { unsafe fn f(char*); }\n",
+            "`char` can't be a C++ object",
+        ),
+        (
+            "type i32& { #layout(size = 8, align = 8); }\n",
+            "C++ reference `i32&` can only be a function parameter or return type",
+        ),
+        (
+            "type Box<dyn Fn(const i32)> { #layout(size = 16, align = 8); }\n",
+            "`const T` can only be the type of a C++ pointer or reference",
+        ),
+        (
+            "type c++::B {}\ntype Box<dyn for<'a> Fn(&'a unique c++::B)> { #layout(size = 16, align = 8); }\n",
+            "a `unique` reference is a reference to a C++ object, which says whether it's `const`",
+        ),
+        (
+            "type c++::B {}\ntype Box<dyn for<'a> Fn(&'a mut const c++::B)> { #layout(size = 16, align = 8); }\n",
+            "references to C++ objects say `unique` rather than `mut`",
+        ),
+        (
+            "mod crate { fn f() -> impl ::std::future::Future<Output = const i32>; }\n",
+            "`const T` can only be the type of a C++ pointer or reference",
+        ),
+        (
+            "extern \"C++\" { safe fn f(&const i128); }\n",
+            "`i128` is not a C++ builtin scalar",
+        ),
+        (
+            "extern \"C++\" { safe fn f(&var f16); }\n",
+            "`f16` is not a C++ builtin scalar",
+        ),
+        (
+            "extern \"C++\" { unsafe fn f(const u128*); }\n",
+            "only `bool`, 8/16/32/64-bit integers, `usize`, `f32`, and `f64` are C++ builtin scalars",
+        ),
+        (
+            "extern \"C++\" { unsafe fn f(f128*); }\n",
+            "`f128` is not a C++ builtin scalar",
+        ),
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(expected),
+            "expected `{expected}` for `{src}`, got:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn template_types_check_cpp_objects_after_substitution() {
+    for (src, expected) in [
+        (
+            r#"
+#unstable(template_types)
+type c++::B {}
+type<T> crate::Holder<T> {
+    #layout(size = 8, align = 8);
+    fn f(&self, &T);
+}
+type crate::Holder<c++::B> {}
+"#,
+            "a reference to a C++ class must say whether the object is `const`",
+        ),
+        (
+            r#"
+#unstable(template_types)
+type crate::Foo { #layout(size = 4, align = 4); }
+type<T> crate::Holder<T> {
+    #layout(size = 8, align = 8);
+    fn f(&self, &const T);
+}
+type crate::Holder<crate::Foo> {}
+"#,
+            "only C++ objects (`c++::` types, builtins and C++ pointers) can be `const` or `var`",
+        ),
+        (
+            r#"
+#unstable(template_types)
+type crate::Foo { #layout(size = 4, align = 4); }
+type<T> crate::Holder<T> {
+    #layout(size = 8, align = 8);
+    fn f(&self, T*);
+}
+type crate::Holder<crate::Foo> {}
+"#,
+            "C++ pointers and references (`T*`, `T&`) can only point to C++ objects",
+        ),
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(expected),
+            "expected `{expected}` for `{src}`, got:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn cpp_heap_allocated_type_uses_rust_value_references_and_rejects_cpp_object_refs() {
+    let resolver = MockFilesystem::new(vec![
+        (
+            "./bar.zng",
+            r#"
+#crate bar_bindings
+type c++::ns::BarHeap {
+    #layout(size = 16, align = 8);
+    #cpp_heap_allocated "::ns::BarHeap";
+}
+"#,
+        ),
+        (
+            "./merged_heap.zng",
+            r#"
+type c++::MergedHeap {
+    #layout(size = 16, align = 8);
+    #cpp_heap_allocated "::MergedHeap";
+}
+"#,
+        ),
+    ]);
+    let parsed = parse_str_with_resolver(
+        r#"
+import "./bar.zng";
+merge "./merged_heap.zng";
+
+extern "C++" {
+    safe fn borrow_local(&c++::LocalHeap, &mut c++::LocalHeap);
+    unsafe fn raw_local(*const c++::LocalHeap, *mut c++::LocalHeap);
+    safe fn borrow_merged(&c++::MergedHeap, &mut c++::MergedHeap);
+    safe fn borrow_imported(&c++::ns::BarHeap, &mut c++::ns::BarHeap);
+    impl c++::ns::BarHeap {
+        safe fn method(&self);
+    }
+}
+
+type c++::LocalHeap {
+    #layout(size = 16, align = 8);
+    #cpp_heap_allocated "::LocalHeap";
+}
+"#,
+        NullCfg,
+        &resolver,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    assert_eq!(
+        parsed.spec.imported_modules[0].cpp_heap_allocated_types,
+        vec![vec!["ns".to_owned(), "BarHeap".to_owned()]]
+    );
+
+    for (src, expected) in [
+        (
+            r#"
+type c++::HeapFoo { #layout(size = 16, align = 8); #cpp_heap_allocated "::HeapFoo"; }
+extern "C++" { safe fn f(&const c++::HeapFoo); }
+"#,
+            "`c++::HeapFoo` is `#cpp_heap_allocated`",
+        ),
+        (
+            r#"
+type c++::HeapFoo { #layout(size = 16, align = 8); #cpp_heap_allocated "::HeapFoo"; }
+extern "C++" { safe fn f(&unique var c++::HeapFoo); }
+"#,
+            "`c++::HeapFoo` is `#cpp_heap_allocated`",
+        ),
+        (
+            r#"
+type c++::HeapFoo { #layout(size = 16, align = 8); #cpp_heap_allocated "::HeapFoo"; }
+extern "C++" { unsafe fn f(c++::HeapFoo*); }
+"#,
+            "`c++::HeapFoo` is `#cpp_heap_allocated`",
+        ),
+        (
+            r#"
+type c++::HeapFoo { #layout(size = 16, align = 8); #cpp_heap_allocated "::HeapFoo"; }
+extern "C++" { unsafe fn f(const c++::HeapFoo&); }
+"#,
+            "`c++::HeapFoo` is `#cpp_heap_allocated`",
+        ),
+        (
+            r#"
+import "./bar.zng";
+extern "C++" { safe fn f(&const c++::ns::BarHeap); }
+"#,
+            "`c++::ns::BarHeap` is `#cpp_heap_allocated`",
+        ),
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str_with_resolver(src, NullCfg, &resolver, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(expected),
+            "expected `{expected}` for `{src}`, got:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn rust_raw_pointer_to_cpp_class_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {}
+extern "C++" {
+    unsafe fn f(*const c++::B, *mut c++::B);
+}
+"#,
+        expect![[r#"
+            Error: a raw pointer to a C++ class must say whether the object is `const`: use `const c++::B*`
+               ╭─[ test.zng:4:12 ]
+               │
+             4 │     unsafe fn f(*const c++::B, *mut c++::B);
+               │            ────────────────┬───────────────  
+               │                            ╰───────────────── a raw pointer to a C++ class must say whether the object is `const`: use `const c++::B*`
+            ───╯
+        "#]],
+    );
+    check_fail(
+        r#"
+type c++::B {}
+extern "C++" {
+    unsafe fn g(*mut c++::B);
+}
+"#,
+        expect![[r#"
+            Error: a raw pointer to a C++ class must say whether the object is `const`: use `c++::B*`
+               ╭─[ test.zng:4:12 ]
+               │
+             4 │     unsafe fn g(*mut c++::B);
+               │            ────────┬────────  
+               │                    ╰────────── a raw pointer to a C++ class must say whether the object is `const`: use `c++::B*`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn fn_trait_rejects_bare_cpp_references_and_accepts_pointers_or_lifetime_refs() {
+    check_success(
+        r#"
+type c++::B {}
+type Box<dyn Fn(const c++::B*) -> i32> {
+    #layout(size = 16, align = 8);
+}
+type Box<dyn for<'a> Fn(&'a const c++::B) -> &'a const c++::B> {
+    #layout(size = 16, align = 8);
+}
+"#,
+    );
+    for src in [
+        "type c++::B {}\ntype Box<dyn Fn(const c++::B&) -> i32> { #layout(size = 16, align = 8); }\n",
+        "type c++::B {}\ntype Box<dyn Fn() -> const c++::B&> { #layout(size = 16, align = 8); }\n",
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(
+                "C++ reference `const c++::B&` can only be a function parameter or return type"
+            ),
+            "unexpected error for `{src}`:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn nested_or_field_cpp_object_references_are_rejected() {
+    for (src, expected) in [
+        (
+            r#"
+type c++::B {}
+type<'a> crate::S<'a> {
+    #layout(size = 8, align = 8);
+    field x (offset = 0, type = &'a const c++::B);
+}
+"#,
+            "reference to a C++ object `&'a const c++::B` is a C++ reference in C++ and can only be a function, method, or constructor parameter or return type",
+        ),
+        (
+            r#"
+type<'a> crate::S<'a> {
+    #layout(size = 8, align = 8);
+    field x (offset = 0, type = &'a unique var i32);
+}
+"#,
+            "reference to a C++ object `&'a unique var i32` is a C++ reference in C++ and can only be a function, method, or constructor parameter or return type",
+        ),
+        (
+            r#"
+type c++::B {}
+type<'a> crate::E<'a> {
+    #layout(size = 16, align = 8);
+    variant V {
+        field x (offset = auto, type = &'a const c++::B);
+    }
+}
+"#,
+            "reference to a C++ object `&'a const c++::B` is a C++ reference in C++",
+        ),
+        (
+            "type c++::B {}\nextern \"C++\" { safe fn f<'a>((&'a const c++::B, i32)); }\n",
+            "reference to a C++ object `&'a const c++::B` is a C++ reference in C++",
+        ),
+        (
+            "type c++::B {}\nextern \"C++\" { safe fn f<'a>(&'a &'a const c++::B); }\n",
+            "reference to a C++ object `&'a const c++::B` is a C++ reference in C++",
+        ),
+        (
+            "type c++::B {}\nextern \"C++\" { safe fn f<'a>(&'a mut &'a const c++::B); }\n",
+            "reference to a C++ object `&'a const c++::B` is a C++ reference in C++",
+        ),
+        (
+            "type c++::B {}\nextern \"C++\" { unsafe fn f<'a>(*const &'a const c++::B); }\n",
+            "reference to a C++ object `&'a const c++::B` is a C++ reference in C++",
+        ),
+        (
+            "type c++::B {}\nextern \"C++\" { unsafe fn f<'a>(*mut &'a const c++::B); }\n",
+            "reference to a C++ object `&'a const c++::B` is a C++ reference in C++",
+        ),
+        (
+            "type c++::B {}\nextern \"C++\" { safe fn f<'a>(Box<&'a const c++::B>); }\n",
+            "reference to a C++ object `&'a const c++::B` is a C++ reference in C++",
+        ),
+        (
+            "type c++::B {}\nextern \"C++\" { safe fn f<'a>(&'a [&'a const c++::B]); }\n",
+            "reference to a C++ object `&'a const c++::B` is a C++ reference in C++",
+        ),
+        (
+            "type c++::B {}\nextern \"C++\" { safe fn f<'a>(::std::vec::Vec<&'a const c++::B>); }\n",
+            "reference to a C++ object `&'a const c++::B` is a C++ reference in C++",
+        ),
+        (
+            "type c++::B {}\nmod crate { fn f() -> impl ::std::future::Future<Output = &'static const c++::B>; }\n",
+            "reference to a C++ object `&'static const c++::B` is a C++ reference in C++",
+        ),
+        (
+            r#"
+type c++::B {}
+trait crate::MyTrait {
+    fn m(&self);
+}
+extern "C++" {
+    impl<'a> crate::MyTrait for &'a const c++::B {
+        safe fn m(&self);
+    }
+}
+"#,
+            "reference to a C++ object `&'a const c++::B` is a C++ reference in C++",
+        ),
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(expected),
+            "expected `{expected}` for `{src}`, got:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn cpp_pointers_and_object_refs_cannot_be_declared_as_types_or_inherent_impls() {
+    for (src, expected) in [
+        (
+            "type c++::B {}\ntype c++::B* { #layout(size = 8, align = 8); }\n",
+            "C++ pointers and references (`c++::B*`) are built-in, not types to declare",
+        ),
+        (
+            "type const i32* { #layout(size = 8, align = 8); }\n",
+            "C++ pointers and references (`const i32*`) are built-in, not types to declare",
+        ),
+        (
+            "type c++::B {}\ntype<'a> &'a const c++::B { #layout(size = 8, align = 8); }\n",
+            "C++ pointers and references (`&'a const c++::B`) are built-in, not types to declare",
+        ),
+        (
+            "type<'a> &'a unique var i32 { #layout(size = 8, align = 8); }\n",
+            "C++ pointers and references (`&'a unique var i32`) are built-in, not types to declare",
+        ),
+        (
+            "type c++::B {}\nextern \"C++\" { impl c++::B* { safe fn f(&self); } }\n",
+            "inherent `extern \"C++\"` impls are not supported on C++ pointers or references (`c++::B*`)",
+        ),
+        (
+            "type c++::B {}\nextern \"C++\" { impl<'a> &'a const c++::B { safe fn f(&self); } }\n",
+            "inherent `extern \"C++\"` impls are not supported on C++ pointers or references (`&'a const c++::B`)",
+        ),
+        (
+            "type c++::B {}\nextern \"C++\" { unsafe fn f((c++::B, i32)*); }\n",
+            "C++ pointers and references (`T*`, `T&`) can only point to C++ objects (`c++::` types, builtins and C++ pointers), not `(c++::B, i32)`",
+        ),
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(expected),
+            "expected `{expected}` for `{src}`, got:\n{err}"
         );
     }
 }

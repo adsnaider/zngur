@@ -254,9 +254,9 @@ mod c++::a::b {
 }
 
 extern "C++" {
-    safe fn make_item(&c++::Way) -> MyItem;
+    safe fn make_item(&const c++::Way) -> MyItem;
     impl MyItem {
-        safe fn touch(&mut self, &c++::Way);
+        safe fn touch(&mut self, &const c++::Way);
     }
 }
     "#,
@@ -272,10 +272,10 @@ extern "C++" {
 
             extern "C++" {
 
-                safe fn make_item(&c++::Way) -> c++::a::b::Item;
+                safe fn make_item(&const c++::Way) -> c++::a::b::Item;
 
                 impl c++::a::b::Item {
-                    safe fn touch(&mut self, &c++::Way);
+                    safe fn touch(&mut self, &const c++::Way);
                 }
 
             }
@@ -767,7 +767,7 @@ fn reparse_resolved_module_imports_including_nested_merge_rebasing() {
 merge "./sub/part.zng";
 
 mod crate {
-    fn use_imported(&c++::ns::Bar, c++::ns::Baz);
+    fn use_imported(&const c++::ns::Bar, c++::ns::Baz);
 }
     "#,
         Some(Box::new(resolver)),
@@ -778,7 +778,7 @@ mod crate {
             #crate app_crate
 
             mod crate {
-                fn use_imported(&c++::ns::Bar, c++::ns::Baz);
+                fn use_imported(&const c++::ns::Bar, c++::ns::Baz);
             }
         "#]],
     );
@@ -938,6 +938,98 @@ type crate::Holder<Box<dyn for<'b> Fn(&'b str)>> {
                 #layout(size = 16, align = 8);
 
                 fn invoke<'b_0>(&'b_0 self, Box<dyn for<'b> Fn(&'b str)>);
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn reparse_cpp_objects() {
+    let _ = check_round_trip(
+        r#"
+type c++::a::B {
+    #layout(size = 16, align = 8);
+    #trivially_relocatable;
+}
+
+type crate::Foo {
+    #layout(size = 0, align = 1);
+    fn f(&self, &const c++::a::B, &unique var c++::a::B, &i32);
+}
+
+extern "C++" {
+    safe fn refs<'a>(&'a const c++::a::B, &'a var c++::a::B, &'a unique var c++::a::B, &'a unique const c++::a::B);
+    safe fn builtins<'a>(&'a const i32, &'a var i32, &'a unique var i32, &'a unique const i32, &'a i32, &'a mut i32) -> &'a var bool;
+    unsafe fn raw(c++::a::B*, const c++::a::B&, i32&, const i32*, c++::a::B**, const i32**, i32* const*);
+}
+"#,
+        expect![[r#"
+            type c++::a::B {
+                #layout(size = 16, align = 8);
+                #trivially_relocatable;
+            }
+
+            type crate::Foo {
+                #layout(size = 0, align = 1);
+
+                fn f(&self, &const c++::a::B, &unique var c++::a::B, &i32);
+            }
+
+            extern "C++" {
+
+                safe fn refs<'a>(&'a const c++::a::B, &'a var c++::a::B, &'a unique var c++::a::B, &'a unique const c++::a::B);
+                safe fn builtins<'a>(&'a const i32, &'a var i32, &'a unique var i32, &'a unique const i32, &'a i32, &'a mut i32) -> &'a var bool;
+                unsafe fn raw(c++::a::B*, const c++::a::B&, i32&, const i32*, c++::a::B**, const i32**, i32* const*);
+
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn reparse_rust_ref_to_const_cpp_ptr() {
+    let _ = check_round_trip(
+        r#"
+#unstable(template_types)
+
+type c++::a::B {
+}
+
+type<T> crate::Holder<T> {
+    #layout(size = 8, align = 8);
+    fn borrow<'a>(&'a self) -> &'a T;
+}
+
+type crate::Holder<const i32*> {
+}
+
+type crate::Holder<const c++::a::B**> {
+}
+
+extern "C++" {
+    unsafe fn ptr_refs<'a>(&'a i32 const*, &'a mut const i32*, &'a const i32 const*);
+}
+"#,
+        expect![[r#"
+            type c++::a::B {
+            }
+
+            type crate::Holder<const i32*> {
+                #layout(size = 8, align = 8);
+
+                fn borrow<'a>(&'a self) -> &'a i32 const*;
+            }
+
+            type crate::Holder<const c++::a::B**> {
+                #layout(size = 8, align = 8);
+
+                fn borrow<'a>(&'a self) -> &'a c++::a::B const**;
+            }
+
+            extern "C++" {
+
+                unsafe fn ptr_refs<'a>(&'a i32 const*, &'a mut const i32*, &'a const i32 const*);
+
             }
         "#]],
     );

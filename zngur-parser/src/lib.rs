@@ -10,12 +10,13 @@ use chumsky::{input::MapExtra, prelude::*};
 use itertools::{Either, Itertools};
 
 use zngur_def::{
-    AdditionalIncludes, ConflictSource, ConvertPanicToException, CppHeapAllocated, CppRef,
-    CppStackOwned, Import, LayoutPolicy, Lifetime, Merge, MergeFailure, ModuleImport, Mutability,
-    PrimitiveRustType, RustPathAndGenerics, RustTrait, RustType, TriviallyRelocatable, TypeVar,
-    ZngurConstructor, ZngurExternCppFn, ZngurExternCppImpl, ZngurField, ZngurFn, ZngurMethod,
-    ZngurMethodDetails, ZngurMethodReceiver, ZngurSpec, ZngurTrait, ZngurType, ZngurVariant,
-    ZngurWellknownTrait, cpp_handle_field_name, cpp_handle_keyword,
+    AdditionalIncludes, ConflictSource, ConvertPanicToException, CppConstness, CppHeapAllocated,
+    CppIndirection, CppRef, CppStackOwned, Import, LayoutPolicy, Lifetime, Merge, MergeFailure,
+    ModuleImport, Mutability, PrimitiveRustType, RustPathAndGenerics, RustTrait, RustType,
+    TriviallyRelocatable, TypeVar, ZngurConstructor, ZngurExternCppFn, ZngurExternCppImpl,
+    ZngurField, ZngurFn, ZngurMethod, ZngurMethodDetails, ZngurMethodReceiver, ZngurSpec,
+    ZngurTrait, ZngurType, ZngurVariant, ZngurWellknownTrait, cpp_handle_field_name,
+    cpp_handle_keyword,
 };
 
 pub type Span = SimpleSpan<usize>;
@@ -744,7 +745,12 @@ fn check_ty_lifetimes(
             }
             check_ty_lifetimes(ctx, span, all_outer, allowed, fn_trait_name, context, inner)
         }
-        RustType::Raw(_, inner) | RustType::Boxed(inner) | RustType::Slice(inner) => {
+        RustType::Raw(_, inner)
+        | RustType::Boxed(inner)
+        | RustType::Slice(inner)
+        | RustType::CppPtr(_, inner)
+        | RustType::CppConst(inner)
+        | RustType::CppVar(inner) => {
             check_ty_lifetimes(ctx, span, all_outer, allowed, fn_trait_name, context, inner)
         }
         RustType::Tuple(tys) => tys
@@ -801,14 +807,26 @@ fn check_ty_lifetimes(
     }
 }
 
-fn check_used_lifetimes<'t>(
+fn check_used_types<'t>(
     ctx: &mut ParseContext,
     span: Span,
     declared: &[Lifetime],
     types: impl IntoIterator<Item = &'t RustType>,
     extra: impl IntoIterator<Item = &'t Lifetime>,
     context: LifetimeContext,
+    allow_cpp_ref: bool,
+    allow_cpp_object_ref: bool,
 ) -> bool {
+    let types: Vec<&RustType> = types.into_iter().collect();
+    if !report_cpp_objects(
+        ctx,
+        span,
+        types.iter().copied(),
+        allow_cpp_ref,
+        allow_cpp_object_ref,
+    ) {
+        return false;
+    }
     types
         .into_iter()
         .all(|t| check_ty_lifetimes(ctx, span, declared, declared, None, context, t))
@@ -817,29 +835,63 @@ fn check_used_lifetimes<'t>(
             .all(|l| check_used_lifetime(ctx, span, declared, declared, None, context, l))
 }
 
-/// Checks that `declared` is valid (no builtins or duplicates) and that all lifetimes used in
-/// `types` and `extra` are declared (or `'static` / `'_`).
-fn check_lifetimes<'t>(
+/// Checks the types of a declaration: that C++ object references/pointers in `types` are valid
+/// (see `check_cpp_objects_inner`), that `declared` is valid (no builtins or duplicates), and that
+/// all lifetimes used in `types` and `extra` are declared (or `'static` / `'_`).
+fn check_types<'t>(
     ctx: &mut ParseContext,
     span: Span,
     declared: &[Lifetime],
     types: impl IntoIterator<Item = &'t RustType>,
     extra: impl IntoIterator<Item = &'t Lifetime>,
     context: LifetimeContext,
+    allow_cpp_ref: bool,
+    allow_cpp_object_ref: bool,
 ) -> bool {
+    let types: Vec<&RustType> = types.into_iter().collect();
+    if !report_cpp_objects(
+        ctx,
+        span,
+        types.iter().copied(),
+        allow_cpp_ref,
+        allow_cpp_object_ref,
+    ) {
+        return false;
+    }
     validate_declared_lifetimes(ctx, span, declared)
-        && check_used_lifetimes(ctx, span, declared, types, extra, context)
+        && types
+            .into_iter()
+            .all(|t| check_ty_lifetimes(ctx, span, declared, declared, None, context, t))
+        && extra
+            .into_iter()
+            .all(|l| check_used_lifetime(ctx, span, declared, declared, None, context, l))
 }
 
-/// Checks the lifetimes of `method`, which can use its own and `outer` (those of its `impl` or
-/// `type` block).
-fn check_method_lifetimes<'t>(
+/// Checks the types and lifetimes of `method`, which can use its own lifetimes and `outer` (those
+/// of its `impl` or `type` block).
+fn check_method_types<'t>(
     ctx: &mut ParseContext,
     span: Span,
     outer: &[Lifetime],
     method: &'t ZngurMethod,
     extra_types: impl IntoIterator<Item = &'t RustType>,
 ) -> bool {
+    let extra_types: Vec<&RustType> = extra_types.into_iter().collect();
+    if !report_cpp_objects(
+        ctx,
+        span,
+        method.inputs.iter().chain([&method.output]),
+        true,
+        true,
+    ) || !report_cpp_objects(
+        ctx,
+        span,
+        method.generics.iter().chain(extra_types.iter().copied()),
+        false,
+        false,
+    ) {
+        return false;
+    }
     if let Some(l) = method.lifetimes.iter().find(|l| outer.contains(l)) {
         ctx.add_error_str(
             &format!("lifetime `{l}` is already declared by the `impl` or `type`"),
@@ -851,19 +903,523 @@ fn check_method_lifetimes<'t>(
         return false;
     }
     let declared: Vec<Lifetime> = outer.iter().chain(&method.lifetimes).cloned().collect();
-    check_used_lifetimes(
-        ctx,
-        span,
-        &declared,
-        method
-            .inputs
-            .iter()
-            .chain([&method.output])
-            .chain(&method.generics)
-            .chain(extra_types),
-        method.receiver_lifetime.as_ref(),
-        LifetimeContext::Item,
+    method
+        .inputs
+        .iter()
+        .chain([&method.output])
+        .chain(&method.generics)
+        .chain(extra_types)
+        .all(|t| {
+            check_ty_lifetimes(
+                ctx,
+                span,
+                &declared,
+                &declared,
+                None,
+                LifetimeContext::Item,
+                t,
+            )
+        })
+        && method.receiver_lifetime.iter().all(|l| {
+            check_used_lifetime(
+                ctx,
+                span,
+                &declared,
+                &declared,
+                None,
+                LifetimeContext::Item,
+                l,
+            )
+        })
+}
+
+/// How `ty` is spelled in a `.zng` file (for diagnostics).
+fn zng_spelling(ty: &RustType) -> String {
+    fn zng_east_const_spelling(ty: &RustType) -> String {
+        match ty {
+            RustType::CppPtr(CppIndirection::Pointer, t) => {
+                format!("{}*", zng_east_const_spelling(t))
+            }
+            RustType::CppPtr(CppIndirection::Reference, t) => {
+                format!("{}&", zng_east_const_spelling(t))
+            }
+            RustType::CppConst(t) => format!("{} const", zng_east_const_spelling(t)),
+            RustType::CppVar(t) => zng_east_const_spelling(t),
+            _ => zng_spelling(ty),
+        }
+    }
+
+    fn zng_path_spelling(pg: &RustPathAndGenerics) -> String {
+        let Some((first, rest)) = pg.path.split_first() else {
+            return String::new();
+        };
+        let mut out = String::new();
+        if first != "crate" {
+            out.push_str("::");
+        }
+        out.push_str(first);
+        for seg in rest {
+            out.push_str("::");
+            out.push_str(seg);
+        }
+        if !pg.lifetimes.is_empty() || !pg.generics.is_empty() || !pg.named_generics.is_empty() {
+            let args = pg
+                .lifetimes
+                .iter()
+                .map(|l| l.to_string())
+                .chain(pg.generics.iter().map(zng_spelling))
+                .chain(
+                    pg.named_generics
+                        .iter()
+                        .map(|(k, v)| format!("{k} = {}", zng_spelling(v))),
+                )
+                .join(", ");
+            out.push('<');
+            out.push_str(&args);
+            out.push('>');
+        }
+        out
+    }
+
+    fn zng_trait_spelling(tr: &RustTrait) -> String {
+        match tr {
+            RustTrait::Normal(pg) => zng_path_spelling(pg),
+            RustTrait::Fn {
+                name,
+                lifetimes,
+                inputs,
+                output,
+            } => {
+                let mut out = String::new();
+                if !lifetimes.is_empty() {
+                    out.push_str("for");
+                    out.push_str(&zngur_def::lifetime_params(lifetimes));
+                    out.push(' ');
+                }
+                out.push_str(name);
+                out.push('(');
+                out.push_str(&inputs.iter().map(zng_spelling).join(", "));
+                out.push(')');
+                if **output != RustType::UNIT {
+                    out.push_str(" -> ");
+                    out.push_str(&zng_spelling(output));
+                }
+                out
+            }
+        }
+    }
+
+    match ty {
+        RustType::Primitive(prim) => prim.to_string(),
+        RustType::Ref(m, l, inner) => {
+            let lt = l.as_ref().map(|l| format!("{l} ")).unwrap_or_default();
+            match inner.as_cpp_object() {
+                Some((constness, obj_inner)) => {
+                    let u = if *m == Mutability::Mut { "unique " } else { "" };
+                    format!(
+                        "&{lt}{u}{} {}",
+                        constness.keyword(),
+                        zng_east_const_spelling(obj_inner)
+                    )
+                }
+                None => match m {
+                    Mutability::Mut => format!("&{lt}mut {}", zng_spelling(inner)),
+                    Mutability::Not => format!("&{lt}{}", zng_east_const_spelling(inner)),
+                },
+            }
+        }
+        RustType::Raw(Mutability::Not, t) => format!("*const {}", zng_spelling(t)),
+        RustType::Raw(Mutability::Mut, t) => format!("*mut {}", zng_spelling(t)),
+        RustType::Boxed(t) => format!("Box<{}>", zng_spelling(t)),
+        RustType::Slice(t) => format!("[{}]", zng_spelling(t)),
+        RustType::Dyn(tr, bounds) => {
+            let mut out = format!("dyn {}", zng_trait_spelling(tr));
+            for b in bounds {
+                out.push_str(&format!(" + {b}"));
+            }
+            out
+        }
+        RustType::Impl(tr, bounds) => {
+            let mut out = format!("impl {}", zng_trait_spelling(tr));
+            for b in bounds {
+                out.push_str(&format!(" + {b}"));
+            }
+            out
+        }
+        RustType::Tuple(tys) => match tys.as_slice() {
+            [single] => format!("({},)", zng_spelling(single)),
+            _ => format!("({})", tys.iter().map(zng_spelling).join(", ")),
+        },
+        RustType::Adt(pg) => zng_path_spelling(pg),
+        RustType::TypeVar(var) => var.0.clone(),
+        RustType::Cpp(segs) => format!("c++::{}", segs.join("::")),
+        RustType::CppConst(t) if matches!(**t, RustType::CppPtr(..)) => {
+            format!("{} const", zng_spelling(t))
+        }
+        RustType::CppConst(t) => format!("const {}", zng_spelling(t)),
+        RustType::CppVar(t) => zng_spelling(t),
+        RustType::CppPtr(CppIndirection::Pointer, t) => format!("{}*", zng_spelling(t)),
+        RustType::CppPtr(CppIndirection::Reference, t) => format!("{}&", zng_spelling(t)),
+    }
+}
+
+fn is_valid_cpp_object_inner(ty: &RustType) -> bool {
+    matches!(
+        ty,
+        RustType::Cpp(_)
+            | RustType::CppPtr(CppIndirection::Pointer, _)
+            | RustType::TypeVar(_)
+            | RustType::Primitive(
+                PrimitiveRustType::Int(8 | 16 | 32 | 64)
+                    | PrimitiveRustType::Uint(8 | 16 | 32 | 64)
+                    | PrimitiveRustType::Float(32 | 64)
+                    | PrimitiveRustType::Usize
+                    | PrimitiveRustType::Bool,
+            )
     )
+}
+
+fn contains_cpp_type(ty: &RustType) -> bool {
+    match ty {
+        RustType::Cpp(_) => true,
+        RustType::Ref(_, _, t)
+        | RustType::Raw(_, t)
+        | RustType::Boxed(t)
+        | RustType::Slice(t)
+        | RustType::CppPtr(_, t)
+        | RustType::CppConst(t)
+        | RustType::CppVar(t) => contains_cpp_type(t),
+        RustType::Tuple(tys) => tys.iter().any(contains_cpp_type),
+        RustType::Adt(pg) => {
+            pg.generics.iter().any(contains_cpp_type)
+                || pg.named_generics.iter().any(|(_, t)| contains_cpp_type(t))
+        }
+        RustType::Dyn(tr, _) | RustType::Impl(tr, _) => match tr {
+            RustTrait::Normal(pg) => {
+                pg.generics.iter().any(contains_cpp_type)
+                    || pg.named_generics.iter().any(|(_, t)| contains_cpp_type(t))
+            }
+            RustTrait::Fn { inputs, output, .. } => {
+                inputs.iter().any(contains_cpp_type) || contains_cpp_type(output)
+            }
+        },
+        RustType::Primitive(_) | RustType::TypeVar(_) => false,
+    }
+}
+
+struct CppHeapAllocatedInfo<'a> {
+    heap_allocated: &'a HashSet<Vec<String>>,
+    /// When parsing an `import`ed module (whose own `import`s aren't resolved), only `c++::`
+    /// types declared locally in that module have a known `#cpp_heap_allocated` status.
+    known_only_local: Option<&'a HashSet<Vec<String>>>,
+}
+
+impl CppHeapAllocatedInfo<'_> {
+    fn is_heap_allocated(&self, segs: &[String]) -> Option<bool> {
+        if let Some(local) = self.known_only_local
+            && !local.contains(segs)
+        {
+            return None;
+        }
+        Some(self.heap_allocated.contains(segs))
+    }
+}
+
+struct DeferredCppObjectCheck {
+    report_span: ReportSpan,
+    types: Vec<RustType>,
+    allow_cpp_ref: bool,
+    allow_cpp_object_ref: bool,
+}
+
+/// Checks the references and pointers to C++ objects in `ty`, once its paths are resolved: a
+/// reference to a C++ class must say whether the object is `const` (`&'a const T`,
+/// `&'a unique var T`, ...), and only C++ objects (C++ classes, builtins and C++ pointers) can be
+/// `const` or `var` or pointed to by `T*` / `T&`. Type variables of templates are checked once
+/// they're substituted, and checks that depend on whether a `c++::` type is `#cpp_heap_allocated`
+/// run once all merged files and imported modules have been resolved (`heap_info.is_some()`).
+fn check_cpp_objects_inner(
+    ty: &RustType,
+    allow_cpp_ref: bool,
+    allow_cpp_object_ref: bool,
+    heap_info: Option<&CppHeapAllocatedInfo<'_>>,
+) -> Result<(), String> {
+    let all = |tys: &[RustType], allow_ref: bool, allow_obj_ref: bool| {
+        tys.iter()
+            .try_for_each(|t| check_cpp_objects_inner(t, allow_ref, allow_obj_ref, heap_info))
+    };
+    match ty {
+        RustType::Ref(m, l, inner) => {
+            let l = l.as_ref().map(|l| format!("{l} ")).unwrap_or_default();
+            match &**inner {
+                RustType::Cpp(segs) => match heap_info.and_then(|i| i.is_heap_allocated(segs)) {
+                    None | Some(true) => Ok(()),
+                    Some(false) => {
+                        let inner = zng_spelling(inner);
+                        let suggestion = match m {
+                            Mutability::Not => format!(
+                                "`&{l}const {inner}` (a C++ `const T&`, `&T<Const>` in Rust) or \
+                                 `&{l}var {inner}` (a shared `T&`, `&T` in Rust)"
+                            ),
+                            Mutability::Mut => format!(
+                                "`&{l}unique var {inner}` (a `T&` that Rust uses uniquely, `&mut T` \
+                                 in Rust)"
+                            ),
+                        };
+                        Err(format!(
+                            "a reference to a C++ class must say whether the object is `const`: \
+                             {suggestion}"
+                        ))
+                    }
+                },
+                RustType::CppConst(t) | RustType::CppVar(t) => {
+                    if let RustType::Cpp(segs) = &**t
+                        && heap_info.and_then(|i| i.is_heap_allocated(segs)) == Some(true)
+                    {
+                        let m = if *m == Mutability::Mut { "mut " } else { "" };
+                        let inner = zng_spelling(t);
+                        return Err(format!(
+                            "`{inner}` is `#cpp_heap_allocated` (its Rust wrapper holds an owning \
+                             pointer rather than the C++ object inline), so references to it \
+                             cannot be `const` or `var`: use `&{l}{m}{inner}`"
+                        ));
+                    }
+                    if is_valid_cpp_object_inner(t) {
+                        check_cpp_objects_inner(t, false, false, heap_info)?;
+                        if !allow_cpp_object_ref {
+                            return Err(format!(
+                                "reference to a C++ object `{}` is a C++ reference in C++ and can \
+                                 only be a function, method, or constructor parameter or return \
+                                 type",
+                                zng_spelling(ty)
+                            ));
+                        }
+                        Ok(())
+                    } else if matches!(**t, RustType::Primitive(PrimitiveRustType::Char)) {
+                        let m = if *m == Mutability::Mut { "mut " } else { "" };
+                        Err(format!(
+                            "`char` can't be a C++ object (C++ can store invalid code points in \
+                             it), so references to it can't be `const` or `var`: use \
+                             `&{l}{m}char` (a Rust value)"
+                        ))
+                    } else if matches!(
+                        **t,
+                        RustType::Primitive(
+                            PrimitiveRustType::Int(_)
+                                | PrimitiveRustType::Uint(_)
+                                | PrimitiveRustType::Float(_)
+                        )
+                    ) {
+                        let m = if *m == Mutability::Mut { "mut " } else { "" };
+                        let t = zng_spelling(t);
+                        Err(format!(
+                            "`{t}` is not a C++ builtin scalar (only `bool`, 8/16/32/64-bit \
+                             integers, `usize`, `f32`, and `f64` are), so references to it \
+                             can't be `const` or `var`: use `&{l}{m}{t}` (a Rust value)"
+                        ))
+                    } else if matches!(**t, RustType::CppPtr(CppIndirection::Reference, _)) {
+                        Err(
+                            "references to C++ references aren't valid; use `&'a const T` / \
+                             `&'a var T` or `const T&` / `T&`"
+                                .to_owned(),
+                        )
+                    } else {
+                        let m = if *m == Mutability::Mut { "mut " } else { "" };
+                        let t = zng_spelling(t);
+                        Err(format!(
+                            "only C++ objects (`c++::` types, builtins and C++ pointers) can be \
+                             `const` or `var`, and `{t}` is a Rust type: use `&{l}{m}{t}`"
+                        ))
+                    }
+                }
+                RustType::CppPtr(CppIndirection::Reference, _) => Err(
+                    "references to C++ references aren't valid; use `&'a const T` / \
+                     `&'a var T` or `const T&` / `T&`"
+                        .to_owned(),
+                ),
+                _ => check_cpp_objects_inner(inner, false, false, heap_info),
+            }
+        }
+        RustType::Raw(m, inner) => match &**inner {
+            RustType::Cpp(segs) => match heap_info.and_then(|i| i.is_heap_allocated(segs)) {
+                None | Some(true) => Ok(()),
+                Some(false) => {
+                    let inner_str = zng_spelling(inner);
+                    let suggestion = match m {
+                        Mutability::Not => format!("`const {inner_str}*`"),
+                        Mutability::Mut => format!("`{inner_str}*`"),
+                    };
+                    Err(format!(
+                        "a raw pointer to a C++ class must say whether the object is `const`: \
+                         use {suggestion}"
+                    ))
+                }
+            },
+            RustType::CppConst(t) | RustType::CppVar(t) => {
+                let inner_str = zng_spelling(t);
+                let suggestion = match m {
+                    Mutability::Not => format!("`const {inner_str}*`"),
+                    Mutability::Mut => format!("`{inner_str}*`"),
+                };
+                Err(format!(
+                    "a raw pointer to a C++ object is written in C++ style: use {suggestion}"
+                ))
+            }
+            RustType::CppPtr(CppIndirection::Reference, _) => {
+                Err("pointers to C++ references aren't valid".to_owned())
+            }
+            _ => check_cpp_objects_inner(inner, false, false, heap_info),
+        },
+        RustType::CppPtr(indirection, pointee) => {
+            let inner = match &**pointee {
+                RustType::CppConst(t) | RustType::CppVar(t) => &**t,
+                t => t,
+            };
+            if matches!(inner, RustType::CppPtr(CppIndirection::Reference, _)) {
+                return match indirection {
+                    CppIndirection::Pointer => {
+                        Err("pointers to C++ references (`T&*`) aren't valid".to_owned())
+                    }
+                    CppIndirection::Reference => {
+                        Err("references to C++ references (`T&&`) aren't valid".to_owned())
+                    }
+                };
+            }
+            if matches!(inner, RustType::Primitive(PrimitiveRustType::Char)) {
+                return Err(
+                    "`char` can't be a C++ object (C++ can store invalid code points in it), so \
+                     C++ pointers and references can't point to it"
+                        .to_owned(),
+                );
+            }
+            if matches!(
+                inner,
+                RustType::Primitive(
+                    PrimitiveRustType::Int(_)
+                        | PrimitiveRustType::Uint(_)
+                        | PrimitiveRustType::Float(_)
+                )
+            ) && !is_valid_cpp_object_inner(inner)
+            {
+                return Err(format!(
+                    "`{}` is not a C++ builtin scalar (only `bool`, 8/16/32/64-bit integers, \
+                     `usize`, `f32`, and `f64` are), so C++ pointers and references can't point \
+                     to it",
+                    zng_spelling(inner)
+                ));
+            }
+            if !is_valid_cpp_object_inner(inner) {
+                return Err(format!(
+                    "C++ pointers and references (`T*`, `T&`) can only point to C++ objects \
+                     (`c++::` types, builtins and C++ pointers), not `{}`",
+                    zng_spelling(inner)
+                ));
+            }
+            if *indirection == CppIndirection::Reference && !allow_cpp_ref {
+                return Err(format!(
+                    "C++ reference `{}` can only be a function parameter or return type",
+                    zng_spelling(ty)
+                ));
+            }
+            if let RustType::Cpp(segs) = inner
+                && heap_info.and_then(|i| i.is_heap_allocated(segs)) == Some(true)
+            {
+                let inner_str = zng_spelling(inner);
+                return Err(format!(
+                    "`{inner_str}` is `#cpp_heap_allocated` (its Rust wrapper holds an owning \
+                     pointer rather than the C++ object inline), so C++ pointers and references \
+                     (`{inner_str}*`, `{inner_str}&`) cannot point to it: use `&{inner_str}` or \
+                     `&mut {inner_str}`"
+                ));
+            }
+            check_cpp_objects_inner(pointee, false, false, heap_info)
+        }
+        RustType::CppConst(t) | RustType::CppVar(t) => {
+            if let RustType::Cpp(segs) = &**t
+                && heap_info.and_then(|i| i.is_heap_allocated(segs)) == Some(true)
+            {
+                let inner_str = zng_spelling(t);
+                return Err(format!(
+                    "`{inner_str}` is `#cpp_heap_allocated` (its Rust wrapper holds an owning \
+                     pointer rather than the C++ object inline), so it cannot be `const` or `var`"
+                ));
+            }
+            if is_valid_cpp_object_inner(t) {
+                check_cpp_objects_inner(t, false, false, heap_info)
+            } else if matches!(**t, RustType::Primitive(PrimitiveRustType::Char)) {
+                Err(
+                    "`char` can't be a C++ object (C++ can store invalid code points in it)"
+                        .to_owned(),
+                )
+            } else {
+                Err(format!(
+                    "only C++ objects (`c++::` types, builtins and C++ pointers) can be `const` \
+                     or `var`, not `{}`",
+                    zng_spelling(t)
+                ))
+            }
+        }
+        RustType::Boxed(t) | RustType::Slice(t) => {
+            check_cpp_objects_inner(t, false, false, heap_info)
+        }
+        RustType::Tuple(tys) => all(tys, false, false),
+        RustType::Adt(pg) => {
+            all(&pg.generics, false, false)?;
+            pg.named_generics
+                .iter()
+                .try_for_each(|(_, t)| check_cpp_objects_inner(t, false, false, heap_info))
+        }
+        RustType::Cpp(_) => Ok(()),
+        RustType::Dyn(tr, _) | RustType::Impl(tr, _) => match tr {
+            RustTrait::Normal(pg) => {
+                check_cpp_objects_inner(&RustType::Adt(pg.clone()), false, false, heap_info)
+            }
+            RustTrait::Fn { inputs, output, .. } => {
+                all(inputs, false, true)?;
+                check_cpp_objects_inner(output, false, true, heap_info)
+            }
+        },
+        RustType::Primitive(_) | RustType::TypeVar(_) => Ok(()),
+    }
+}
+
+/// Reports the first immediate error of [`check_cpp_objects_inner`] in `types` (recording any
+/// `c++::`-bearing types for post-merge `#cpp_heap_allocated` validation), and returns whether
+/// there was none.
+fn report_cpp_objects<'t>(
+    ctx: &mut ParseContext,
+    span: Span,
+    types: impl IntoIterator<Item = &'t RustType>,
+    allow_cpp_ref: bool,
+    allow_cpp_object_ref: bool,
+) -> bool {
+    let types: Vec<&RustType> = types.into_iter().collect();
+    match types
+        .iter()
+        .try_for_each(|t| check_cpp_objects_inner(t, allow_cpp_ref, allow_cpp_object_ref, None))
+    {
+        Ok(()) => {
+            let cpp_types: Vec<RustType> = types
+                .into_iter()
+                .filter(|t| contains_cpp_type(t))
+                .cloned()
+                .collect();
+            if !cpp_types.is_empty() {
+                let report_span = ctx.report_span_for_range(span.into_range());
+                ctx.deferred_cpp_object_checks.push(DeferredCppObjectCheck {
+                    report_span,
+                    types: cpp_types,
+                    allow_cpp_ref,
+                    allow_cpp_object_ref,
+                });
+            }
+            true
+        }
+        Err(message) => {
+            ctx.add_error_str(&message, span);
+            false
+        }
+    }
 }
 
 struct MergeContext {
@@ -1133,6 +1689,7 @@ impl ProcessedItem<'_> {
                     path: resolved_path,
                     crate_name: None,
                     cpp_types: vec![],
+                    cpp_heap_allocated_types: vec![],
                 });
                 r.module_import_spans
                     .push(ctx.report_span_for_range(span.into_range()));
@@ -1203,14 +1760,34 @@ impl ProcessedItem<'_> {
                 if !type_lifetimes.is_empty() && matches!(rust_ty, RustType::Cpp(_)) {
                     ctx.add_error_str("`c++::` types don't have lifetime parameters", ty.span);
                 }
-                let mut ty_ok = check_lifetimes(
+                let is_top_cpp_obj_ref = matches!(
+                    &rust_ty,
+                    RustType::Ref(_, _, inner) if inner.as_cpp_object().is_some()
+                );
+                let deferred_before = ctx.deferred_cpp_object_checks.len();
+                let mut ty_ok = check_types(
                     ctx,
                     ty.span,
                     &type_lifetimes,
                     [&rust_ty],
                     [],
                     LifetimeContext::Item,
+                    false,
+                    is_top_cpp_obj_ref,
                 );
+                if ty_ok && (matches!(rust_ty, RustType::CppPtr(..)) || is_top_cpp_obj_ref) {
+                    ctx.deferred_cpp_object_checks.truncate(deferred_before);
+                    ctx.add_error_str(
+                        &format!(
+                            "C++ pointers and references (`{}`) are built-in, not types to \
+                             declare: use them in signatures directly (only `c++::` classes take \
+                             a `type` block)",
+                            zng_spelling(&rust_ty)
+                        ),
+                        ty.span,
+                    );
+                    return;
+                }
                 if ty_ok && !matches!(rust_ty, RustType::Cpp(_)) {
                     let used = rust_ty.free_lifetimes();
                     for lt in &type_lifetimes {
@@ -1318,13 +1895,15 @@ impl ProcessedItem<'_> {
                                         .collect(),
                                 },
                             };
-                            if !check_used_lifetimes(
+                            if !check_used_types(
                                 ctx,
                                 item_span,
                                 &type_lifetimes,
                                 c.inputs.iter().map(|(_, t)| t),
                                 [],
                                 LifetimeContext::Item,
+                                true,
+                                true,
                             ) {
                                 continue;
                             }
@@ -1360,13 +1939,15 @@ impl ProcessedItem<'_> {
                                             ty: ty.to_zngur(scope, ctx),
                                             offset,
                                         };
-                                        if !check_used_lifetimes(
+                                        if !check_used_types(
                                             ctx,
                                             item.span,
                                             &type_lifetimes,
                                             [&field.ty],
                                             [],
                                             LifetimeContext::Item,
+                                            false,
+                                            false,
                                         ) {
                                             continue;
                                         }
@@ -1394,13 +1975,15 @@ impl ProcessedItem<'_> {
                                 ty: ty.to_zngur(scope, ctx),
                                 offset,
                             };
-                            if !check_used_lifetimes(
+                            if !check_used_types(
                                 ctx,
                                 item_span,
                                 &type_lifetimes,
                                 [&field.ty],
                                 [],
                                 LifetimeContext::Item,
+                                false,
+                                false,
                             ) {
                                 continue;
                             }
@@ -1451,7 +2034,7 @@ impl ProcessedItem<'_> {
                                 deref,
                                 cpp_name: cpp_name.map(|s| s.to_owned()),
                             };
-                            if !check_method_lifetimes(
+                            if !check_method_types(
                                 ctx,
                                 item_span,
                                 &type_lifetimes,
@@ -1657,19 +2240,21 @@ impl ProcessedItem<'_> {
             }
             ProcessedItem::Trait { tr, methods } => {
                 let tr_zngur = tr.inner.to_zngur(scope, ctx);
-                let mut ok = check_lifetimes(
+                let mut ok = check_types(
                     ctx,
                     tr.span,
                     &[],
                     [&RustType::Dyn(tr_zngur.clone(), vec![])],
                     [],
                     LifetimeContext::TraitHeader,
+                    false,
+                    false,
                 );
                 let mut zngur_methods = Vec::with_capacity(methods.len());
                 for m in methods {
                     let m_span = m.span;
                     let m_zngur = m.inner.to_zngur(scope, ctx);
-                    if !check_method_lifetimes(ctx, m_span, &[], &m_zngur, []) {
+                    if !check_method_types(ctx, m_span, &[], &m_zngur, []) {
                         ok = false;
                     }
                     zngur_methods.push(m_zngur);
@@ -1707,7 +2292,7 @@ impl ProcessedItem<'_> {
                         return;
                     }
                 };
-                if !check_method_lifetimes(ctx, f.span, &[], &method, []) {
+                if !check_method_types(ctx, f.span, &[], &method, []) {
                     return;
                 }
                 let func = ZngurFn {
@@ -1730,7 +2315,7 @@ impl ProcessedItem<'_> {
                         ParsedExternCppItem::Function { is_safe, method } => {
                             let span = method.span;
                             let method = method.inner.to_zngur(scope, ctx);
-                            if !check_method_lifetimes(ctx, span, &[], &method, []) {
+                            if !check_method_types(ctx, span, &[], &method, []) {
                                 continue;
                             }
                             checked_merge(
@@ -1757,14 +2342,38 @@ impl ProcessedItem<'_> {
                             let tr_zngur = tr.map(|x| x.to_zngur(scope, ctx));
                             let ty_zngur = ty.inner.to_zngur(scope, ctx);
                             let trait_ty = tr_zngur.clone().map(|tr| RustType::Dyn(tr, vec![]));
-                            let mut ok = check_lifetimes(
+                            let is_inherent_cpp_obj_ref = tr_zngur.is_none()
+                                && matches!(
+                                    &ty_zngur,
+                                    RustType::Ref(_, _, inner) if inner.as_cpp_object().is_some()
+                                );
+                            let deferred_before = ctx.deferred_cpp_object_checks.len();
+                            let mut ok = check_types(
                                 ctx,
                                 ty.span,
                                 &impl_lifetimes,
                                 [&ty_zngur].into_iter().chain(trait_ty.as_ref()),
                                 [],
                                 LifetimeContext::Item,
+                                false,
+                                is_inherent_cpp_obj_ref,
                             );
+                            if ok
+                                && tr_zngur.is_none()
+                                && (matches!(ty_zngur, RustType::CppPtr(..))
+                                    || is_inherent_cpp_obj_ref)
+                            {
+                                ctx.deferred_cpp_object_checks.truncate(deferred_before);
+                                ctx.add_error_str(
+                                    &format!(
+                                        "inherent `extern \"C++\"` impls are not supported on C++ \
+                                         pointers or references (`{}`)",
+                                        zng_spelling(&ty_zngur)
+                                    ),
+                                    ty.span,
+                                );
+                                ok = false;
+                            }
                             if ok {
                                 let mut constrained: HashSet<Lifetime> =
                                     ty_zngur.free_lifetimes().into_iter().collect();
@@ -1799,7 +2408,7 @@ impl ProcessedItem<'_> {
                                 let m_span = x.span;
                                 let mut m = x.inner.to_zngur(scope, ctx);
                                 m.is_safe = Some(is_safe);
-                                if !check_method_lifetimes(ctx, m_span, &impl_lifetimes, &m, []) {
+                                if !check_method_types(ctx, m_span, &impl_lifetimes, &m, []) {
                                     ok = false;
                                 }
                                 zngur_methods.push(m);
@@ -1877,11 +2486,25 @@ impl ProcessedItem<'_> {
     }
 }
 
+/// The kind of a reference in the `.zng` file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParsedRefKind {
+    /// `&'a T` / `&'a mut T`: a reference to a Rust value.
+    Rust(Mutability),
+    /// `&'a [unique] (const | var) T`: a reference to a C++ object. `constness` is `None` for
+    /// `&'a unique T`, which is an error (reported by `check_cpp_const`).
+    Cpp {
+        unique: bool,
+        constness: Option<CppConstness>,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ParsedRustType<'a> {
     Primitive(PrimitiveRustType),
-    /// `&T`, `&'a T`, ... (the lifetime is without the `'`).
-    Ref(Mutability, Option<&'a str>, Box<ParsedRustType<'a>>),
+    /// `&T`, `&'a T`, `&'a mut T`, `&'a const T`, `&'a unique var T`, ... (the lifetime is without
+    /// the `'`, and `T` is without the `const` / `var`).
+    Ref(ParsedRefKind, Option<&'a str>, Box<ParsedRustType<'a>>),
     Raw(Mutability, Box<ParsedRustType<'a>>),
     Boxed(Box<ParsedRustType<'a>>),
     Slice(Box<ParsedRustType<'a>>),
@@ -1889,14 +2512,41 @@ enum ParsedRustType<'a> {
     Impl(ParsedRustTrait<'a>, Vec<&'a str>),
     Tuple(Vec<ParsedRustType<'a>>),
     Adt(ParsedRustPathAndGenerics<'a>),
+    /// `T*` or `T&`, where `T` may be `const`.
+    CppPtr(CppIndirection, Box<ParsedRustType<'a>>),
+    /// `const T`.
+    CppConst(Box<ParsedRustType<'a>>),
 }
 
 impl ParsedRustType<'_> {
     fn to_zngur(self, scope: &Scope<'_>, ctx: &mut ParseContext) -> RustType {
         match self {
             ParsedRustType::Primitive(s) => RustType::Primitive(s),
-            ParsedRustType::Ref(m, l, s) => {
+            // The pointee is a `CppConst` or a `CppVar`.
+            ParsedRustType::CppPtr(kind, s) => RustType::CppPtr(
+                kind,
+                Box::new(RustType::cpp_object(
+                    CppConstness::Var,
+                    s.to_zngur(scope, ctx),
+                )),
+            ),
+            ParsedRustType::CppConst(s) => RustType::CppConst(Box::new(s.to_zngur(scope, ctx))),
+            ParsedRustType::Ref(ParsedRefKind::Rust(m), l, s) => {
                 RustType::Ref(m, l.map(lifetime), Box::new(s.to_zngur(scope, ctx)))
+            }
+            ParsedRustType::Ref(ParsedRefKind::Cpp { unique, constness }, l, s) => {
+                let m = if unique {
+                    Mutability::Mut
+                } else {
+                    Mutability::Not
+                };
+                // `&'a unique T` is rejected by `check_cpp_const`.
+                let constness = constness.unwrap_or(CppConstness::Var);
+                RustType::Ref(
+                    m,
+                    l.map(lifetime),
+                    Box::new(RustType::cpp_object(constness, s.to_zngur(scope, ctx))),
+                )
             }
             ParsedRustType::Raw(m, s) => RustType::Raw(m, Box::new(s.to_zngur(scope, ctx))),
             ParsedRustType::Boxed(s) => RustType::Boxed(Box::new(s.to_zngur(scope, ctx))),
@@ -2410,6 +3060,7 @@ pub(crate) fn normalize_lexical_path(path: &std::path::Path) -> std::path::PathB
 struct CachedImportedModule {
     crate_name: Option<String>,
     cpp_types: Vec<Vec<String>>,
+    cpp_heap_allocated_types: Vec<Vec<String>>,
     had_errors: bool,
 }
 
@@ -2444,6 +3095,7 @@ struct ParseContext<'this, 'source, 'cfg> {
     /// importing the same module parse and record it at most once.
     parsed_module_cache:
         OwnedRefMut<'this, std::collections::HashMap<std::path::PathBuf, CachedImportedModule>>,
+    deferred_cpp_object_checks: OwnedRefMut<'this, Vec<DeferredCppObjectCheck>>,
 }
 
 impl<'this, 'source, 'cfg> ParseContext<'this, 'source, 'cfg> {
@@ -2473,6 +3125,7 @@ impl<'this, 'source, 'cfg> ParseContext<'this, 'source, 'cfg> {
             sources,
             recorded_spans: Default::default(),
             parsed_module_cache: Default::default(),
+            deferred_cpp_object_checks: Default::default(),
         }
     }
 
@@ -2502,6 +3155,7 @@ impl<'this, 'source, 'cfg> ParseContext<'this, 'source, 'cfg> {
             sources: self.sources.into_borrowed(),
             recorded_spans: self.recorded_spans.into_borrowed(),
             parsed_module_cache: self.parsed_module_cache.into_borrowed(),
+            deferred_cpp_object_checks: self.deferred_cpp_object_checks.into_borrowed(),
         }
     }
 
@@ -2518,6 +3172,7 @@ impl<'this, 'source, 'cfg> ParseContext<'this, 'source, 'cfg> {
         ctx.depth = 0;
         ctx.resolve_module_imports = false;
         ctx.recorded_spans = OwnedRefMut::Owned(Default::default());
+        ctx.deferred_cpp_object_checks = OwnedRefMut::Owned(Default::default());
         ctx
     }
 
@@ -2983,9 +3638,19 @@ impl<'a> ParsedZngFile<'a> {
                         _ => None,
                     })
                     .collect();
+                let cpp_heap_allocated_types: Vec<Vec<String>> = imported
+                    .types
+                    .iter()
+                    .filter(|ty| ty.cpp_heap_allocated.is_some())
+                    .filter_map(|ty| match &ty.ty {
+                        RustType::Cpp(segs) => Some(segs.clone()),
+                        _ => None,
+                    })
+                    .collect();
                 let cached = CachedImportedModule {
                     crate_name: imported.crate_name,
                     cpp_types,
+                    cpp_heap_allocated_types,
                     had_errors,
                 };
                 ctx.parsed_module_cache.insert(norm_path, cached.clone());
@@ -3012,6 +3677,7 @@ impl<'a> ParsedZngFile<'a> {
             let module_import = &mut zngur.spec.imported_modules[index];
             module_import.crate_name = cached.crate_name;
             module_import.cpp_types = cached.cpp_types;
+            module_import.cpp_heap_allocated_types = cached.cpp_heap_allocated_types;
         }
     }
 
@@ -3287,9 +3953,10 @@ impl ZngurSpecBuilder {
         let ZngurSpecBuilder {
             mut spec,
             templates,
-            imports: _,
+            imports,
             module_import_spans,
         } = self;
+        let mut all_template_locations = Vec::with_capacity(spec.types.len());
         for ty in &mut spec.types {
             let mut template_locations = Vec::new();
             for template in &templates {
@@ -3313,6 +3980,119 @@ impl ZngurSpecBuilder {
                     } else {
                         template_locations.push(location);
                     }
+                }
+            }
+            all_template_locations.push(template_locations);
+        }
+
+        let cpp_heap_allocated: HashSet<Vec<String>> = spec
+            .types
+            .iter()
+            .filter(|ty| ty.cpp_heap_allocated.is_some())
+            .filter_map(|ty| match &ty.ty {
+                RustType::Cpp(segs) => Some(segs.clone()),
+                _ => None,
+            })
+            .chain(
+                spec.imported_modules
+                    .iter()
+                    .flat_map(|m| m.cpp_heap_allocated_types.iter().cloned()),
+            )
+            .collect();
+        let local_cpp_types: HashSet<Vec<String>> = spec
+            .types
+            .iter()
+            .filter_map(|ty| match &ty.ty {
+                RustType::Cpp(segs) => Some(segs.clone()),
+                _ => None,
+            })
+            .collect();
+        let had_incomplete_imports = (!ctx.resolve_module_imports
+            && !spec.imported_modules.is_empty())
+            || !imports.is_empty()
+            || (ctx.resolve_module_imports
+                && ctx.reports().errors > 0
+                && !spec.imported_modules.is_empty());
+        let heap_info = CppHeapAllocatedInfo {
+            heap_allocated: &cpp_heap_allocated,
+            known_only_local: had_incomplete_imports.then_some(&local_cpp_types),
+        };
+
+        for check in std::mem::take(&mut *ctx.deferred_cpp_object_checks) {
+            if let Err(message) = check.types.iter().try_for_each(|t| {
+                check_cpp_objects_inner(
+                    t,
+                    check.allow_cpp_ref,
+                    check.allow_cpp_object_ref,
+                    Some(&heap_info),
+                )
+            }) {
+                let report = Report::build(ReportKind::Error, check.report_span.clone())
+                    .with_message(&message)
+                    .with_label(
+                        Label::new(check.report_span)
+                            .with_message(&message)
+                            .with_color(Color::Red),
+                    )
+                    .finish();
+                ctx.add_fatal_report(report);
+            }
+        }
+
+        for (ty, template_locations) in spec.types.iter_mut().zip(all_template_locations) {
+            if !template_locations.is_empty() {
+                let check_res = ty
+                    .constructor
+                    .iter()
+                    .flat_map(|c| c.inputs.iter().map(|(_, t)| t))
+                    .chain(
+                        ty.methods
+                            .iter()
+                            .flat_map(|m| m.data.inputs.iter().chain([&m.data.output])),
+                    )
+                    .try_for_each(|t| check_cpp_objects_inner(t, true, true, Some(&heap_info)))
+                    .and_then(|()| {
+                        [&ty.ty]
+                            .into_iter()
+                            .chain(ty.fields.iter().map(|f| &f.ty))
+                            .chain(
+                                ty.variants
+                                    .iter()
+                                    .flat_map(|v| v.fields.iter().map(|f| &f.ty)),
+                            )
+                            .chain(ty.methods.iter().flat_map(|m| {
+                                m.data
+                                    .generics
+                                    .iter()
+                                    .chain(m.deref.as_ref().map(|(d, _)| d))
+                            }))
+                            .try_for_each(|t| {
+                                check_cpp_objects_inner(t, false, false, Some(&heap_info))
+                            })
+                    });
+                if let Err(err) = check_res {
+                    let report_span = ctx
+                        .fetch_spans_global(ty)
+                        .first()
+                        .copied()
+                        .cloned()
+                        .or_else(|| template_locations.last().cloned())
+                        .unwrap_or((0, 0usize..0));
+                    let mut report = Report::build(ReportKind::Error, report_span.clone())
+                        .with_message(&err)
+                        .with_label(
+                            Label::new(report_span)
+                                .with_message(&err)
+                                .with_color(Color::Red),
+                        );
+                    for location in &template_locations {
+                        report = report.with_label(
+                            Label::new(location.clone())
+                                .with_message("in template instantiated here")
+                                .with_color(Color::Blue),
+                        );
+                    }
+                    ctx.add_fatal_report(report.finish());
                 }
             }
 
@@ -4072,15 +4852,59 @@ fn rust_type<'a>() -> Boxed<'a, 'a, ParserInput<'a>, ParsedRustType<'a>, ZngPars
             .clone()
             .map(|x| ParsedRustType::Slice(Box::new(x)))
             .delimited_by(just(Token::BracketOpen), just(Token::BracketClose));
+        // References: `&'a T` / `&'a mut T` (to Rust values), and `&'a [unique] (const | var) T`
+        // (to C++ objects). `unique` and `var` are only keywords right after `&` / `&'a`.
+        let constness = choice((
+            just(Token::KwConst).to(CppConstness::Const),
+            just(Token::Ident("var")).to(CppConstness::Var),
+        ));
+        let unique = just(Token::Ident("unique"));
         let reference = just(Token::And)
             .ignore_then(select! { Token::Lifetime(l) => l }.or_not())
-            .then(
+            .then(choice((
+                unique
+                    .clone()
+                    .ignore_then(constness.clone())
+                    .then(parser.clone())
+                    .map(|(c, x)| {
+                        let kind = ParsedRefKind::Cpp {
+                            unique: true,
+                            constness: Some(c),
+                        };
+                        (kind, x)
+                    })
+                    .boxed(),
+                constness
+                    .then(parser.clone())
+                    .map(|(c, x)| {
+                        let kind = ParsedRefKind::Cpp {
+                            unique: false,
+                            constness: Some(c),
+                        };
+                        (kind, x)
+                    })
+                    .boxed(),
+                // An error (reported by `check_cpp_const`).
+                unique
+                    .ignore_then(parser.clone())
+                    .map(|x| {
+                        let kind = ParsedRefKind::Cpp {
+                            unique: true,
+                            constness: None,
+                        };
+                        (kind, x)
+                    })
+                    .boxed(),
                 just(Token::KwMut)
-                    .to(Mutability::Mut)
-                    .or(empty().to(Mutability::Not)),
-            )
-            .then(parser.clone())
-            .map(|((l, m), x)| ParsedRustType::Ref(m, l, Box::new(x)));
+                    .ignore_then(parser.clone())
+                    .map(|x| (ParsedRefKind::Rust(Mutability::Mut), x))
+                    .boxed(),
+                parser
+                    .clone()
+                    .map(|x| (ParsedRefKind::Rust(Mutability::Not), x))
+                    .boxed(),
+            )))
+            .map(|(l, (kind, x))| ParsedRustType::Ref(kind, l, Box::new(x)));
         let raw_ptr = just(Token::Star)
             .ignore_then(
                 just(Token::KwMut)
@@ -4089,7 +4913,7 @@ fn rust_type<'a>() -> Boxed<'a, 'a, ParserInput<'a>, ParsedRustType<'a>, ZngPars
             )
             .then(parser)
             .map(|(m, x)| ParsedRustType::Raw(m, Box::new(x)));
-        choice((
+        let non_cpp_ptr = choice((
             scalar.boxed(),
             boxed.boxed(),
             unit.boxed(),
@@ -4100,8 +4924,149 @@ fn rust_type<'a>() -> Boxed<'a, 'a, ParserInput<'a>, ParsedRustType<'a>, ZngPars
             raw_ptr.boxed(),
             dyn_trait.boxed(),
         ))
+        .boxed();
+        // `const T` or `T const`, which is only valid as the pointee of a C++ pointer or reference
+        // (checked by `check_cpp_const`).
+        let cpp_const = just(Token::KwConst)
+            .ignore_then(non_cpp_ptr.clone())
+            .map(|x| ParsedRustType::CppConst(Box::new(x)));
+        let non_cpp_ptr_maybe_east_const =
+            non_cpp_ptr
+                .then(just(Token::KwConst).or_not())
+                .map(|(x, post_const)| {
+                    if post_const.is_some() {
+                        ParsedRustType::CppConst(Box::new(x))
+                    } else {
+                        x
+                    }
+                });
+        // C++ pointers and references: `const T*`, `T const*`, `T*`, `const T&`, `T&`, `T**`,
+        // `T* const*`, ...
+        let cpp_indirection = choice((
+            just(Token::Star).to(CppIndirection::Pointer),
+            just(Token::And).to(CppIndirection::Reference),
+        ))
+        .then(just(Token::KwConst).or_not());
+        choice((cpp_const, non_cpp_ptr_maybe_east_const))
+            .foldl(cpp_indirection.repeated(), |x, (kind, post_const)| {
+                let ptr = ParsedRustType::CppPtr(kind, Box::new(x));
+                if post_const.is_some() {
+                    ParsedRustType::CppConst(Box::new(ptr))
+                } else {
+                    ptr
+                }
+            })
+            .boxed()
+    })
+    .try_map(|ty, span| match check_cpp_const(&ty, false) {
+        Ok(()) => Ok(ty),
+        Err(message) => Err(Rich::custom(span, message)),
     })
     .boxed()
+}
+
+/// Checks that `const T` only appears where it's valid: as the pointee of a C++ pointer or
+/// reference (`allowed`), with a `T` that is a C++ type, a builtin, or a C++ pointer. Also checks
+/// the spelling of references to C++ objects (`&'a unique T` needs `const` or `var`, and
+/// `&'a mut const T` is `&'a unique const T`). Whether `T` is a C++ object at all is checked once
+/// the paths are resolved (see `check_cpp_objects_inner`).
+fn check_cpp_const(ty: &ParsedRustType<'_>, allowed: bool) -> Result<(), String> {
+    let all = |tys: &[ParsedRustType<'_>]| tys.iter().try_for_each(|t| check_cpp_const(t, false));
+    match ty {
+        ParsedRustType::CppConst(inner) => {
+            if matches!(
+                **inner,
+                ParsedRustType::CppPtr(CppIndirection::Reference, _)
+            ) {
+                return Err("a C++ reference cannot be `const`-qualified (`T& const`)".to_owned());
+            }
+            if !allowed {
+                return Err(
+                    "`const T` can only be the type of a C++ pointer or reference \
+                     (`const T&`, `const T*`, `&'a const T`)"
+                        .to_owned(),
+                );
+            }
+            match &**inner {
+                ParsedRustType::Primitive(
+                    PrimitiveRustType::Int(8 | 16 | 32 | 64)
+                    | PrimitiveRustType::Uint(8 | 16 | 32 | 64)
+                    | PrimitiveRustType::Float(32 | 64)
+                    | PrimitiveRustType::Usize
+                    | PrimitiveRustType::Bool,
+                ) => Ok(()),
+                ParsedRustType::Primitive(
+                    PrimitiveRustType::Int(_)
+                    | PrimitiveRustType::Uint(_)
+                    | PrimitiveRustType::Float(_),
+                ) => Err(
+                    "only `bool`, 8/16/32/64-bit integers, `usize`, `f32`, and `f64` are C++ \
+                     builtin scalars"
+                        .to_owned(),
+                ),
+                ParsedRustType::Primitive(PrimitiveRustType::Str | PrimitiveRustType::Char) => {
+                    Err("only C++ types and builtins can be `const`".to_owned())
+                }
+                ParsedRustType::Adt(_) | ParsedRustType::CppPtr(CppIndirection::Pointer, _) => {
+                    check_cpp_const(inner, false)
+                }
+                _ => Err("only C++ types and builtins can be `const`".to_owned()),
+            }
+        }
+        ParsedRustType::CppPtr(_, inner) => check_cpp_const(inner, true),
+        ParsedRustType::Primitive(_) => Ok(()),
+        ParsedRustType::Ref(
+            ParsedRefKind::Cpp {
+                unique: true,
+                constness: None,
+            },
+            l,
+            _,
+        ) => {
+            let l = l.map(|l| format!("'{l} ")).unwrap_or_default();
+            Err(format!(
+                "a `unique` reference is a reference to a C++ object, which says whether it's \
+                 `const`: `&{l}unique var T` (a C++ `T&` that Rust uses uniquely, `&mut T` in \
+                 Rust) or `&{l}unique const T`; a reference to a Rust value is `&{l}mut T`"
+            ))
+        }
+        ParsedRustType::Ref(ParsedRefKind::Rust(Mutability::Mut), l, t)
+            if matches!(**t, ParsedRustType::CppConst(_)) =>
+        {
+            let l = l.map(|l| format!("'{l} ")).unwrap_or_default();
+            Err(format!(
+                "references to C++ objects say `unique` rather than `mut`: write \
+                 `&{l}unique const T` (or `&{l}const T` for a shared reference)"
+            ))
+        }
+        ParsedRustType::Ref(_, _, t)
+        | ParsedRustType::Raw(_, t)
+        | ParsedRustType::Boxed(t)
+        | ParsedRustType::Slice(t) => check_cpp_const(t, false),
+        ParsedRustType::Tuple(tys) => all(tys),
+        ParsedRustType::Dyn(tr, _) | ParsedRustType::Impl(tr, _) => match tr {
+            ParsedRustTrait::Normal(pg) => {
+                pg.generics
+                    .iter()
+                    .try_for_each(|t| check_cpp_const(t, false))?;
+                pg.named_generics
+                    .iter()
+                    .try_for_each(|(_, t)| check_cpp_const(t, false))
+            }
+            ParsedRustTrait::Fn { inputs, output, .. } => {
+                all(inputs)?;
+                check_cpp_const(output, false)
+            }
+        },
+        ParsedRustType::Adt(pg) => {
+            pg.generics
+                .iter()
+                .try_for_each(|t| check_cpp_const(t, false))?;
+            pg.named_generics
+                .iter()
+                .try_for_each(|(_, t)| check_cpp_const(t, false))
+        }
+    }
 }
 
 /// A generic argument of a Rust path: `'a`, `T` or `Name = T`.
@@ -4311,8 +5276,15 @@ fn method_signature<'a>()
         })
         .then(fn_generic_params())
         .then(fn_args(rust_type()))
-        .map(|(((opt_async, name), (lifetimes, generics)), args)| {
-            parsed_method_from_signature(name, opt_async.map(|x| x.span), lifetimes, generics, args)
+        .try_map(|(((opt_async, name), (lifetimes, generics)), args), span| {
+            parsed_method_from_signature(
+                name,
+                opt_async.map(|x| x.span),
+                lifetimes,
+                generics,
+                args,
+                span,
+            )
         })
         .boxed()
 }
@@ -4332,12 +5304,12 @@ fn function_signature<'a>()
         .then(function_path)
         .then(fn_generic_params())
         .then(fn_args(rust_type()))
-        .map(|(((opt_async, path), (lifetimes, generics)), args)| {
+        .try_map(|(((opt_async, path), (lifetimes, generics)), args), span| {
             let name = *path
                 .segments
                 .last()
                 .expect("function paths must contain a name");
-            ParsedFunction {
+            Ok(ParsedFunction {
                 path,
                 signature: parsed_method_from_signature(
                     name,
@@ -4345,8 +5317,9 @@ fn function_signature<'a>()
                     lifetimes,
                     generics,
                     args,
-                ),
-            }
+                    span,
+                )?,
+            })
         })
         .boxed()
 }
@@ -4357,7 +5330,8 @@ fn parsed_method_from_signature<'a>(
     lifetimes: Vec<&'a str>,
     generics: Vec<ParsedRustType<'a>>,
     args: (Vec<ParsedRustType<'a>>, ParsedRustType<'a>),
-) -> ParsedMethod<'a> {
+    span: Span,
+) -> Result<ParsedMethod<'a>, Rich<'a, Token<'a>, Span>> {
     let is_self = |ty: &ParsedRustType<'_>| {
         if let ParsedRustType::Adt(ty) = ty {
             ty.path.start == ParsedPathStart::Relative
@@ -4371,11 +5345,18 @@ fn parsed_method_from_signature<'a>(
     };
     let (inputs, receiver, receiver_lifetime) = match args.0.first() {
         Some(ty) if is_self(ty) => (args.0[1..].to_vec(), ZngurMethodReceiver::Move, None),
-        Some(ParsedRustType::Ref(mutability, l, ty)) if is_self(ty) => (
+        Some(ParsedRustType::Ref(ParsedRefKind::Rust(mutability), l, ty)) if is_self(ty) => (
             args.0[1..].to_vec(),
             ZngurMethodReceiver::Ref(*mutability),
             *l,
         ),
+        Some(ParsedRustType::Ref(ParsedRefKind::Cpp { .. }, _, ty)) if is_self(ty) => {
+            return Err(Rich::custom(
+                span,
+                "methods of Rust types and `extern \"C++\"` impls take `&self` or \
+                 `&mut self`, not `&const self` / `&var self`",
+            ));
+        }
         _ => (args.0, ZngurMethodReceiver::Static, None),
     };
     let mut output = args.1;
@@ -4394,7 +5375,7 @@ fn parsed_method_from_signature<'a>(
             vec![],
         )
     }
-    ParsedMethod {
+    Ok(ParsedMethod {
         name,
         lifetimes,
         is_safe: None,
@@ -4403,7 +5384,7 @@ fn parsed_method_from_signature<'a>(
         generics,
         inputs,
         output,
-    }
+    })
 }
 
 fn inner_type_item<'a>()

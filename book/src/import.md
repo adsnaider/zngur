@@ -195,7 +195,7 @@ Modules that import it can then refer to the type by its `c++::` path, the same 
 import "./bar.zng";
 
 mod crate {
-    fn use_bar(&c++::ns::Bar);
+    fn use_bar(&const c++::ns::Bar);
 }
 ```
 

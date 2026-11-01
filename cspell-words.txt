@@ -11,6 +11,8 @@ cloneable
 codegen
 Conds
 constexpr
+constness
+constnesses
 coro
 cout
 cplusplus
@@ -38,6 +40,7 @@ funcs
 fvec
 GNUC
 hkalbasi
+hypot
 ilog
 impls
 indexmap
@@ -61,6 +64,7 @@ ntdll
 nullopt
 nullptr
 pmut
+pointee
 primitve
 println
 ptrdiff

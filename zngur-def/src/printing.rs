@@ -141,6 +141,28 @@ impl<T: WriteIDL> WriteIDL for Option<T> {
     }
 }
 
+impl crate::RustType {
+    /// Writes `self` in `.zng` syntax, using East-`const` (`T const*`) for a leading pointee
+    /// `const` so `&'a T` does not collide with `&'a const ...` (a C++ object reference).
+    fn write_east_const_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
+        match self {
+            Self::CppPtr(kind, ty) => {
+                ty.write_east_const_idl(p)?;
+                match kind {
+                    crate::CppIndirection::Pointer => write!(p, "*"),
+                    crate::CppIndirection::Reference => write!(p, "&"),
+                }
+            }
+            Self::CppConst(ty) => {
+                ty.write_east_const_idl(p)?;
+                write!(p, " const")
+            }
+            Self::CppVar(ty) => ty.write_east_const_idl(p),
+            _ => p.write_idl(self),
+        }
+    }
+}
+
 impl WriteIDL for crate::RustType {
     fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
         match self {
@@ -150,10 +172,24 @@ impl WriteIDL for crate::RustType {
                 if let Some(lifetime) = lifetime {
                     write!(p, "{lifetime} ")?;
                 }
-                if *m == crate::Mutability::Mut {
-                    write!(p, "mut ")?;
+                match ty.as_cpp_object() {
+                    // A reference to a C++ object: `&'a [unique] (const | var) T`.
+                    Some((constness, inner)) => {
+                        if *m == crate::Mutability::Mut {
+                            write!(p, "unique ")?;
+                        }
+                        write!(p, "{} ", constness.keyword())?;
+                        inner.write_east_const_idl(p)
+                    }
+                    None => {
+                        if *m == crate::Mutability::Mut {
+                            write!(p, "mut ")?;
+                            p.write_idl(ty)
+                        } else {
+                            ty.write_east_const_idl(p)
+                        }
+                    }
                 }
-                p.write_idl(ty)
             }
             Self::Raw(m, ty) => {
                 match m {
@@ -200,6 +236,23 @@ impl WriteIDL for crate::RustType {
             Self::Adt(pg) => p.write_idl(pg),
             Self::TypeVar(var) => p.write_idl(var),
             Self::Cpp(segs) => write!(p, "c++::{}", segs.join("::")),
+            Self::CppPtr(kind, ty) => {
+                p.write_idl(ty)?;
+                match kind {
+                    crate::CppIndirection::Pointer => write!(p, "*"),
+                    crate::CppIndirection::Reference => write!(p, "&"),
+                }
+            }
+            Self::CppConst(ty) if matches!(**ty, Self::CppPtr(..)) => {
+                p.write_idl(ty)?;
+                write!(p, " const")
+            }
+            Self::CppConst(ty) => {
+                write!(p, "const ")?;
+                p.write_idl(ty)
+            }
+            // `T&` / `T*` is a pointer to a non-`const` C++ object.
+            Self::CppVar(ty) => p.write_idl(ty),
         }
     }
 }

@@ -125,6 +125,18 @@ impl ZngurGenerator {
             }));
         let mut cpp_tree = CppModuleTree::default();
         cpp_file.coro_support = coro_support;
+        let cpp_heap_allocated_types: std::collections::HashSet<RustType> = zng
+            .types
+            .iter()
+            .filter(|ty_def| ty_def.cpp_heap_allocated.is_some())
+            .map(|ty_def| ty_def.ty.with_anonymous_lifetimes())
+            .chain(
+                zng.imported_modules
+                    .iter()
+                    .flat_map(|m| &m.cpp_heap_allocated_types)
+                    .map(|segs| RustType::Cpp(segs.clone())),
+            )
+            .collect();
         for mut ty_def in zng.types {
             let raw_lifetimes = ty_def.lifetimes.clone();
             let raw_ty = ty_def.ty.clone();
@@ -221,18 +233,21 @@ impl ZngurGenerator {
                 };
                 let struct_def = format!(
                     r#"
+    /// `{type_name}<::zngur_lib::Const>` is a `const` object (see `zngur_lib::Constness`).
     #[repr(C)]
     #[repr(align({align}))]
-    pub struct {type_name} {{
+    #[allow(non_camel_case_types)]
+    pub struct {type_name}<C: ::zngur_lib::Constness = ::zngur_lib::NonConst> {{
       pub(crate) buffer: ::core::cell::UnsafeCell<::core::mem::MaybeUninit<[u8; {buf_size}]>>,
       _no_auto_traits: ::core::marker::PhantomData<*mut ()>,
       _pinned: ::core::marker::PhantomPinned,
+      _constness: ::core::marker::PhantomData<C>,
     }}
 
-    unsafe impl ::zngur_lib::ZngCppObject for {type_name} {{}}
-    unsafe impl ::zngur_lib::ZngCppStackObject for {type_name} {{}}
+    unsafe impl<C: ::zngur_lib::Constness> ::zngur_lib::ZngCppObject for {type_name}<C> {{}}
+    unsafe impl<C: ::zngur_lib::Constness> ::zngur_lib::ZngCppStackObject for {type_name}<C> {{}}
 
-    unsafe impl ::zngur_lib::ZngCppDestruct for {type_name} {{
+    unsafe impl<C: ::zngur_lib::Constness> ::zngur_lib::ZngCppDestruct for {type_name}<C> {{
         unsafe fn destruct(&mut self) {{
             unsafe extern "C" {{
                 fn {mangled_name}(i0: *mut u8);
@@ -243,12 +258,33 @@ impl ZngurGenerator {
         }}
     }}
 
-    impl Drop for {type_name} {{
+    impl<C: ::zngur_lib::Constness> Drop for {type_name}<C> {{
         fn drop(&mut self) {{
             use ::zngur_lib::ZngCppDestruct;
             unsafe {{
                 self.destruct();
             }}
+        }}
+    }}
+
+    impl {type_name} {{
+        /// This object, as a `const` object.
+        #[allow(dead_code)]
+        pub fn as_const(&self) -> &{type_name}<::zngur_lib::Const> {{
+            unsafe {{ &*(self as *const Self as *const {type_name}<::zngur_lib::Const>) }}
+        }}
+
+        /// This object, as a `const` object that nothing else can access meanwhile.
+        #[allow(dead_code)]
+        pub fn as_const_mut(&mut self) -> &mut {type_name}<::zngur_lib::Const> {{
+            unsafe {{ &mut *(self as *mut Self as *mut {type_name}<::zngur_lib::Const>) }}
+        }}
+
+        /// Makes this object `const`.
+        #[allow(dead_code)]
+        pub fn into_const(self) -> {type_name}<::zngur_lib::Const> {{
+            let this = ::core::mem::ManuallyDrop::new(self);
+            unsafe {{ ::core::ptr::read(&*this as *const Self as *const {type_name}<::zngur_lib::Const>) }}
         }}
     }}
 "#
@@ -296,7 +332,30 @@ impl ZngurGenerator {
             if cpp_ref.is_some() {
                 let struct_def = format!(
                     r#"
-    pub struct {type_name}(());
+    /// `{type_name}<::zngur_lib::Const>` is a `const` object (see `zngur_lib::Constness`).
+    #[allow(non_camel_case_types)]
+    pub struct {type_name}<C: ::zngur_lib::Constness = ::zngur_lib::NonConst>(
+        ::core::marker::PhantomData<C>,
+        ::core::cell::UnsafeCell<()>,
+        ::core::marker::PhantomData<*mut ()>,
+        ::core::marker::PhantomPinned,
+    );
+
+    unsafe impl<C: ::zngur_lib::Constness> ::zngur_lib::ZngCppObject for {type_name}<C> {{}}
+
+    impl {type_name} {{
+        /// This object, as a `const` object.
+        #[allow(dead_code)]
+        pub fn as_const(&self) -> &{type_name}<::zngur_lib::Const> {{
+            unsafe {{ &*(self as *const Self as *const {type_name}<::zngur_lib::Const>) }}
+        }}
+
+        /// This object, as a `const` object that nothing else can access meanwhile.
+        #[allow(dead_code)]
+        pub fn as_const_mut(&mut self) -> &mut {type_name}<::zngur_lib::Const> {{
+            unsafe {{ &mut *(self as *mut Self as *mut {type_name}<::zngur_lib::Const>) }}
+        }}
+    }}
 "#
                 );
                 if is_cpp {
@@ -592,7 +651,15 @@ impl ZngurGenerator {
                     .iter()
                     .zip(&rust_link_names)
                     .map(|(method, link_name)| {
-                        let inputs = real_inputs_of_method(method, &impl_block.ty);
+                        let receiver_ty = if matches!(impl_block.ty, RustType::Cpp(_))
+                            && !cpp_heap_allocated_types
+                                .contains(&impl_block.ty.with_anonymous_lifetimes())
+                        {
+                            RustType::CppVar(Box::new(impl_block.ty.clone()))
+                        } else {
+                            impl_block.ty.clone()
+                        };
+                        let inputs = real_inputs_of_method(method, &receiver_ty);
                         let inputs = inputs
                             .iter()
                             .map(|ty| ty.into_cpp(default_ns, &sanitized_crate_name))
@@ -1184,7 +1251,13 @@ pub type Box2d = super::Box2d;
         let (rust_code, _h, _cpp) =
             ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
         // Old-style: top-level struct + deprecated shim.
-        assert!(rust_code.contains("pub struct Handle(());"));
+        assert!(
+            rust_code
+                .contains("pub struct Handle<C: ::zngur_lib::Constness = ::zngur_lib::NonConst>(")
+        );
+        assert!(rust_code.contains("::core::cell::UnsafeCell<()>"));
+        assert!(rust_code.contains("::core::marker::PhantomData<*mut ()>"));
+        assert!(rust_code.contains("::core::marker::PhantomPinned"));
         let expected_shim = r#"
 pub mod cpp {
 
@@ -1425,8 +1498,13 @@ pub type Handle = super::Handle;
         let (rust_code, h, _cpp) =
             ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
         assert!(rust_code.contains("pub mod geo {"));
-        assert!(rust_code.contains("pub struct Point {"));
-        assert!(rust_code.contains("unsafe impl ::zngur_lib::ZngCppStackObject for Point {}"));
+        assert!(
+            rust_code
+                .contains("pub struct Point<C: ::zngur_lib::Constness = ::zngur_lib::NonConst> {")
+        );
+        assert!(rust_code.contains(
+            "unsafe impl<C: ::zngur_lib::Constness> ::zngur_lib::ZngCppStackObject for Point<C> {}"
+        ));
         assert!(h.contains(
             "static_assert(::rust::is_trivially_relocatable< ::geo::Point >::value, \"Type must \
              be trivially relocatable\");"
@@ -1444,7 +1522,9 @@ pub type Handle = super::Handle;
         };
         let (rust_code, h, _cpp) =
             ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
-        assert!(rust_code.contains("unsafe impl ::zngur_lib::ZngCppStackObject for Point {}"));
+        assert!(rust_code.contains(
+            "unsafe impl<C: ::zngur_lib::Constness> ::zngur_lib::ZngCppStackObject for Point<C> {}"
+        ));
         // The layout is still checked, but not that the type is trivially relocatable.
         assert!(h.contains("static_assert(sizeof(::geo::Point) == 16, \"Size mismatch\");"));
         assert!(
@@ -1472,8 +1552,14 @@ pub type Handle = super::Handle;
         let (rust_code, h, _cpp) =
             ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
         // Zero-sized in Rust...
-        assert!(rust_code.contains("pub struct Point(());"));
-        assert!(rust_code.contains("pub struct Box2d(());"));
+        assert!(
+            rust_code
+                .contains("pub struct Point<C: ::zngur_lib::Constness = ::zngur_lib::NonConst>(")
+        );
+        assert!(
+            rust_code
+                .contains("pub struct Box2d<C: ::zngur_lib::Constness = ::zngur_lib::NonConst>(")
+        );
         assert!(!rust_code.contains("ZngCppStackObject"));
         // ...but exact (`==`) and conservative (`<=`) layouts are still checked in C++.
         assert!(h.contains("static_assert(sizeof(::geo::Point) == 16, \"Size mismatch\");"));
@@ -1491,6 +1577,7 @@ pub type Handle = super::Handle;
                 vec!["ns".to_owned(), "Bar".to_owned()],
                 vec!["Top".to_owned()],
             ],
+            cpp_heap_allocated_types: vec![],
         };
         let spec = ZngurSpec {
             // Duplicate `ModuleImport` entries (e.g. from two `merge`d files importing the same
@@ -1531,10 +1618,85 @@ pub type Handle = super::Handle;
         };
         let (rust_code, h, _cpp) =
             ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
-        assert!(rust_code.contains("pub struct Point(());"));
+        assert!(
+            rust_code
+                .contains("pub struct Point<C: ::zngur_lib::Constness = ::zngur_lib::NonConst>(")
+        );
         assert!(!rust_code.contains("ZngCppStackObject"));
         assert!(!h.contains("sizeof(::geo::Point)"));
         assert!(h.contains("inline ::geo::Point& cpp()"));
+    }
+
+    #[test]
+    fn references_to_cpp_objects_are_cpp_references() {
+        let b = cpp(&["a", "B"]);
+        let a = Some(Lifetime("a".to_owned()));
+        let r = |m, constness, l: &Option<Lifetime>| {
+            RustType::Ref(
+                m,
+                l.clone(),
+                Box::new(RustType::cpp_object(constness, b.clone())),
+            )
+        };
+        let spec = ZngurSpec {
+            types: vec![minimal_opaque_cpp_type(b.clone())],
+            // Functions that Rust calls and C++ implements.
+            extern_cpp_funcs: vec![ZngurExternCppFn {
+                name: "g".to_owned(),
+                lifetimes: vec![Lifetime("a".to_owned())],
+                inputs: vec![
+                    r(Mutability::Not, CppConstness::Var, &a),
+                    r(Mutability::Not, CppConstness::Const, &a),
+                ],
+                output: r(Mutability::Not, CppConstness::Const, &a),
+                is_safe: true,
+            }],
+            // Rust functions that C++ calls.
+            funcs: vec![ZngurFn {
+                path: RustPathAndGenerics {
+                    path: vec!["crate".to_owned(), "h".to_owned()],
+                    ..Default::default()
+                },
+                lifetimes: vec![],
+                inputs: vec![r(Mutability::Mut, CppConstness::Var, &None)],
+                output: r(Mutability::Not, CppConstness::Const, &None),
+                is_safe: None,
+            }],
+            ..Default::default()
+        };
+        let (rust_code, h, cpp_code) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let cpp_code = cpp_code.expect("extern C++ functions need a C++ file");
+        let b = "::rust::cpp::a::B";
+        let const_b = format!("::rust::CppConst< {b} >");
+
+        // `extern "C++"` functions: the C++ definition takes and returns C++ references.
+        assert!(
+            rust_code.contains(
+                "pub fn g<'a>(i0: &'a a::B, i1: &'a a::B::<::zngur_lib::Const>, ) -> &'a a::B::<::zngur_lib::Const>"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            h.contains(&format!(
+                "::rust::CppRef< {const_b} > g(\n    ::rust::CppRef< {b} >, ::rust::CppRef< {const_b} >"
+            )),
+            "{h}"
+        );
+        assert!(cpp_code.contains(&format!(
+            "::rust::__zngur_internal_move_to_rust< ::rust::CppRef< {const_b} > >(o, oo);"
+        )));
+
+        // Rust functions called from C++: C++ passes and gets back C++ references, and references
+        // cross as pointers.
+        assert!(
+            h.contains(&format!(
+                "inline ::rust::CppRef< {const_b} > h(::rust::CppRef< {b} > i0) noexcept {{"
+            )),
+            "{h}"
+        );
+        assert!(h.contains(&format!("::rust::CppPtr< {b} > __zngur_i0 = &i0;")));
+        assert!(h.contains("return *o;"));
     }
 
     #[test]
@@ -1849,5 +2011,278 @@ pub type Handle = super::Handle;
         // Borrowed `Future<Output = &'a str>` skips C++20 coroutine shim generation.
         assert!(!rust_code.contains("struct CoroState"), "{rust_code}");
         assert!(!h.contains("ZNGUR_CORO_SHIMS_"), "{h}");
+    }
+
+    #[test]
+    fn cpp_indirection_reference_emits_cpp_ref_in_cpp_and_raw_ptr_in_rust() {
+        let b = cpp(&["a", "B"]);
+        let const_b_ref = RustType::cpp_ptr(Mutability::Not, CppIndirection::Reference, b.clone());
+        let i32_ref = RustType::cpp_ptr(
+            Mutability::Mut,
+            CppIndirection::Reference,
+            RustType::Primitive(PrimitiveRustType::Int(32)),
+        );
+        let spec = ZngurSpec {
+            types: vec![minimal_opaque_cpp_type(b)],
+            extern_cpp_funcs: vec![ZngurExternCppFn {
+                name: "take_and_return_cpp_refs".to_owned(),
+                lifetimes: vec![],
+                inputs: vec![const_b_ref.clone(), i32_ref.clone()],
+                output: const_b_ref.clone(),
+                is_safe: false,
+            }],
+            funcs: vec![ZngurFn {
+                path: RustPathAndGenerics {
+                    path: vec!["crate".to_owned(), "rust_takes_cpp_refs".to_owned()],
+                    ..Default::default()
+                },
+                lifetimes: vec![],
+                inputs: vec![const_b_ref, i32_ref.clone()],
+                output: i32_ref,
+                is_safe: None,
+            }],
+            ..Default::default()
+        };
+        let (rust_code, h, cpp_code) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let cpp_code = cpp_code.expect("extern C++ functions need a C++ file");
+        let const_b = "::rust::CppConst< ::rust::cpp::a::B >";
+
+        assert!(
+            rust_code.contains(
+                "pub unsafe fn take_and_return_cpp_refs(i0: *const a::B::<::zngur_lib::Const>, i1: *mut ::zngur_lib::Cpp<i32>, ) -> *const a::B::<::zngur_lib::Const>"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            h.contains(&format!(
+                "::rust::CppRef< {const_b} > take_and_return_cpp_refs(\n    ::rust::CppRef< {const_b} >, ::rust::CppRef< ::int32_t >"
+            )),
+            "{h}"
+        );
+        assert!(
+            cpp_code.contains(&format!(
+                "::rust::__zngur_internal_move_to_rust< ::rust::CppRef< {const_b} > >(o, oo);"
+            )),
+            "{cpp_code}"
+        );
+        assert!(
+            h.contains(&format!(
+                "inline ::rust::CppRef< ::int32_t > rust_takes_cpp_refs(::rust::CppRef< {const_b} > i0, ::rust::CppRef< ::int32_t > i1) noexcept {{"
+            )),
+            "{h}"
+        );
+    }
+
+    #[test]
+    fn imported_cpp_heap_allocated_type_uses_rust_value_ref() {
+        let heap_foo = cpp(&["ns", "HeapFoo"]);
+        let spec = ZngurSpec {
+            imported_modules: vec![ModuleImport {
+                path: "./bar.zng".into(),
+                crate_name: Some("bar_bindings".to_owned()),
+                cpp_types: vec![vec!["ns".to_owned(), "HeapFoo".to_owned()]],
+                cpp_heap_allocated_types: vec![vec!["ns".to_owned(), "HeapFoo".to_owned()]],
+            }],
+            extern_cpp_impls: vec![ZngurExternCppImpl {
+                lifetimes: vec![],
+                tr: None,
+                ty: heap_foo,
+                methods: vec![ZngurMethod {
+                    name: "inspect".to_owned(),
+                    lifetimes: vec![],
+                    generics: vec![],
+                    receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+                    receiver_lifetime: None,
+                    inputs: vec![],
+                    output: RustType::UNIT,
+                    is_safe: Some(true),
+                }],
+            }],
+            ..Default::default()
+        };
+        let (rust_code, h, _cpp) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        assert!(
+            rust_code.contains("impl ns::HeapFoo {pub fn inspect(&self, ) -> ()"),
+            "{rust_code}"
+        );
+        assert!(
+            h.contains("static ::rust::Unit inspect(\n        ::rust::Ref< ::rust::cpp::ns::HeapFoo >\n    );"),
+            "{h}"
+        );
+        assert!(!h.contains("CppRef< ::rust::cpp::ns::HeapFoo >"), "{h}");
+    }
+
+    #[test]
+    fn rust_value_references_to_cpp_pointers_emit_ref_to_ptr() {
+        let b = cpp(&["a", "B"]);
+        let lt_a = Some(Lifetime("a".to_owned()));
+        let ref_i32_ptr = RustType::Ref(
+            Mutability::Not,
+            lt_a.clone(),
+            Box::new(RustType::cpp_ptr(
+                Mutability::Mut,
+                CppIndirection::Pointer,
+                RustType::Primitive(PrimitiveRustType::Int(32)),
+            )),
+        );
+        let ref_mut_b_ptr = RustType::Ref(
+            Mutability::Mut,
+            lt_a,
+            Box::new(RustType::cpp_ptr(
+                Mutability::Mut,
+                CppIndirection::Pointer,
+                b.clone(),
+            )),
+        );
+        let spec = ZngurSpec {
+            types: vec![minimal_opaque_cpp_type(b)],
+            extern_cpp_funcs: vec![ZngurExternCppFn {
+                name: "copy_ptr".to_owned(),
+                lifetimes: vec![Lifetime("a".to_owned())],
+                inputs: vec![ref_i32_ptr.clone(), ref_mut_b_ptr],
+                output: ref_i32_ptr,
+                is_safe: false,
+            }],
+            ..Default::default()
+        };
+        let (_rust_code, h, _cpp) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(true);
+        assert!(h.contains("struct Ref< T* >"), "{h}");
+        assert!(h.contains("struct RefMut< T* >"), "{h}");
+        assert!(
+            h.contains(
+                "::rust::Ref< ::rust::CppPtr< ::int32_t > > copy_ptr(\n    ::rust::Ref< ::rust::CppPtr< ::int32_t > >, ::rust::RefMut< ::rust::CppPtr< ::rust::cpp::a::B > >"
+            ),
+            "{h}"
+        );
+    }
+
+    #[test]
+    fn nested_cpp_namespace_supports_cpp_refs_without_struct_cpp_ref_forward_decl() {
+        let b = cpp(&["a", "B"]);
+        let lt_a = Some(Lifetime("a".to_owned()));
+        let const_b_ref = RustType::Ref(
+            Mutability::Not,
+            lt_a,
+            Box::new(RustType::CppConst(Box::new(b.clone()))),
+        );
+        let spec = ZngurSpec {
+            cpp_namespace: Some("foo::bar".to_owned()),
+            mangling_base: "foo::bar".to_owned(),
+            types: vec![minimal_opaque_cpp_type(b)],
+            funcs: vec![ZngurFn {
+                path: RustPathAndGenerics {
+                    path: vec!["crate".to_owned(), "roundtrip_ref".to_owned()],
+                    ..Default::default()
+                },
+                lifetimes: vec![Lifetime("a".to_owned())],
+                inputs: vec![const_b_ref.clone()],
+                output: const_b_ref.clone(),
+                is_safe: None,
+            }],
+            extern_cpp_funcs: vec![ZngurExternCppFn {
+                name: "cpp_takes_ref".to_owned(),
+                lifetimes: vec![Lifetime("a".to_owned())],
+                inputs: vec![const_b_ref.clone()],
+                output: const_b_ref,
+                is_safe: true,
+            }],
+            extern_cpp_impls: vec![ZngurExternCppImpl {
+                lifetimes: vec![],
+                tr: None,
+                ty: RustType::Boxed(Box::new(RustType::cpp_ptr(
+                    Mutability::Not,
+                    CppIndirection::Pointer,
+                    cpp(&["a", "B"]),
+                ))),
+                methods: vec![],
+            }],
+            ..Default::default()
+        };
+        let (_rust_code, h, cpp_code) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let cpp_code = cpp_code.expect("extern C++ functions need a C++ file");
+
+        assert!(!h.contains("struct CppRef;"), "{h}");
+        assert!(!h.contains("struct CppConst;"), "{h}");
+        assert!(!h.contains("struct CppPtr;"), "{h}");
+        assert!(
+            h.contains("::foo::bar::CppPtr< ::foo::bar::CppConst< ::foo::bar::cpp::a::B > > o{};"),
+            "{h}"
+        );
+        assert!(h.contains("return *o;"), "{h}");
+        assert!(
+            cpp_code.contains("::foo::bar::exported_functions::cpp_takes_ref"),
+            "{cpp_code}"
+        );
+    }
+
+    #[test]
+    fn user_type_named_cpp_ref_is_not_treated_as_zngur_cpp_ref_alias() {
+        let rust_cpp_ref_ty = adt(&["crate", "CppRef"]);
+        let cpp_cpp_ref_ty = cpp(&["CppRef"]);
+        let mut rust_cpp_ref = minimal_opaque_cpp_type(rust_cpp_ref_ty.clone());
+        rust_cpp_ref.layout = Some(LayoutPolicy::StackAllocated { size: 8, align: 4 });
+        rust_cpp_ref.constructor = Some(ZngurConstructor {
+            inputs: vec![("0".to_owned(), cpp_cpp_ref_ty.clone())],
+        });
+        rust_cpp_ref.methods = vec![ZngurMethodDetails {
+            data: ZngurMethod {
+                name: "take".to_owned(),
+                lifetimes: vec![],
+                generics: vec![],
+                receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+                receiver_lifetime: None,
+                inputs: vec![rust_cpp_ref_ty.clone()],
+                output: rust_cpp_ref_ty.clone(),
+                is_safe: None,
+            },
+            use_path: None,
+            deref: None,
+            cpp_name: None,
+        }];
+        let cpp_cpp_ref = minimal_by_value_cpp_type(cpp_cpp_ref_ty.clone(), 8, 4);
+        let spec = ZngurSpec {
+            types: vec![rust_cpp_ref, cpp_cpp_ref],
+            funcs: vec![ZngurFn {
+                path: RustPathAndGenerics {
+                    path: vec!["crate".to_owned(), "roundtrip_cpp_ref".to_owned()],
+                    ..Default::default()
+                },
+                lifetimes: vec![],
+                inputs: vec![rust_cpp_ref_ty, cpp_cpp_ref_ty.clone()],
+                output: cpp_cpp_ref_ty,
+                is_safe: None,
+            }],
+            ..Default::default()
+        };
+        let (_rust_code, h, _cpp_code) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+
+        assert!(!h.contains("CppPtr"), "{h}");
+        assert!(
+            h.contains("::rust::cpp::CppRef o{};"),
+            "expected by-value storage for c++::CppRef, got:\n{h}"
+        );
+        assert!(
+            h.contains("::rust::test_crate::CppRef o{};"),
+            "expected by-value storage for crate::CppRef, got:\n{h}"
+        );
+        assert!(
+            h.contains("::rust::__zngur_internal_assume_deinit(i0);"),
+            "{h}"
+        );
+        assert!(
+            h.contains("::rust::__zngur_internal_assume_deinit(i1);"),
+            "{h}"
+        );
+        assert!(
+            h.contains("::rust::__zngur_internal_assume_init(o);"),
+            "{h}"
+        );
+        assert!(h.contains("::std::move(i0)"), "{h}");
+        assert!(!h.contains("return *o;"), "{h}");
     }
 }

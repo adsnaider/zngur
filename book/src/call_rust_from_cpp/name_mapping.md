@@ -13,6 +13,7 @@ so Zngur uses a name mapping that is explained in this table:
 | `c++::some_ns::SomeCppType`              | `rust::cpp::some_ns::SomeCppType`              |
 | `&T`                                     | `rust::Ref<T>`                                 |
 | `&mut T`                                 | `rust::RefMut<T>`                              |
+| `&'a const c++::T` / `&'a var c++::T`    | `const T&` / `T&` (`rust::CppRef<..>`)         |
 | `*const T`                               | `rust::Raw<T>` or `const T*` (depends on `T`)  |
 | `*mut T`                                 | `rust::RawMut<T>` or `T*` (depends on `T`)     |
 | `[T]`                                    | `rust::Slice<T>`                               |
@@ -22,6 +23,10 @@ so Zngur uses a name mapping that is explained in this table:
 | `(A, B, C)`                              | `rust::Tuple<A, B, C>`                         |
 
 ## Why `rust::Ref<T>` instead of C++ references?
+
+(References to C++ objects, such as `&'a const c++::T`, are C++ references: see
+[C++ references and pointers](../call_cpp_from_rust/cpp_pointers.md#in-c). This is about references
+to Rust values.)
 
 Because they are very different:
 

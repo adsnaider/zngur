@@ -74,3 +74,31 @@ rust::Impl<WayNodeList, rust::std::ops::Index<size_t, Node>>::index(
   // Your code here
 }
 ```
+
+## `impl` blocks for C++ types
+
+`extern "C++"` blocks can also have `impl` blocks for `c++::` types, and functions:
+
+```Rust
+extern "C++" {
+    impl c++::geo::Point {
+        safe fn print(&self);
+    }
+    safe fn larger_x<'a>(&'a const c++::geo::Point, &'a const c++::geo::Point) -> &'a const c++::geo::Point;
+}
+```
+
+There, references to C++ objects, and the receivers, are C++ references (see
+[C++ references and pointers](./cpp_pointers.md#in-c)):
+
+```C++
+rust::Unit rust::Impl<rust::cpp::geo::Point>::print(::geo::Point& self) {
+  std::cout << self.x << ", " << self.y << std::endl;
+  return {};
+}
+
+const ::geo::Point& rust::exported_functions::larger_x(const ::geo::Point& a,
+                                                        const ::geo::Point& b) {
+  return a.x >= b.x ? a : b;
+}
+```

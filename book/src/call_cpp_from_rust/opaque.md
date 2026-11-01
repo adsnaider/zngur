@@ -5,11 +5,11 @@ is the C++ type `::osmium::Way`. Multiple declarations sharing a prefix can also
 `mod c++::osmium { type Way { ... } }`. What Rust can do with such a type follows from what the
 `.zng` file says about it:
 
-| Declaration                                                                    | Rust can                                        |
-| ------------------------------------------------------------------------------ | ----------------------------------------------- |
-| no layout                                                                      | only refer to it (`&T`, `&mut T`)               |
-| a layout, without `#trivially_relocatable` or `#unsafe(trivially_relocatable)` | only refer to it (the layout is checked in C++) |
-| a layout and `#trivially_relocatable` (or `#unsafe(trivially_relocatable)`)    | hold it by value, like a Rust value             |
+| Declaration                                                                    | Rust can                                                 |
+| ------------------------------------------------------------------------------ | -------------------------------------------------------- |
+| no layout                                                                      | only refer to it (`&const T`, `&var T`, `&unique var T`) |
+| a layout, without `#trivially_relocatable` or `#unsafe(trivially_relocatable)` | only refer to it (the layout is checked in C++)          |
+| a layout and `#trivially_relocatable` (or `#unsafe(trivially_relocatable)`)    | hold it by value, like a Rust value                      |
 
 > **NOTE**: In C++, the Rust wrapper of a `c++::a::B` type is `rust::cpp::a::B`, apart from the
 > wrappers of Rust types (`rust::crate::...`, `rust::std::...`, ...). In Rust, its wrapper is at
@@ -35,11 +35,12 @@ type c++::osmium::Way {
 }
 ```
 
-This enables creating `rust::Ref<rust::cpp::osmium::Way>` from a `const osmium::Way&` in C++ and
-passing it to the Rust side. Rust side can't do anything meaningful with it, except passing it again
-to the C++ side. In the C++ side `rust::Ref<rust::cpp::osmium::Way>` has a `.cpp()` method which
-will return the `osmium::Way&` back to you. You can also write `impl` and `impl trait` blocks for
-the Rust wrapper `Way` inside C++. See the
+This enables passing references to `osmium::Way` across the boundary as C++ object references
+(`&'a const c++::osmium::Way`, `&'a var c++::osmium::Way`, `&'a unique var c++::osmium::Way`; see
+[C++ objects vs Rust values](./cpp_objects.md)), which C++ sees directly as `const ::osmium::Way&`
+or `::osmium::Way&` and Rust sees as `&'a Way<Const>`, `&'a Way`, or `&'a mut Way`. Rust can't do
+anything meaningful with it on its own except passing it back to C++ or calling `extern "C++"`
+`impl` and `impl Trait for` blocks written for `c++::osmium::Way` in C++. See
 [`examples/osmium`](https://github.com/HKalbasi/zngur/blob/main/examples/osmium) for a full working
 example.
 
@@ -145,11 +146,13 @@ Just like with C++ opaque objects, we can define functions on an `extern "C++"` 
 ```zng
 extern "C++" {
     safe fn create_cpp_type(i32, i32) -> c++::MyCppWrapper;
-    safe fn print_cpp_type(&c++::MyCppWrapper);
+    safe fn print_cpp_type(&const c++::MyCppWrapper);
 }
 ```
 
-The C++ code has access to the `.cpp()` method used to access the inner type.
+In C++, references to C++ objects (`&const c++::MyCppWrapper`) cross directly as C++ references
+(`const ::MyCppWrapper&`), while by-value `rust::cpp::MyCppWrapper` provides `.cpp()` to access the
+inner C++ object.
 
 ```rust
 // main.rs
@@ -159,7 +162,7 @@ fn main() {
     println!("Hello from Rust");
     let c = generated::create_cpp_type(10, 20);
     println!("Rust got CppType");
-    generated::print_cpp_type(&c);
+    generated::print_cpp_type(c.as_const());
     println!("Rust dropping CppType");
 }
 ```

@@ -21,12 +21,65 @@ type c++::OpaqueRef {
     #layout_conservative(size = 16, align = 8);
 }
 
+type Box<dyn for<'a> Fn(&'a const c++::MyCppWrapper, &'a unique var bool) -> &'a const c++::MyCppWrapper> {
+    #layout(size = 16, align = 8);
+}
+
+type<'a> crate::RustBorrow<'a> {
+    #layout(size = 16, align = 8);
+    constructor(&'a const c++::MyCppWrapper, &'a unique var i32);
+    fn record_sum(&mut self) -> i32;
+}
+
+type crate::RustCounter {
+    #layout(size = 4, align = 4);
+    constructor(i32);
+    fn add_cpp(&self, &const c++::MyCppWrapper) -> i32;
+    fn add_cpp_mut(&mut self, &const c++::MyCppWrapper, &unique var i32);
+}
+
+type crate::RustHolder {
+    #layout(size = 4, align = 4);
+    constructor { counter: crate::RustCounter };
+    field counter (offset = 0, type = crate::RustCounter);
+    fn borrow_counter<'a>(&'a self) -> &'a crate::RustCounter;
+    fn borrow_counter_mut<'a>(&'a mut self) -> &'a mut crate::RustCounter;
+}
+
+trait crate::CppSelector {
+    fn select<'a>(
+        &self,
+        &'a const c++::MyCppWrapper,
+        &'a const c++::MyCppWrapper,
+    ) -> &'a const c++::MyCppWrapper;
+}
+
+type Box<dyn crate::CppSelector> {
+    #layout(size = 16, align = 8);
+}
+
 mod crate {
-    fn read_opaque(&c++::OpaqueRef) -> i32;
+    fn invoke_cpp_selector<'a>(
+        Box<dyn crate::CppSelector>,
+        &'a const c++::MyCppWrapper,
+        &'a const c++::MyCppWrapper,
+    ) -> &'a const c++::MyCppWrapper;
+    fn read_opaque(&const c++::OpaqueRef) -> i32;
+    fn inspect_mut_opaque(&unique var c++::OpaqueRef) -> i32;
+    fn flip_and_pick<'a>(
+        &'a const c++::MyCppWrapper,
+        &'a const c++::MyCppWrapper,
+        &'a unique var bool,
+    ) -> &'a const c++::MyCppWrapper;
+    fn invoke_cpp_callback(
+        Box<dyn for<'a> Fn(&'a const c++::MyCppWrapper, &'a unique var bool) -> &'a const c++::MyCppWrapper>,
+    ) -> i32;
 }
 
 extern "C++" {
     safe fn run_with_opaque_ref() -> i32;
+    safe fn run_rust_cpp_refs() -> i32;
+    safe fn run_callback() -> i32;
 
     impl c++::MyCppWrapper {
         safe fn new(i32, i32) -> c++::MyCppWrapper;
@@ -46,4 +99,21 @@ extern "C++" {
     impl c++::OpaqueRef {
         safe fn read(&self) -> i32;
     }
+
+    // References to C++ objects are Rust references in Rust and C++ references in C++ (`const
+    // CppType&`, `int32_t&`), so functions taking and returning them can be safe.
+    safe fn sum_into<'a>(&'a const c++::MyCppWrapper, &'a unique var i32);
+    safe fn larger_x<'a>(&'a const c++::MyCppWrapper, &'a const c++::MyCppWrapper) -> &'a const c++::MyCppWrapper;
+    // C++-style pointers and references are raw pointers in Rust (`*mut T` for `T*`), which may be
+    // null or invalid, and plain pointers in C++.
+    unsafe fn swap_xy(c++::MyCppWrapper*);
+    unsafe fn invert_bool(bool*);
+    // Lifetime-less C++ references (`const T&`, `T&`) are raw pointers in Rust and C++ references
+    // in C++.
+    unsafe fn pick_larger_cpp_ref(const c++::MyCppWrapper&, i32&) -> const c++::MyCppWrapper&;
+    // Rust-value references to C++ pointers (`&'a T*`, `&'a mut T*`).
+    unsafe fn copy_i32_ptr<'a>(&'a i32*, &'a mut i32*) -> &'a i32*;
+    safe fn run_rust_struct_and_trait() -> i32;
+    unsafe fn reset_wrapper_ptr(c++::MyCppWrapper**, c++::MyCppWrapper*);
+    unsafe fn read_through_ptr_to_const_ptr(i32* const*, const i32**);
 }

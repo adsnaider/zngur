@@ -45,21 +45,29 @@ impl CppPath {
         self.0.last().expect("C++ paths aren't empty")
     }
 
-    fn need_header(&self) -> bool {
+    fn need_header(&self, namespace: &str) -> bool {
         if self.0.len() == 1 && (self.0[0].ends_with("_t") || self.0[0].contains('*')) {
             return false;
         }
-        // Top level namespace and type...
-        if self.0.len() == 2 {
-            let ty = &self.0[1];
-            return ty != "Unit" && ty != "Ref" && ty != "RefMut";
+        // Top-level configured C++ namespace and built-in helper type...
+        let ns_segs = namespace.trim().split("::");
+        if let Some((ty, prefix)) = self.0.split_last()
+            && prefix.iter().map(String::as_str).eq(ns_segs)
+        {
+            // `Bool`, `CppConst`, `CppPtr` and `CppRef` are declared in zngur.h.
+            return ![
+                "Unit", "Tuple", "Ref", "RefMut", "Raw", "RawMut", "Bool", "CppConst", "CppPtr",
+                "CppRef",
+            ]
+            .contains(&ty.as_str());
         }
         true
     }
 
     pub(crate) fn from_rust_path(path: &[String], ns: &str, crate_name: &str) -> CppPath {
         CppPath(
-            iter::once(ns)
+            ns.trim()
+                .split("::")
                 .chain(
                     path.iter()
                         .map(|x| if x == "crate" { crate_name } else { x.as_str() }),
@@ -98,6 +106,28 @@ pub struct CppType {
 }
 
 impl CppType {
+    /// For a C++ reference (`CppRef<W>`, a `T&` or `const T&`), the pointer that it crosses to
+    /// Rust as (`CppPtr<W>`).
+    pub(crate) fn native_ref_as_ptr(&self, namespace: &str) -> Option<CppType> {
+        let ns_segs = namespace.trim().trim_start_matches("::").split("::");
+        match self.path.0.split_last() {
+            Some((name, ns))
+                if name == "CppRef"
+                    && ns.iter().map(String::as_str).eq(ns_segs)
+                    && self.generic_args.len() == 1
+                    && self.tail.is_none() =>
+            {
+                let mut path = ns.to_vec();
+                path.push("CppPtr".to_owned());
+                Some(CppType {
+                    path: CppPath(path),
+                    ..self.clone()
+                })
+            }
+            _ => None,
+        }
+    }
+
     pub fn with_tail(self, tail: String) -> Self {
         Self {
             tail: Some(tail),
@@ -142,13 +172,13 @@ impl CppType {
         Helper(self).to_string()
     }
 
-    fn header_helper(&self, state: &mut impl Write) -> std::fmt::Result {
+    fn header_helper(&self, namespace: &str, state: &mut impl Write) -> std::fmt::Result {
         // Note: probably need to keep this out of the template because it's recursive.
         for x in &self.generic_args {
-            x.header_helper(state)?;
+            x.header_helper(namespace, state)?;
         }
 
-        if !self.path.need_header() {
+        if !self.path.need_header(namespace) {
             return Ok(());
         }
 
@@ -169,10 +199,10 @@ impl CppType {
         Ok(())
     }
 
-    pub(crate) fn header(&self) -> String {
+    pub(crate) fn header(&self, namespace: &str) -> String {
         let mut state = String::new();
 
-        self.header_helper(&mut state).unwrap();
+        self.header_helper(namespace, &mut state).unwrap();
 
         state
     }
@@ -587,6 +617,17 @@ pub struct CppTypeDefinition {
 }
 
 impl CppTypeDefinition {
+    /// The C++ type that this type's Rust wrapper holds or refers to directly, so that a
+    /// Rust reference or raw pointer to the wrapper is a C++ pointer to it. Heap-allocated types
+    /// don't have one: their wrapper only holds a pointer to the C++ object.
+    pub fn cpp_object_type(&self) -> Option<&str> {
+        match (&self.cpp_stack_owned, &self.cpp_ref) {
+            (Some(stack_owned), _) => Some(&stack_owned.cpp_type),
+            (None, Some(cpp_ref)) => Some(&cpp_ref.name),
+            (None, None) => None,
+        }
+    }
+
     pub fn has_unsized(&self) -> bool {
         self.wellknown_traits
             .iter()
