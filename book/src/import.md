@@ -200,7 +200,8 @@ mod crate {
 ```
 
 zngur reads the imported `.zng` file (if it's at the relative path) to find its `#crate` and the
-`c++::` types it declares. Their Rust wrappers are assumed to be at
+`c++::` types it declares (including which ones Rust holds by value, so C++ member functions can
+take and return them by value across modules). Their Rust wrappers are assumed to be at
 `::<crate>::generated::<c++ path>` (`::bar_bindings::generated::ns::Bar` above). So the crate must
 include its generated code as a public `generated` module at its root:
 

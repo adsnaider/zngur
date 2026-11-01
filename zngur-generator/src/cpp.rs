@@ -760,6 +760,7 @@ pub struct CppFile {
     pub fn_defs: Vec<CppFnDefinition>,
     pub exported_fn_defs: Vec<CppExportedFnDefinition>,
     pub exported_impls: Vec<CppExportedImplDefinition>,
+    pub cpp_method_bridges: Vec<String>,
     pub additional_includes: String,
     pub panic_to_exception: bool,
     pub rust_cfg_defines: Vec<String>,
@@ -804,6 +805,7 @@ impl CppFile {
             trait_defs: &self.trait_defs,
             exported_fn_defs: &self.exported_fn_defs,
             exported_impls: &self.exported_impls,
+            cpp_method_bridges: &self.cpp_method_bridges,
             cpp_namespace: namespace,
             coro_support: &self.coro_support,
         };
@@ -812,6 +814,7 @@ impl CppFile {
         *is_really_needed = !self.trait_defs.is_empty()
             || !self.exported_fn_defs.is_empty()
             || !self.exported_impls.is_empty()
+            || !self.cpp_method_bridges.is_empty()
             || self.coro_support.is_some()
             // Rust calls the destructors of C++ types that it holds by value, which are defined here.
             || self

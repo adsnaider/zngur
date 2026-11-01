@@ -635,6 +635,14 @@ impl WriteIDL for crate::ZngurType {
                 }
             }
 
+            if !self.cpp_methods.is_empty() && p.enabled(&IDLItem::TypeMethod) {
+                writeln!(p)?;
+                for method in &self.cpp_methods {
+                    p.write_indent()?;
+                    p.write_idl(method)?;
+                }
+            }
+
             if !self.methods.is_empty() {
                 writeln!(p)?;
                 for method in &self.methods {
@@ -924,6 +932,66 @@ impl WriteIDL for crate::ZngurMethod {
     }
 }
 
+impl WriteIDL for crate::ZngurCppMethod {
+    fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
+        if p.enabled(&IDLItem::TypeMethod) {
+            let safety = if self.is_safe { "safe" } else { "unsafe" };
+            // Static member functions are the ones without a receiver.
+            let name = &self.cpp_name;
+            write!(p, "{safety} fn {name}")?;
+            write_lifetimes_and_generics(p, &self.lifetimes, &[])?;
+            write!(p, "(")?;
+            let receiver = match (self.receiver, self.raw_receiver) {
+                (crate::ZngurMethodReceiver::Ref(_), Some(indirection)) => {
+                    let constness = match self.receiver_constness {
+                        crate::CppConstness::Const => "const ",
+                        crate::CppConstness::Var => "",
+                    };
+                    let sigil = match indirection {
+                        crate::CppIndirection::Pointer => "*",
+                        crate::CppIndirection::Reference => "&",
+                    };
+                    Some(format!("{constness}self{sigil}"))
+                }
+                (crate::ZngurMethodReceiver::Ref(m), None) => {
+                    let lifetime = self
+                        .receiver_lifetime
+                        .as_ref()
+                        .map(|l| format!("{l} "))
+                        .unwrap_or_default();
+                    let unique = if m == crate::Mutability::Mut {
+                        "unique "
+                    } else {
+                        ""
+                    };
+                    let constness = self.receiver_constness.keyword();
+                    Some(format!("&{lifetime}{unique}{constness} self"))
+                }
+                _ => None,
+            };
+            if let Some(receiver) = &receiver {
+                write!(p, "{receiver}")?;
+            }
+            for (i, input) in self.inputs.iter().enumerate() {
+                if i > 0 || receiver.is_some() {
+                    write!(p, ", ")?;
+                }
+                p.write_idl(input)?;
+            }
+            write!(p, ")")?;
+            if self.output != crate::RustType::UNIT {
+                write!(p, " -> ")?;
+                p.write_idl(&self.output)?;
+            }
+            if let Some(rust_name) = &self.rust_name {
+                write!(p, " as {rust_name}")?;
+            }
+            writeln!(p, ";")?;
+        }
+        Ok(())
+    }
+}
+
 #[test]
 fn print_spec() {
     let spec = crate::ZngurSpec {
@@ -965,6 +1033,7 @@ fn print_spec() {
                 deref: None,
                 cpp_name: Some("fooBar".into()),
             }],
+            cpp_methods: vec![],
             cpp_heap_allocated: None,
             cpp_ref: None,
             cpp_stack_owned: None,
@@ -1147,6 +1216,7 @@ fn test_write_cpp_type_idl() {
                 variants: vec![],
                 fields: vec![],
                 methods: vec![],
+                cpp_methods: vec![],
                 cpp_heap_allocated: None,
                 cpp_ref: Some(crate::CppRef("::osmium::Way".into())),
                 cpp_stack_owned: None,
@@ -1176,6 +1246,7 @@ fn test_write_cpp_type_idl() {
                     deref: None,
                     cpp_name: None,
                 }],
+                cpp_methods: vec![],
                 cpp_heap_allocated: Some(crate::CppHeapAllocated("::x::Name".into())),
                 cpp_ref: None,
                 cpp_stack_owned: None,
@@ -1220,6 +1291,7 @@ fn print_template_type_vars_in_dyn_and_fn_traits() {
         variants: vec![],
         fields: vec![],
         methods: vec![],
+        cpp_methods: vec![],
         cpp_heap_allocated: None,
         cpp_ref: None,
         cpp_stack_owned: None,

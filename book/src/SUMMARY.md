@@ -20,6 +20,7 @@
   - [`Box<dyn Fn>`]()
   - [Opaque C++ types](./call_cpp_from_rust/opaque.md)
   - [C++ objects vs Rust values](./call_cpp_from_rust/cpp_objects.md)
+  - [C++ member functions](./call_cpp_from_rust/cpp_methods.md)
   - [C++ references and pointers](./call_cpp_from_rust/cpp_pointers.md)
   - [Trait objects](./call_cpp_from_rust/trait_object.md)
 - [Import](./import.md)

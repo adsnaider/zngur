@@ -51,6 +51,7 @@ pub enum ConflictSource {
     CppHeapAllocated,
     CppStackOwned,
     Method(ZngurMethod),
+    CppMethod(Box<crate::ZngurCppMethod>),
     Field(String),
 }
 
@@ -180,6 +181,9 @@ impl Merge for ZngurType {
         merge_by_identity(self.methods, &mut into.methods, |a, b| {
             a.data.name == b.data.name
         })?;
+        merge_by_identity(self.cpp_methods, &mut into.cpp_methods, |a, b| {
+            a.rust_name() == b.rust_name()
+        })?;
         self.constructor.merge(&mut into.constructor)?;
         into.exhaustive = self.exhaustive && into.exhaustive;
         merge_by_identity(self.variants, &mut into.variants, |a, b| a.name == b.name)?;
@@ -203,6 +207,21 @@ impl Merge for ZngurTrait {
 
         merge_by_identity(self.methods, &mut into.methods, |a, b| a.name == b.name)?;
 
+        Ok(())
+    }
+}
+
+impl Merge for crate::ZngurCppMethod {
+    fn merge(self, into: &mut Self) -> MergeResult {
+        if canonicalize_cpp_method(&self) != canonicalize_cpp_method(into) {
+            return Err(MergeFailure::Conflict(
+                "C++ method mismatch".to_string(),
+                (
+                    ConflictSource::CppMethod(Box::new(self)),
+                    ConflictSource::CppMethod(Box::new(into.clone())),
+                ),
+            ));
+        }
         Ok(())
     }
 }
@@ -353,6 +372,17 @@ fn align_type_lifetimes(src: &mut ZngurType, dst_lifetimes: &[Lifetime], dst_ty:
         for m in &src.methods {
             collect_method_lifetimes(&m.data, m.deref.as_ref(), &mut avoid);
         }
+        for m in &src.cpp_methods {
+            avoid.extend(m.lifetimes.iter().cloned());
+            if let Some(rl) = &m.receiver_lifetime
+                && !rl.is_builtin()
+            {
+                avoid.insert(rl.clone());
+            }
+            for t in m.inputs.iter().chain([&m.output]) {
+                avoid.extend(t.all_lifetimes());
+            }
+        }
         for f in &src.fields {
             avoid.extend(f.ty.all_lifetimes());
         }
@@ -375,6 +405,23 @@ fn align_type_lifetimes(src: &mut ZngurType, dst_lifetimes: &[Lifetime], dst_ty:
                 dst_lifetimes,
                 &mut avoid,
             );
+        }
+        for m in &mut src.cpp_methods {
+            let mut tmp = ZngurMethod {
+                name: m.rust_name().to_owned(),
+                lifetimes: m.lifetimes.clone(),
+                generics: vec![],
+                receiver: m.receiver,
+                receiver_lifetime: m.receiver_lifetime.clone(),
+                inputs: m.inputs.clone(),
+                output: m.output.clone(),
+                is_safe: Some(m.is_safe),
+            };
+            align_method_lifetimes(&mut tmp, None, &src.lifetimes, dst_lifetimes, &mut avoid);
+            m.lifetimes = tmp.lifetimes;
+            m.receiver_lifetime = tmp.receiver_lifetime;
+            m.inputs = tmp.inputs;
+            m.output = tmp.output;
         }
 
         let mapping: Vec<(Lifetime, Lifetime)> = src
@@ -451,6 +498,32 @@ fn canonicalize_method_details(m: &ZngurMethodDetails) -> ZngurMethodDetails {
             .as_ref()
             .map(|(t, mu)| (t.canonicalize_lifetimes(outer), *mu)),
         cpp_name: m.cpp_name.clone(),
+    }
+}
+
+fn canonicalize_cpp_method(m: &crate::ZngurCppMethod) -> crate::ZngurCppMethod {
+    let outer = &m.lifetimes;
+    let canon_ty = |t: &RustType| t.canonicalize_lifetimes(outer);
+    let canon_lt = |l: &Lifetime| {
+        outer
+            .iter()
+            .position(|ol| ol == l)
+            .map(|i| Lifetime(format!("__outer_{i}")))
+            .unwrap_or_else(|| l.clone())
+    };
+    crate::ZngurCppMethod {
+        cpp_name: m.cpp_name.clone(),
+        lifetimes: (0..outer.len())
+            .map(|i| Lifetime(format!("__outer_{i}")))
+            .collect(),
+        rust_name: m.rust_name.clone(),
+        receiver: m.receiver,
+        receiver_constness: m.receiver_constness,
+        receiver_lifetime: m.receiver_lifetime.as_ref().map(canon_lt),
+        raw_receiver: m.raw_receiver,
+        inputs: m.inputs.iter().map(canon_ty).collect(),
+        output: canon_ty(&m.output),
+        is_safe: m.is_safe,
     }
 }
 

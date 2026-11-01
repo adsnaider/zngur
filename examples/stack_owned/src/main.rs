@@ -21,6 +21,17 @@ impl<T: ?Sized + Sync> CheckNotSync<IsSync> for T {}
 const _: fn() = <OpaqueRef as CheckNotSend<_>>::check;
 const _: fn() = <OpaqueRef as CheckNotSync<_>>::check;
 
+#[derive(Clone, Copy)]
+pub struct RustTag {
+    pub bonus: i32,
+}
+
+impl RustTag {
+    pub fn bonus(&self) -> i32 {
+        self.bonus
+    }
+}
+
 pub fn read_opaque(r: &OpaqueRef<Const>) -> i32 {
     let _ = r;
     7
@@ -146,9 +157,43 @@ fn main() {
     let neg = MyCppWrapper::new(-1, 2);
     assert!(generated::non_negative_x(Some(&neg)).is_none());
     assert!(generated::non_negative_x(None::<&MyCppWrapper>).is_none());
+
+    // C++ member functions, which are methods: `&self` for `const` member functions and
+    // `&mut self` for the others. A C++ `const T&` is a `&T<Const>`, and a `const int32_t&` a
+    // `&Cpp<i32, Const>`, whose value `get()` reads. Like in C++, an argument that is a `const`
+    // object takes a non-`const` one too: `c.add(&d)`.
+    println!("sum() = {}", c.sum());
+    c.scale(10);
+    c.add(&d);
+    c.print();
+    let x = c.x_ref().get();
+    println!("x_ref() = {x}");
+    assert_eq!(unsafe { MyCppWrapper::raw_sum(&raw const c) }, 113);
+    {
+        let (r1, r2) = (&c, &c);
+        r1.bump_x(5);
+        assert_eq!(r2.x_ref().get(), 66);
+        r1.bump_x(-5);
+    }
+    c.x_ref_mut().set(62);
+    assert_eq!(c.x_ref().get(), 62);
+    c.x_ref_mut().set(61);
+    assert!(c.is_positive(true));
+    assert!(!neg.is_positive(true));
+    assert!(c.is_positive(false));
+    assert_eq!(c.with_rust_tag(&RustTag { bonus: 100 }), 213);
+    c.swapped().print();
+    MyCppWrapper::diagonal(7).print();
+
+    // `const` is part of the type: `MyCppWrapper<Const>` is a `const` object, which only has the
+    // `const` member functions. Going from a `T` to a `T<Const>` is explicit, apart from passing
+    // it to C++ as a `const` object.
     let mut point = MyCppWrapper::new(2, 3);
-    let _exclusive: &mut MyCppWrapper<Const> = point.as_const_mut();
-    let _frozen: MyCppWrapper<Const> = point.into_const();
+    let exclusive: &mut MyCppWrapper<Const> = point.as_const_mut();
+    println!("const sum() = {}", exclusive.sum());
+    assert_eq!(unsafe { MyCppWrapper::raw_sum(exclusive) }, 5);
+    let frozen: MyCppWrapper<Const> = MyCppWrapper::new(4, 5).into_const();
+    println!("frozen sum() = {}", frozen.sum());
 
     let mut flag = false;
     unsafe { generated::invert_bool(Cpp::from_mut(&mut flag)) };
@@ -158,7 +203,7 @@ fn main() {
     let echoed_ptr =
         unsafe { generated::pick_larger_cpp_ref(c.as_const(), Cpp::from_mut(&mut ref_sum)) };
     assert!(std::ptr::eq(echoed_ptr, c.as_const()));
-    assert_eq!(ref_sum, 11);
+    assert_eq!(ref_sum, 113);
 
     let mut target_val = 99;
     let src_ptr: *mut Cpp<i32> = Cpp::from_mut(&mut target_val);
@@ -191,6 +236,11 @@ fn main() {
     let cons = MyConservativeWrapper::new(10, 20);
     vec.push(cons);
     vec[0].print();
+
+    // Moving a stack-owned value into a C++ member function: C++ destroys it, not Rust.
+    let other = MyConservativeWrapper::new(1, 2);
+    let total = vec[0].total_with(other);
+    println!("total_with() = {total}");
 
     let boxed = BoxedInt::new(42);
     assert_eq!(boxed.get(), 42);

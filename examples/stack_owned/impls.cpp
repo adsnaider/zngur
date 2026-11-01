@@ -5,6 +5,10 @@
 
 #include "generated.h"
 
+int CppType::with_rust_tag(rust::Ref<rust::crate::RustTag> tag) const {
+  return x + y + tag.bonus();
+}
+
 namespace rust {
 
 using cpp::BoxedInt;

@@ -96,6 +96,14 @@ fn check_success(zng: &str) {
     });
 }
 
+fn check_warnings(zng: &str, expected: Expect) {
+    let mut warnings = String::new();
+    let _ = parse_str(zng, NullCfg, |msg| {
+        warnings.push_str(msg);
+    });
+    expected.assert_eq(&warnings);
+}
+
 pub struct ErrorText(pub String);
 
 fn check_fail(zng: &str, error: Expect) {
@@ -1434,8 +1442,8 @@ type crate::Foo {
     check_fail(
         r#"
 mod c++::a {
-    type Foo {
-        #cpp_ref "::Foo";
+    type crate::Foo {
+        #layout(size = 1, align = 1);
         fn bar(&self) use std::ops::Deref;
     }
 }
@@ -2597,6 +2605,13 @@ mod crate {
             vec!["ns".to_owned(), "Bar".to_owned()],
             vec!["ns".to_owned(), "BarExtra".to_owned()],
         ]
+    );
+    assert_eq!(
+        module.cpp_by_value_types,
+        vec![(
+            RustType::Cpp(vec!["ns".to_owned(), "Bar".to_owned()]),
+            "::ns::Bar".to_owned(),
+        )]
     );
     // The imported module's types aren't part of this module's spec.
     assert!(parsed.spec.types.is_empty());
@@ -4676,4 +4691,1157 @@ type<'a> crate::Wrap<::std::option::Option<&'a const c++::B>> {}
             "expected `{expected}` for `{src}`, got:\n{err}"
         );
     }
+}
+
+#[test]
+fn cpp_methods_parse() {
+    use zngur_def::{CppIndirection, Mutability, PrimitiveRustType, ZngurMethodReceiver};
+
+    let parsed = parse_str(
+        r#"
+mod c++::a {
+    type B {
+        #layout(size = 8, align = 4);
+        #trivially_relocatable;
+
+        unsafe fn value(&const self) -> i32;
+        unsafe fn set(&unique var self, i32, const B&);
+        safe fn make(i32) -> B;
+        unsafe fn get(&const self, i32) -> const i32& as get_const;
+    }
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let ty = parsed.spec.types.first().expect("no type parsed");
+    let b = RustType::Cpp(vec!["a".to_owned(), "B".to_owned()]);
+    let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+    let methods = &ty.cpp_methods;
+    assert_eq!(methods.len(), 4);
+
+    assert_eq!(methods[0].cpp_name, "value");
+    assert_eq!(methods[0].rust_name(), "value");
+    assert_eq!(
+        methods[0].receiver,
+        ZngurMethodReceiver::Ref(Mutability::Not)
+    );
+    assert!(methods[0].inputs.is_empty());
+    assert_eq!(methods[0].output, i32);
+    assert!(!methods[0].is_safe);
+
+    assert_eq!(
+        methods[1].receiver,
+        ZngurMethodReceiver::Ref(Mutability::Mut)
+    );
+    assert_eq!(
+        methods[1].inputs,
+        vec![
+            i32.clone(),
+            RustType::cpp_ptr(Mutability::Not, CppIndirection::Reference, b.clone()),
+        ]
+    );
+    assert_eq!(methods[1].output, RustType::UNIT);
+
+    assert_eq!(methods[2].receiver, ZngurMethodReceiver::Static);
+    assert_eq!(methods[2].output, b);
+    assert!(methods[2].is_safe);
+
+    assert_eq!(methods[3].cpp_name, "get");
+    assert_eq!(methods[3].rust_name(), "get_const");
+    assert_eq!(
+        methods[3].output,
+        RustType::cpp_ptr(Mutability::Not, CppIndirection::Reference, i32)
+    );
+}
+
+#[test]
+fn safe_cpp_methods_taking_references_are_accepted() {
+    let parsed = parse_str(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe fn value<'a>(&'a const self) -> i32;
+    safe fn set<'a>(&'a unique var self, &'a const c++::B);
+}
+"#,
+        NullCfg,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    let ty = parsed.spec.types.first().expect("no type parsed");
+    assert!(ty.cpp_methods.iter().all(|m| m.is_safe));
+}
+
+#[test]
+fn safe_cpp_method_with_cpp_ptr_warns() {
+    check_warnings(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe fn set(&unique var self, const c++::B*);
+}
+"#,
+        expect![[r#"
+            Warning: this C++ member function has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `fn f<'a>(&'a const self) -> &'a const T`), or silence this with `#allow(elided_lifetimes)`
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     safe fn set(&unique var self, const c++::B*);
+               │     ──────────────────────┬──────────────────────  
+               │                           ╰──────────────────────── this C++ member function has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `fn f<'a>(&'a const self) -> &'a const T`), or silence this with `#allow(elided_lifetimes)`
+            ───╯
+            Warning: this C++ member function is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     safe fn set(&unique var self, const c++::B*);
+               │     ──────────────────────┬──────────────────────  
+               │                           ╰──────────────────────── this C++ member function is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn safe_static_cpp_method_with_cpp_ptr_warns() {
+    check_warnings(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe fn sum(const c++::B*) -> i32;
+}
+"#,
+        expect![[r#"
+            Warning: this C++ member function is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     safe fn sum(const c++::B*) -> i32;
+               │     ─────────────────┬────────────────  
+               │                      ╰────────────────── this C++ member function is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn nullable_cpp_ref_in_safe_cpp_method_does_not_warn() {
+    check_success(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe fn first<'a>(&'a const self, ::std::option::Option<&'a const c++::B>) -> i32;
+}
+"#,
+    );
+}
+
+#[test]
+fn static_cpp_method_with_trailing_const_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe fn make() const -> c++::B;
+}
+"#,
+        expect![[r#"
+            Error: C++ member functions take an explicit receiver instead of a trailing `const`: `&'a const self` for `const` member functions, and `&'a unique var self` (or `&'a var self`) for the others
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     safe fn make() const -> c++::B;
+               │     ───────────────┬───────────────  
+               │                    ╰───────────────── C++ member functions take an explicit receiver instead of a trailing `const`: `&'a const self` for `const` member functions, and `&'a unique var self` (or `&'a var self`) for the others
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_method_on_rust_type_is_rejected() {
+    check_fail(
+        r#"
+type crate::Foo {
+    #layout(size = 8, align = 4);
+    unsafe fn value<'a>(&'a const self) -> i32;
+}
+"#,
+        expect![[r#"
+            Error: methods of Rust types and `extern "C++"` impls take `&self` or `&mut self`, not `&const self` / `&var self`
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     unsafe fn value<'a>(&'a const self) -> i32;
+               │     ─────────────────────┬────────────────────  
+               │                          ╰────────────────────── methods of Rust types and `extern "C++"` impls take `&self` or `&mut self`, not `&const self` / `&var self`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn safe_and_unsafe_rust_methods_on_rust_type_parse_as_rust_methods() {
+    let parsed = parse_str(
+        r#"
+type crate::Foo {
+    #layout(size = 8, align = 4);
+    fn plain(&self) -> i32;
+    safe fn checked(&self) -> i32;
+    unsafe fn raw_op(&mut self, *const i32) -> i32;
+    safe fn make(i32) -> crate::Foo;
+    unsafe fn make_unchecked(i32) -> crate::Foo;
+}
+"#,
+        NullCfg,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    let ty = parsed.spec.types.first().expect("no type parsed");
+    assert!(ty.cpp_methods.is_empty());
+    assert_eq!(ty.methods.len(), 5);
+    assert_eq!(ty.methods[0].data.is_safe, None);
+    assert_eq!(ty.methods[1].data.is_safe, Some(true));
+    assert_eq!(ty.methods[2].data.is_safe, Some(false));
+    assert_eq!(ty.methods[3].data.is_safe, Some(true));
+    assert_eq!(ty.methods[4].data.is_safe, Some(false));
+}
+
+#[test]
+fn bare_fn_and_rust_method_features_on_cpp_type_are_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    fn value<'a>(&'a const self) -> i32;
+    fn make() -> i32;
+    safe async fn fut<'a>(&'a const self);
+    safe fn tr<'a>(&'a const self) use crate::MyTrait;
+    safe fn dr<'a>(&'a const self) deref i32;
+    safe fn gen<T>(T);
+}
+"#,
+        expect![[r#"
+            Error: C++ member functions must be marked `safe` or `unsafe`
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     fn value<'a>(&'a const self) -> i32;
+               │     ──────────────────┬─────────────────  
+               │                       ╰─────────────────── C++ member functions must be marked `safe` or `unsafe`
+            ───╯
+            Error: C++ member functions must be marked `safe` or `unsafe`
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     fn make() -> i32;
+               │     ────────┬────────  
+               │             ╰────────── C++ member functions must be marked `safe` or `unsafe`
+            ───╯
+            Error: C++ member functions cannot be `async`
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     safe async fn fut<'a>(&'a const self);
+               │     ───────────────────┬──────────────────  
+               │                        ╰──────────────────── C++ member functions cannot be `async`
+            ───╯
+            Error: C++ member functions do not support `use` or `deref` (those are for Rust methods; implement Rust traits on `c++::` types via `extern "C++" { impl Trait for c++::T { ... } }`)
+               ╭─[ test.zng:6:5 ]
+               │
+             6 │     safe fn tr<'a>(&'a const self) use crate::MyTrait;
+               │     ─────────────────────────┬────────────────────────  
+               │                              ╰────────────────────────── C++ member functions do not support `use` or `deref` (those are for Rust methods; implement Rust traits on `c++::` types via `extern "C++" { impl Trait for c++::T { ... } }`)
+            ───╯
+            Error: C++ member functions do not support `use` or `deref` (those are for Rust methods; implement Rust traits on `c++::` types via `extern "C++" { impl Trait for c++::T { ... } }`)
+               ╭─[ test.zng:7:5 ]
+               │
+             7 │     safe fn dr<'a>(&'a const self) deref i32;
+               │     ────────────────────┬────────────────────  
+               │                         ╰────────────────────── C++ member functions do not support `use` or `deref` (those are for Rust methods; implement Rust traits on `c++::` types via `extern "C++" { impl Trait for c++::T { ... } }`)
+            ───╯
+            Error: C++ member functions do not support generic type arguments
+               ╭─[ test.zng:8:5 ]
+               │
+             8 │     safe fn gen<T>(T);
+               │     ─────────┬────────  
+               │              ╰────────── C++ member functions do not support generic type arguments
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_method_on_cpp_heap_allocated_type_is_rejected() {
+    check_fail(
+        r#"
+type c++::Foo {
+    #layout(size = 16, align = 8);
+    #cpp_heap_allocated "::Foo";
+    unsafe fn value<'a>(&'a const self) -> i32;
+}
+"#,
+        expect![[r#"
+            Error: C++ member functions (`safe fn` / `unsafe fn`) cannot be declared on `#cpp_heap_allocated` types
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     unsafe fn value<'a>(&'a const self) -> i32;
+               │     ─────────────────────┬─────────────────────  
+               │                          ╰─────────────────────── C++ member functions (`safe fn` / `unsafe fn`) cannot be declared on `#cpp_heap_allocated` types
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn invalid_self_in_cpp_method_is_rejected() {
+    for src in [
+        "type c++::B { safe fn consume(self); }\n",
+        "type c++::B { unsafe fn f(*const self); }\n",
+        "type c++::B { unsafe fn f(*mut self); }\n",
+        "type c++::B { safe fn f<'a>(::std::option::Option<&'a const self>); }\n",
+        "type c++::B { safe fn f<'a>(i32, &'a const self); }\n",
+        "type c++::B { safe fn f<'a>(&'a const self) -> &'a const self; }\n",
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains("invalid C++ member function receiver"),
+            "expected invalid receiver error for `{src}`, got:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn duplicate_cpp_method_name_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    safe fn get<'a>(&'a const self) -> i32;
+    safe fn get<'a>(&'a unique var self) -> i32;
+}
+"#,
+        expect![[r#"
+            Error: `get` is already the Rust name of another member function of this type
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     safe fn get<'a>(&'a unique var self) -> i32;
+               │     ──────────────────────┬─────────────────────  
+               │                           ╰─────────────────────── `get` is already the Rust name of another member function of this type
+            ───╯
+        "#]],
+    );
+    check_fail(
+        r#"
+type c++::B {
+    safe fn get<'a>(&'a const self) -> i32;
+    safe fn other<'a>(&'a const self) -> i32 as get;
+}
+"#,
+        expect![[r#"
+            Error: `get` is already the Rust name of another member function of this type
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     safe fn other<'a>(&'a const self) -> i32 as get;
+               │     ────────────────────────┬───────────────────────  
+               │                             ╰───────────────────────── `get` is already the Rust name of another member function of this type
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_method_keyword_and_reserved_names() {
+    let parsed = parse_str(
+        r#"
+type c++::B {
+    safe fn type<'a>(&'a const self) -> i32 as kind;
+    safe fn move<'a>(&'a unique var self) as take;
+}
+"#,
+        NullCfg,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    let methods = &parsed.spec.types[0].cpp_methods;
+    assert_eq!(methods[0].cpp_name, "type");
+    assert_eq!(methods[0].rust_name(), "kind");
+    assert_eq!(methods[1].cpp_name, "move");
+    assert_eq!(methods[1].rust_name(), "take");
+
+    for (src, expected) in [
+        (
+            "type c++::B { safe fn type<'a>(&'a const self) -> i32; }\n",
+            "`type` is a Rust keyword; give this C++ function a non-keyword Rust name with `as <rust_name>`",
+        ),
+        (
+            "type c++::B { safe fn move<'a>(&'a const self) -> i32; }\n",
+            "`move` is a Rust keyword; give this C++ function a non-keyword Rust name with `as <rust_name>`",
+        ),
+        (
+            "type c++::B { safe fn get<'a>(&'a const self) -> i32 as type; }\n",
+            "`type` is a Rust keyword and cannot be used as the Rust function name in `as type`",
+        ),
+        (
+            "type c++::B { safe fn get<'a>(&'a const self) -> i32 as move; }\n",
+            "`move` is a Rust keyword and cannot be used as the Rust function name in `as move`",
+        ),
+        (
+            "type c++::B { safe fn as_const<'a>(&'a const self) -> i32; }\n",
+            "`as_const` collides with an inherent conversion method on `c++::` wrappers; rename it with `as <rust_name>`",
+        ),
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(expected),
+            "expected `{expected}` for `{src}`, got:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn conflicting_cpp_methods_across_files() {
+    let resolver = MockFilesystem::new(vec![(
+        "./a.zng",
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    unsafe fn value(&const self) -> i32;
+}
+"#,
+    )]);
+
+    check_import_fail(
+        r#"
+merge "./a.zng";
+type c++::B {
+    unsafe fn value(&const self) -> i64;
+}
+"#,
+        expect![[r#"
+            Error: C++ method mismatch
+               ╭─[ ./a.zng:2:6 ]
+               │
+             2 │ type c++::B {
+               │      ───┬──  
+               │         ╰──── C++ method mismatch
+               │ 
+             5 │     unsafe fn value(&const self) -> i32;
+               │     ──────────────────┬─────────────────  
+               │                       ╰─────────────────── declaration here ...
+               │
+               ├─[ test.zng:4:5 ]
+               │
+             4 │     unsafe fn value(&const self) -> i64;
+               │     ──────────────────┬─────────────────  
+               │                       ╰─────────────────── conflicts with the declaration here.
+            ───╯
+        "#]],
+        &resolver,
+    );
+}
+
+#[test]
+fn cpp_methods_can_be_declared_in_another_file() {
+    // E.g. a hand-written file amending a generated one.
+    let resolver = MockFilesystem::new(vec![(
+        "./a.zng",
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    unsafe fn value(&const self) -> i32;
+}
+"#,
+    )]);
+    let parsed = parse_str_with_resolver(
+        r#"
+merge "./a.zng";
+type c++::B {
+    unsafe fn set(&unique var self, i32);
+}
+"#,
+        NullCfg,
+        &resolver,
+        |_| {},
+    );
+    let ty = parsed.spec.types.first().expect("no type parsed");
+    let mut names: Vec<_> = ty.cpp_methods.iter().map(|m| m.rust_name()).collect();
+    names.sort();
+    assert_eq!(names, ["set", "value"]);
+}
+
+#[test]
+fn lifetimes_in_cpp_member_functions_are_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    unsafe fn name(&const self, &'a const i32) -> i32;
+}
+"#,
+        expect![[r#"
+            Error: undeclared lifetime `'a`: declare it on the function, `impl` or `type` (e.g. `fn f<'a>(...)`)
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     unsafe fn name(&const self, &'a const i32) -> i32;
+               │     ─────────────────────────┬────────────────────────  
+               │                              ╰────────────────────────── undeclared lifetime `'a`: declare it on the function, `impl` or `type` (e.g. `fn f<'a>(...)`)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_member_function_without_receiver_is_static() {
+    use zngur_def::ZngurMethodReceiver;
+
+    let parsed = parse_str(
+        r#"
+type c++::B {
+    safe fn value() -> i32;
+    safe fn get<'a>(&'a const self) -> i32;
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let methods = &parsed.spec.types[0].cpp_methods;
+    assert_eq!(methods[0].receiver, ZngurMethodReceiver::Static);
+    assert_eq!(
+        methods[1].receiver,
+        ZngurMethodReceiver::Ref(Mutability::Not)
+    );
+}
+
+#[test]
+fn static_keyword_on_cpp_member_function_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    safe static fn make() -> i32;
+}
+"#,
+        expect![[r#"
+            Error: C++ static member functions are declared without a `self` receiver; remove `static`
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     safe static fn make() -> i32;
+               │     ──────────────┬──────────────  
+               │                   ╰──────────────── C++ static member functions are declared without a `self` receiver; remove `static`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_member_function_with_trailing_const_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    safe fn value() const -> i32;
+}
+"#,
+        expect![[r#"
+            Error: C++ member functions take an explicit receiver instead of a trailing `const`: `&'a const self` for `const` member functions, and `&'a unique var self` (or `&'a var self`) for the others
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     safe fn value() const -> i32;
+               │     ──────────────┬──────────────  
+               │                   ╰──────────────── C++ member functions take an explicit receiver instead of a trailing `const`: `&'a const self` for `const` member functions, and `&'a unique var self` (or `&'a var self`) for the others
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_receivers_parse() {
+    use zngur_def::{CppConstness, CppIndirection, Lifetime, ZngurMethodReceiver};
+
+    let parsed = parse_str(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+
+    safe fn get<'a>(&'a const self) -> &'a const i32;
+    safe fn set(&unique var self, i32);
+    unsafe fn raw_get(const self*) -> i32;
+    unsafe fn raw_set(self&, i32);
+    safe fn make() -> c++::B;
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let methods = &parsed.spec.types[0].cpp_methods;
+    assert_eq!(
+        methods[0].receiver,
+        ZngurMethodReceiver::Ref(Mutability::Not)
+    );
+    assert_eq!(methods[0].receiver_lifetime, Some(Lifetime("a".to_owned())));
+    assert_eq!(methods[0].lifetimes, vec![Lifetime("a".to_owned())]);
+    assert_eq!(
+        methods[1].receiver,
+        ZngurMethodReceiver::Ref(Mutability::Mut)
+    );
+    assert_eq!(methods[1].raw_receiver, None);
+    assert_eq!(methods[1].inputs.len(), 1);
+    assert_eq!(
+        methods[2].receiver,
+        ZngurMethodReceiver::Ref(Mutability::Not)
+    );
+    assert_eq!(methods[2].raw_receiver, Some(CppIndirection::Pointer));
+    assert_eq!(
+        methods[3].receiver,
+        ZngurMethodReceiver::Ref(Mutability::Mut)
+    );
+    assert_eq!(methods[3].raw_receiver, Some(CppIndirection::Reference));
+    assert_eq!(methods[4].receiver, ZngurMethodReceiver::Static);
+    let constnesses: Vec<CppConstness> = methods.iter().map(|m| m.receiver_constness).collect();
+    assert_eq!(
+        constnesses,
+        [
+            CppConstness::Const,
+            CppConstness::Var,
+            CppConstness::Const,
+            CppConstness::Var,
+            CppConstness::Var
+        ]
+    );
+}
+
+#[test]
+fn shared_var_and_unique_const_receivers_parse() {
+    use zngur_def::{CppConstness, ZngurMethodReceiver};
+
+    let parsed = parse_str(
+        r#"
+type c++::B {
+    safe fn bump<'a>(&'a var self);
+    safe fn peek<'a>(&'a unique const self) -> i32;
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let methods = &parsed.spec.types[0].cpp_methods;
+    assert_eq!(
+        methods[0].receiver,
+        ZngurMethodReceiver::Ref(Mutability::Not)
+    );
+    assert_eq!(methods[0].receiver_constness, CppConstness::Var);
+    assert_eq!(
+        methods[1].receiver,
+        ZngurMethodReceiver::Ref(Mutability::Mut)
+    );
+    assert_eq!(methods[1].receiver_constness, CppConstness::Const);
+}
+
+#[test]
+fn rust_style_cpp_receivers_are_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    safe fn get<'a>(&'a self) -> i32;
+    safe fn set(&mut self, i32);
+}
+"#,
+        expect![[r#"
+            Error: the receiver of a C++ member function is a reference to a C++ object, which says whether it's `const`: `&'a const self` (a `const` member function)
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     safe fn get<'a>(&'a self) -> i32;
+               │     ────────────────┬────────────────  
+               │                     ╰────────────────── the receiver of a C++ member function is a reference to a C++ object, which says whether it's `const`: `&'a const self` (a `const` member function)
+            ───╯
+            Error: the receiver of a C++ member function is a reference to a C++ object, which says whether it's `const`: `&unique var self` (a non-`const` member function, `&mut self` in Rust)
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     safe fn set(&mut self, i32);
+               │     ──────────────┬─────────────  
+               │                   ╰─────────────── the receiver of a C++ member function is a reference to a C++ object, which says whether it's `const`: `&unique var self` (a non-`const` member function, `&mut self` in Rust)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn elided_lifetimes_warn() {
+    check_warnings(
+        r#"
+type c++::B {
+    safe fn get(&const self) -> &const i32;
+}
+"#,
+        expect![[r#"
+            Warning: this C++ member function has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `fn f<'a>(&'a const self) -> &'a const T`), or silence this with `#allow(elided_lifetimes)`
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     safe fn get(&const self) -> &const i32;
+               │     ───────────────────┬───────────────────  
+               │                        ╰───────────────────── this C++ member function has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `fn f<'a>(&'a const self) -> &'a const T`), or silence this with `#allow(elided_lifetimes)`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn allow_silences_warnings() {
+    check_success(
+        r#"
+#allow(elided_lifetimes)
+#allow(safe_raw_pointer)
+
+type c++::B {
+    safe fn get(&const self) -> &const i32;
+    safe fn set(&unique var self, const c++::B*);
+}
+"#,
+    );
+}
+
+#[test]
+fn allow_is_scoped_to_single_file() {
+    let resolver = MockFilesystem::new(vec![
+        (
+            "./a.zng",
+            r#"
+#allow(elided_lifetimes)
+type c++::B {
+    safe fn get(&const self) -> &const i32;
+}
+"#,
+        ),
+        (
+            "./b.zng",
+            r#"
+#unstable(template_types)
+
+type c++::B {
+    safe fn direct_elided(&const self) -> &const i32;
+    safe fn direct_ptr(const c++::B*);
+}
+
+type<T> T {
+    safe fn templated_elided(const T*) -> &const i32;
+}
+"#,
+        ),
+    ]);
+    let mut warnings = String::new();
+    let _ = parse_str_with_resolver(
+        r#"
+merge "./a.zng";
+type c++::B {
+    safe fn other(&const self) -> &const i32;
+}
+"#,
+        NullCfg,
+        &resolver,
+        |w| warnings.push_str(w),
+    );
+    assert!(
+        warnings.contains("test.zng:4:5") && !warnings.contains("a.zng"),
+        "expected warning only in test.zng, got:\n{warnings}"
+    );
+
+    let mut reverse_warnings = String::new();
+    let _ = parse_str_with_resolver(
+        r#"
+#allow(elided_lifetimes)
+#allow(safe_raw_pointer)
+merge "./b.zng";
+type c++::B {
+    safe fn root_ok(&const self, const c++::B*) -> &const i32;
+}
+"#,
+        NullCfg,
+        &resolver,
+        |w| reverse_warnings.push_str(w),
+    );
+    assert!(
+        !reverse_warnings.contains("test.zng"),
+        "expected no warnings in root test.zng, got:\n{reverse_warnings}"
+    );
+    assert_eq!(
+        reverse_warnings.matches("Warning:").count(),
+        4,
+        "expected 4 warnings in b.zng (2 direct + 2 from template static method), got:\n{reverse_warnings}"
+    );
+}
+
+#[test]
+fn unknown_allow_is_rejected() {
+    check_fail(
+        r#"
+#allow(everything)
+"#,
+        expect![[r#"
+            Error: unknown warning `everything` (known ones: elided_lifetimes, safe_raw_pointer)
+               ╭─[ test.zng:2:1 ]
+               │
+             2 │ #allow(everything)
+               │ ─────────┬────────  
+               │          ╰────────── unknown warning `everything` (known ones: elided_lifetimes, safe_raw_pointer)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn nested_allow_is_rejected() {
+    check_fail(
+        r#"
+mod c++::a {
+    #allow(elided_lifetimes)
+}
+"#,
+        expect![[r#"
+            Error: `#allow(...)` applies to the whole file and can only appear at the top level
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     #allow(elided_lifetimes)
+               │     ────────────┬───────────  
+               │                 ╰───────────── `#allow(...)` applies to the whole file and can only appear at the top level
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_method_by_value_ref_only_or_undeclared_cpp_types_are_rejected() {
+    check_fail(
+        r#"
+type c++::RefOnly {}
+
+type c++::Owner {
+    safe fn make() -> c++::RefOnly;
+    safe fn take<'a>(&'a const self, c++::RefOnly);
+    safe fn unknown<'a>(&'a const self, &'a const c++::Missing);
+}
+"#,
+        expect![[r#"
+            Error: `c++::RefOnly` cannot be passed or returned by value without `#layout(...)` and `#trivially_relocatable`
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     safe fn make() -> c++::RefOnly;
+               │     ───────────────┬───────────────  
+               │                    ╰───────────────── `c++::RefOnly` cannot be passed or returned by value without `#layout(...)` and `#trivially_relocatable`
+            ───╯
+            Error: `c++::RefOnly` cannot be passed or returned by value without `#layout(...)` and `#trivially_relocatable`
+               ╭─[ test.zng:6:5 ]
+               │
+             6 │     safe fn take<'a>(&'a const self, c++::RefOnly);
+               │     ───────────────────────┬───────────────────────  
+               │                            ╰───────────────────────── `c++::RefOnly` cannot be passed or returned by value without `#layout(...)` and `#trivially_relocatable`
+            ───╯
+            Error: `c++::Missing` is not declared or imported
+               ╭─[ test.zng:7:5 ]
+               │
+             7 │     safe fn unknown<'a>(&'a const self, &'a const c++::Missing);
+               │     ──────────────────────────────┬─────────────────────────────  
+               │                                   ╰─────────────────────────────── `c++::Missing` is not declared or imported
+            ───╯
+        "#]],
+    );
+
+    let resolver = MockFilesystem::new(vec![(
+        "./dep.zng",
+        r#"
+#crate dep_crate
+type c++::ImportedRefOnly {}
+"#,
+    )]);
+    check_import_fail(
+        r#"
+import "./dep.zng";
+
+type c++::Local {
+    safe fn ok<'a>(&'a const self, &'a const c++::ImportedRefOnly, ::std::option::Option<&'a const c++::ImportedRefOnly>);
+    safe fn bad<'a>(&'a const self, c++::ImportedRefOnly);
+}
+"#,
+        expect![[r#"
+            Error: `c++::ImportedRefOnly` cannot be passed or returned by value without `#layout(...)` and `#trivially_relocatable`
+               ╭─[ test.zng:6:5 ]
+               │
+             6 │     safe fn bad<'a>(&'a const self, c++::ImportedRefOnly);
+               │     ───────────────────────────┬──────────────────────────  
+               │                                ╰──────────────────────────── `c++::ImportedRefOnly` cannot be passed or returned by value without `#layout(...)` and `#trivially_relocatable`
+            ───╯
+        "#]],
+        &resolver,
+    );
+}
+
+#[test]
+fn cpp_method_merge_with_alpha_equivalent_lifetimes_succeeds() {
+    let resolver = MockFilesystem::new(vec![(
+        "./other.zng",
+        r#"
+type c++::B {
+    safe fn get<'b>(&'b const self) -> &'b const i32;
+}
+"#,
+    )]);
+    let parsed = parse_str_with_resolver(
+        r#"
+merge "./other.zng";
+
+type c++::B {
+    safe fn get<'a>(&'a const self) -> &'a const i32;
+}
+"#,
+        NullCfg,
+        &resolver,
+        |e| panic!("unexpected diagnostic: {e}"),
+    );
+    assert_eq!(parsed.spec.types[0].cpp_methods.len(), 1);
+}
+
+#[test]
+fn anonymous_lifetime_warns() {
+    check_warnings(
+        r#"
+type c++::B {
+    safe fn get(&'_ const self) -> &'_ const i32;
+    safe fn arg<'a>(&'a const self, &'_ const i32);
+}
+"#,
+        expect![[r#"
+            Warning: this C++ member function has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `fn f<'a>(&'a const self) -> &'a const T`), or silence this with `#allow(elided_lifetimes)`
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     safe fn get(&'_ const self) -> &'_ const i32;
+               │     ──────────────────────┬──────────────────────  
+               │                           ╰──────────────────────── this C++ member function has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `fn f<'a>(&'a const self) -> &'a const T`), or silence this with `#allow(elided_lifetimes)`
+            ───╯
+            Warning: this C++ member function has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `fn f<'a>(&'a const self) -> &'a const T`), or silence this with `#allow(elided_lifetimes)`
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     safe fn arg<'a>(&'a const self, &'_ const i32);
+               │     ───────────────────────┬───────────────────────  
+               │                            ╰───────────────────────── this C++ member function has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `fn f<'a>(&'a const self) -> &'a const T`), or silence this with `#allow(elided_lifetimes)`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_method_rejects_impl_trait_and_warns_on_dyn_raw_ptr() {
+    check_fail(
+        r#"
+type c++::B {
+    safe fn ret<'a>(&'a const self) -> impl crate::MyTrait;
+    safe fn arg<'a>(&'a const self, impl crate::MyTrait);
+}
+"#,
+        expect![[r#"
+            Error: `impl Trait` cannot be used in C++ function signatures; use `Box<dyn Trait>` or `&dyn Trait` instead
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     safe fn ret<'a>(&'a const self) -> impl crate::MyTrait;
+               │     ───────────────────────────┬───────────────────────────  
+               │                                ╰───────────────────────────── `impl Trait` cannot be used in C++ function signatures; use `Box<dyn Trait>` or `&dyn Trait` instead
+            ───╯
+            Error: `impl Trait` cannot be used in C++ function signatures; use `Box<dyn Trait>` or `&dyn Trait` instead
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     safe fn arg<'a>(&'a const self, impl crate::MyTrait);
+               │     ──────────────────────────┬──────────────────────────  
+               │                               ╰──────────────────────────── `impl Trait` cannot be used in C++ function signatures; use `Box<dyn Trait>` or `&dyn Trait` instead
+            ───╯
+        "#]],
+    );
+
+    check_warnings(
+        r#"
+type c++::B {
+    safe fn with_cb<'a>(&'a const self, Box<dyn Fn(i32*)>);
+}
+"#,
+        expect![[r#"
+            Warning: this C++ member function is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     safe fn with_cb<'a>(&'a const self, Box<dyn Fn(i32*)>);
+               │     ───────────────────────────┬───────────────────────────  
+               │                                ╰───────────────────────────── this C++ member function is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn template_types_substitute_cpp_methods_and_reject_rust_targets() {
+    let parsed = parse_str(
+        r#"
+#unstable(template_types)
+type<T> T {
+    safe fn clone_val<'a>(&'a const self, &'a const T) -> T;
+    safe fn make_default() -> T;
+}
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+}
+"#,
+        NullCfg,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    let ty = &parsed.spec.types[0];
+    assert!(ty.methods.is_empty());
+    assert_eq!(ty.cpp_methods.len(), 2);
+    assert_eq!(ty.cpp_methods[0].cpp_name, "clone_val");
+    assert_eq!(
+        ty.cpp_methods[0].output,
+        RustType::Cpp(vec!["B".to_owned()])
+    );
+    assert_eq!(ty.cpp_methods[1].cpp_name, "make_default");
+
+    check_fail(
+        r#"
+#unstable(template_types)
+type<T> crate::Vec<T> {
+    unsafe fn value<'a>(&'a const self) -> i32;
+}
+"#,
+        expect![[r#"
+            Error: methods of Rust types and `extern "C++"` impls take `&self` or `&mut self`, not `&const self` / `&var self`
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     unsafe fn value<'a>(&'a const self) -> i32;
+               │     ─────────────────────┬────────────────────  
+               │                          ╰────────────────────── methods of Rust types and `extern "C++"` impls take `&self` or `&mut self`, not `&const self` / `&var self`
+            ───╯
+        "#]],
+    );
+
+    let r = catch_unwind(|| {
+        let _ = parse_str(
+            r#"
+#unstable(template_types)
+type<T> T {
+    unsafe fn value<'a>(&'a const self) -> i32;
+}
+type crate::Foo {
+    #layout(size = 8, align = 4);
+}
+"#,
+            NullCfg,
+            |_| {},
+        );
+    });
+    let err = r
+        .unwrap_err()
+        .downcast::<ErrorText>()
+        .expect("expected ErrorText")
+        .0;
+    assert!(
+        err.contains(
+            "C++ member functions (`safe fn` / `unsafe fn`) can only be declared on `c++::` types"
+        ),
+        "unexpected error:\n{err}"
+    );
+
+    // Static template methods instantiated on `c++::` targets normalize `as <same_name>` (so they
+    // merge cleanly with direct declarations), reject Rust keyword names/aliases, and run
+    // `elided_lifetimes` / `safe_raw_pointer` lints.
+    let merged = parse_str(
+        r#"
+#unstable(template_types)
+type<T> T {
+    safe fn make() -> T as make;
+}
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe fn make() -> c++::B;
+}
+"#,
+        NullCfg,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    assert_eq!(merged.spec.types[0].cpp_methods.len(), 1);
+    assert_eq!(merged.spec.types[0].cpp_methods[0].rust_name, None);
+
+    for (src, expected) in [
+        (
+            r#"
+#unstable(template_types)
+type<T> T {
+    safe fn move() -> T;
+}
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+}
+"#,
+            "`move` is a Rust keyword; give this C++ function a non-keyword Rust name with `as <rust_name>`",
+        ),
+        (
+            r#"
+#unstable(template_types)
+type<T> T {
+    safe fn make() -> T as move;
+}
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+}
+"#,
+            "`move` is a Rust keyword and cannot be used as the Rust function name in `as move`",
+        ),
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(expected),
+            "expected `{expected}` for `{src}`, got:\n{err}"
+        );
+    }
+
+    let mut warnings = Vec::new();
+    let _ = parse_str(
+        r#"
+#unstable(template_types)
+type<T> T {
+    safe fn from_ptr(const i32*) -> T;
+    safe fn id(&const i32) -> &const i32;
+}
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+}
+"#,
+        NullCfg,
+        |w| warnings.push(w.to_owned()),
+    );
+    assert_eq!(warnings.len(), 2, "unexpected warnings: {warnings:?}");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("#allow(safe_raw_pointer)")),
+        "missing safe_raw_pointer warning in: {warnings:?}"
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("#allow(elided_lifetimes)")),
+        "missing elided_lifetimes warning in: {warnings:?}"
+    );
 }

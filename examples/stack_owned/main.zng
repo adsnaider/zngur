@@ -1,15 +1,44 @@
+// References without lifetimes are fine for these member functions' arguments: nothing returned
+// borrows from them.
+#allow(elided_lifetimes)
+
 #cpp_additional_includes "
 #include <cpp_type.h>
 "
 
+type crate::RustTag {
+    #layout(size = 4, align = 4);
+    wellknown_traits(Copy);
+    fn bonus(&self) -> i32;
+}
+
 type c++::MyCppWrapper {
     #trivially_relocatable;
     #layout(size = 8, align = 4);
+
+    // C++ member functions, which Rust calls as methods. `&const self` is a `const` member function,
+    // which `const` objects (`MyCppWrapper<Const>`) have too, and `&unique var self` a non-`const`
+    // one (`&mut self` in Rust). A C++ `const T&` is a `&'a const T` in the `.zng` file
+    // (`&'a T<Const>` in Rust, or `&'a Cpp<i32, Const>` for a builtin). Arguments that are `const`
+    // objects are generic over their constness (`&'a T<C1>`), so they take non-`const` ones too.
+    safe fn sum(&const self) -> i32;
+    safe fn scale(&unique var self, i32);
+    safe fn add(&unique var self, &const c++::MyCppWrapper);
+    safe fn x_ref<'a>(&'a const self) -> &'a const i32;
+    safe fn x_ref<'a>(&'a unique var self) -> &'a unique var i32 as x_ref_mut;
+    safe fn bump_x(&var self, i32);
+    unsafe fn sum(const self*) -> i32 as raw_sum;
+    safe fn is_positive(&const self, bool) -> bool;
+    safe fn with_rust_tag(&const self, &crate::RustTag) -> i32;
+    safe fn swapped(&const self) -> c++::MyCppWrapper;
+    safe fn diagonal(i32) -> c++::MyCppWrapper;
 }
 
 type c++::MyConservativeWrapper {
     #trivially_relocatable;
     #layout_conservative(size = 20, align = 8);
+
+    safe fn total_with(&const self, c++::MyConservativeWrapper) -> i64;
 }
 
 type c++::BoxedInt {

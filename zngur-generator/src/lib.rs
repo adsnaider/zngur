@@ -11,9 +11,11 @@ use cpp::CppVariant;
 use indexmap::map::Entry;
 use itertools::Itertools;
 use rust::CoroSupport;
+use rust::CppRustReceiver;
 use rust::IntoCpp;
 
 pub mod cpp;
+mod cpp_method;
 mod rust;
 mod template;
 
@@ -125,6 +127,20 @@ impl ZngurGenerator {
             }));
         let mut cpp_tree = CppModuleTree::default();
         cpp_file.coro_support = coro_support;
+        let stack_owned_types: cpp_method::StackOwnedTypes = zng
+            .imported_modules
+            .iter()
+            .flat_map(|module| module.cpp_by_value_types.iter().cloned())
+            .chain(zng.types.iter().filter_map(|ty_def| {
+                ty_def.cpp_by_value_layout()?;
+                Some((ty_def.ty.clone(), ty_def.cpp_name()?))
+            }))
+            .collect();
+        let bridges = cpp_method::BridgeRenderer {
+            stack_owned: &stack_owned_types,
+            namespace: default_ns,
+            crate_name: &sanitized_crate_name,
+        };
         let cpp_heap_allocated_types: std::collections::HashSet<RustType> = zng
             .types
             .iter()
@@ -155,7 +171,7 @@ impl ZngurGenerator {
                 None
             };
             let cpp_ref = if cpp_by_value_type.is_none() && ty_def.cpp_heap_allocated.is_none() {
-                cpp_name.map(|name| cpp::CppRef {
+                cpp_name.clone().map(|name| cpp::CppRef {
                     name,
                     layout: if ty_def.cpp_ref.is_some() {
                         None
@@ -166,6 +182,42 @@ impl ZngurGenerator {
             } else {
                 None
             };
+            // C++ member functions that Rust calls: a Rust function, and a C++ function that
+            // calls the member function.
+            if ty_def.cpp_heap_allocated.is_none()
+                && let Some(owner_cpp_type) = &cpp_name
+            {
+                for method in &ty_def.cpp_methods {
+                    let receiver = match (method.receiver, method.raw_receiver) {
+                        (ZngurMethodReceiver::Ref(mutability), None) => CppRustReceiver::Ref {
+                            mutability,
+                            constness: method.receiver_constness,
+                            lifetime: method.receiver_lifetime.clone(),
+                        },
+                        (ZngurMethodReceiver::Ref(_), Some(_)) => CppRustReceiver::Raw {
+                            constness: method.receiver_constness,
+                        },
+                        (ZngurMethodReceiver::Static | ZngurMethodReceiver::Move, _) => {
+                            CppRustReceiver::Static
+                        }
+                    };
+                    let mangled_name = rust_file.add_cpp_method(
+                        ty,
+                        method.rust_name(),
+                        &method.lifetimes,
+                        receiver,
+                        &method.inputs,
+                        &method.output,
+                        method.is_safe,
+                    );
+                    cpp_file.cpp_method_bridges.push(bridges.method(
+                        &mangled_name,
+                        ty,
+                        owner_cpp_type,
+                        method,
+                    ));
+                }
+            }
             let is_copy = ty_def.wellknown_traits.contains(&ZngurWellknownTrait::Copy);
             // In Rust, C++ types that are only referred to are zero-sized. (Their layout, if
             // any, is only checked in C++.)
@@ -755,6 +807,7 @@ mod tests {
             wellknown_traits: vec![],
             exhaustive: true,
             methods: vec![],
+            cpp_methods: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -778,6 +831,7 @@ mod tests {
             wellknown_traits: vec![],
             exhaustive: true,
             methods: vec![],
+            cpp_methods: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -796,6 +850,7 @@ mod tests {
             wellknown_traits: vec![],
             exhaustive: true,
             methods: vec![],
+            cpp_methods: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -815,6 +870,7 @@ mod tests {
             wellknown_traits: vec![],
             exhaustive: true,
             methods: vec![],
+            cpp_methods: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -857,6 +913,7 @@ mod tests {
             wellknown_traits: vec![],
             exhaustive: true,
             methods,
+            cpp_methods: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -897,6 +954,7 @@ mod tests {
             wellknown_traits: vec![],
             exhaustive: true,
             methods: vec![],
+            cpp_methods: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -1025,6 +1083,7 @@ mod tests {
                 wellknown_traits: vec![],
                 exhaustive: true,
                 methods: vec![],
+                cpp_methods: vec![],
                 constructor: None,
                 variants: vec![],
                 fields: vec![],
@@ -1352,6 +1411,7 @@ pub type Handle = super::Handle;
                     wellknown_traits: vec![],
                     exhaustive: true,
                     methods: vec![],
+                    cpp_methods: vec![],
                     constructor: None,
                     variants: vec![],
                     fields: vec![],
@@ -1371,6 +1431,7 @@ pub type Handle = super::Handle;
                     wellknown_traits: vec![],
                     exhaustive: true,
                     methods: vec![],
+                    cpp_methods: vec![],
                     constructor: None,
                     variants: vec![],
                     fields: vec![],
@@ -1394,6 +1455,7 @@ pub type Handle = super::Handle;
                     wellknown_traits: vec![],
                     exhaustive: true,
                     methods: vec![],
+                    cpp_methods: vec![],
                     constructor: None,
                     variants: vec![],
                     fields: vec![],
@@ -1409,6 +1471,7 @@ pub type Handle = super::Handle;
                     wellknown_traits: vec![],
                     exhaustive: true,
                     methods: vec![],
+                    cpp_methods: vec![],
                     constructor: None,
                     variants: vec![ZngurVariant {
                         name: "Val".to_owned(),
@@ -1463,6 +1526,7 @@ pub type Handle = super::Handle;
             wellknown_traits: vec![],
             exhaustive: true,
             methods: vec![],
+            cpp_methods: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -1578,6 +1642,7 @@ pub type Handle = super::Handle;
                 vec!["Top".to_owned()],
             ],
             cpp_heap_allocated_types: vec![],
+            cpp_by_value_types: vec![],
         };
         let spec = ZngurSpec {
             // Duplicate `ModuleImport` entries (e.g. from two `merge`d files importing the same
@@ -1901,6 +1966,7 @@ pub type Handle = super::Handle;
             wellknown_traits: vec![ZngurWellknownTrait::Drop],
             exhaustive: true,
             methods: vec![],
+            cpp_methods: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -1919,6 +1985,7 @@ pub type Handle = super::Handle;
                     wellknown_traits: vec![ZngurWellknownTrait::Unsized],
                     exhaustive: true,
                     methods: vec![],
+                    cpp_methods: vec![],
                     constructor: None,
                     variants: vec![],
                     fields: vec![],
@@ -1934,6 +2001,7 @@ pub type Handle = super::Handle;
                     wellknown_traits: vec![ZngurWellknownTrait::Drop],
                     exhaustive: true,
                     methods: vec![],
+                    cpp_methods: vec![],
                     constructor: Some(ZngurConstructor {
                         inputs: vec![
                             ("first".to_owned(), ref_a_str.clone()),
@@ -1969,6 +2037,7 @@ pub type Handle = super::Handle;
                     wellknown_traits: vec![ZngurWellknownTrait::Drop],
                     exhaustive: true,
                     methods: vec![],
+                    cpp_methods: vec![],
                     constructor: None,
                     variants: vec![],
                     fields: vec![],
@@ -2198,6 +2267,7 @@ pub type Handle = super::Handle;
                 crate_name: Some("bar_bindings".to_owned()),
                 cpp_types: vec![vec!["ns".to_owned(), "HeapFoo".to_owned()]],
                 cpp_heap_allocated_types: vec![vec!["ns".to_owned(), "HeapFoo".to_owned()]],
+                cpp_by_value_types: vec![],
             }],
             extern_cpp_impls: vec![ZngurExternCppImpl {
                 lifetimes: vec![],
@@ -2399,5 +2469,524 @@ pub type Handle = super::Handle;
         );
         assert!(h.contains("::std::move(i0)"), "{h}");
         assert!(!h.contains("return *o;"), "{h}");
+    }
+
+    #[test]
+    fn cpp_methods_get_rust_functions_and_cpp_bridges() {
+        let b = cpp(&["a", "B"]);
+        let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+        let mut ty = minimal_by_value_cpp_type(b.clone(), 8, 4);
+        ty.cpp_methods = vec![
+            ZngurCppMethod {
+                cpp_name: "value".to_owned(),
+                lifetimes: vec![],
+                rust_name: None,
+                receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+                receiver_constness: CppConstness::Const,
+                receiver_lifetime: None,
+                raw_receiver: None,
+                inputs: vec![],
+                output: i32.clone(),
+                is_safe: false,
+            },
+            ZngurCppMethod {
+                cpp_name: "set".to_owned(),
+                lifetimes: vec![],
+                rust_name: Some("set_from".to_owned()),
+                receiver: ZngurMethodReceiver::Ref(Mutability::Mut),
+                receiver_constness: CppConstness::Var,
+                receiver_lifetime: None,
+                raw_receiver: None,
+                inputs: vec![RustType::cpp_ptr(
+                    Mutability::Not,
+                    CppIndirection::Reference,
+                    b.clone(),
+                )],
+                output: RustType::UNIT,
+                is_safe: false,
+            },
+            // A non-`const` member function called through a shared reference.
+            ZngurCppMethod {
+                cpp_name: "bump".to_owned(),
+                lifetimes: vec![],
+                rust_name: None,
+                receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+                receiver_constness: CppConstness::Var,
+                receiver_lifetime: None,
+                raw_receiver: None,
+                inputs: vec![],
+                output: RustType::UNIT,
+                is_safe: true,
+            },
+            // A `const` member function called through a unique reference.
+            ZngurCppMethod {
+                cpp_name: "peek".to_owned(),
+                lifetimes: vec![],
+                rust_name: None,
+                receiver: ZngurMethodReceiver::Ref(Mutability::Mut),
+                receiver_constness: CppConstness::Const,
+                receiver_lifetime: None,
+                raw_receiver: None,
+                inputs: vec![],
+                output: i32.clone(),
+                is_safe: true,
+            },
+            // Raw receivers (`const self*`, `self&`) become associated functions taking
+            // `*const Self` (on `impl<C> B<C>`) or `*mut Self` (on `impl B`).
+            ZngurCppMethod {
+                cpp_name: "raw_value".to_owned(),
+                lifetimes: vec![],
+                rust_name: None,
+                receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+                receiver_constness: CppConstness::Const,
+                receiver_lifetime: None,
+                raw_receiver: Some(CppIndirection::Pointer),
+                inputs: vec![],
+                output: i32.clone(),
+                is_safe: false,
+            },
+            ZngurCppMethod {
+                cpp_name: "raw_bump".to_owned(),
+                lifetimes: vec![],
+                rust_name: None,
+                receiver: ZngurMethodReceiver::Ref(Mutability::Mut),
+                receiver_constness: CppConstness::Var,
+                receiver_lifetime: None,
+                raw_receiver: Some(CppIndirection::Reference),
+                inputs: vec![i32.clone()],
+                output: RustType::UNIT,
+                is_safe: false,
+            },
+            ZngurCppMethod {
+                cpp_name: "make".to_owned(),
+                lifetimes: vec![],
+                rust_name: None,
+                receiver: ZngurMethodReceiver::Static,
+                receiver_constness: CppConstness::Var,
+                receiver_lifetime: None,
+                raw_receiver: None,
+                inputs: vec![i32.clone(), b.clone()],
+                output: b.clone(),
+                is_safe: true,
+            },
+        ];
+        let spec = ZngurSpec {
+            types: vec![ty],
+            ..Default::default()
+        };
+        let (rust_code, _h, cpp_code) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let cpp_code = cpp_code.expect("C++ member functions need a C++ file");
+
+        // Rust: methods, in an `impl<__C0>` block for `const` member functions and an `impl a::B`
+        // (non-`const`) block for the others.
+        assert!(
+            rust_code.contains(
+                "impl<__C0: ::zngur_lib::Constness> a::B<__C0> {\n#[allow(non_snake_case, \
+                 clippy::too_many_arguments)]\npub unsafe fn value(&self, ) -> i32"
+            ),
+            "{rust_code}"
+        );
+        // Inputs that are `const` C++ objects are generic over their constness.
+        assert!(
+            rust_code.contains(
+                "impl a::B {\n#[allow(non_snake_case, clippy::too_many_arguments)]\npub unsafe fn \
+                 set_from<__C1: ::zngur_lib::Constness>(&mut self, i1: *const a::B::<__C1>, ) -> ()"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "impl a::B {\n#[allow(non_snake_case, clippy::too_many_arguments)]\npub fn \
+                 bump(&self, ) -> ()"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "impl<__C0: ::zngur_lib::Constness> a::B<__C0> {\n#[allow(non_snake_case, \
+                 clippy::too_many_arguments)]\npub fn peek(&mut self, ) -> i32"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "impl<__C0: ::zngur_lib::Constness> a::B<__C0> {\n#[allow(non_snake_case, \
+                 clippy::too_many_arguments)]\npub unsafe fn raw_value(i0: *const Self, ) -> i32"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "impl a::B {\n#[allow(non_snake_case, clippy::too_many_arguments)]\npub unsafe fn \
+                 raw_bump(i0: *mut Self, i1: i32, ) -> ()"
+            ),
+            "{rust_code}"
+        );
+        assert!(rust_code.contains("pub fn make(i0: i32, i1: a::B, ) -> a::B"));
+
+        // C++: bridges calling the member functions directly, through a `const` `this` for
+        // `const` member functions.
+        assert!(
+            cpp_code.contains(
+                "(::rust::__zngur_internal_move_from_rust< ::rust::CppPtr< ::rust::CppConst< \
+                 ::rust::cpp::a::B > > >(i0))->value()"
+            ),
+            "{cpp_code}"
+        );
+        assert!(cpp_code.contains("->set(*"), "{cpp_code}");
+        assert!(
+            cpp_code.contains(
+                "(::rust::__zngur_internal_move_from_rust< ::rust::CppPtr< ::rust::cpp::a::B > \
+                 >(i0))->bump()"
+            ),
+            "{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains("::rust::CppConst< ::rust::cpp::a::B > > >(i0))->peek()"),
+            "{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains(
+                "(::rust::__zngur_internal_move_from_rust< ::rust::CppPtr< ::rust::CppConst< \
+                 ::rust::cpp::a::B > > >(i0))->raw_value()"
+            ),
+            "{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains(
+                "(::rust::__zngur_internal_move_from_rust< ::rust::CppPtr< ::rust::cpp::a::B > \
+                 >(i0))->raw_bump(::rust::__zngur_internal_move_from_rust< ::int32_t >(i1))"
+            ),
+            "{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains("::new (static_cast<void*>(o)) ::a::B(::a::B::make("),
+            "{cpp_code}"
+        );
+        assert!(cpp_code.contains(".cpp())"), "{cpp_code}");
+    }
+
+    #[test]
+    fn cpp_methods_handle_bool_by_value_and_rust_value_references() {
+        let b = cpp(&["a", "B"]);
+        let lt_a = Lifetime("a".to_owned());
+        let bool_ty = RustType::Primitive(PrimitiveRustType::Bool);
+        let i32_ty = RustType::Primitive(PrimitiveRustType::Int(32));
+        let foo_ty = adt(&["crate", "Foo"]);
+        let ref_foo_ty = RustType::Ref(Mutability::Not, Some(lt_a.clone()), Box::new(foo_ty));
+        let ref_i32_ty = RustType::Ref(
+            Mutability::Not,
+            Some(lt_a.clone()),
+            Box::new(i32_ty.clone()),
+        );
+        let mut_ref_i32_ty = RustType::Ref(Mutability::Mut, Some(lt_a.clone()), Box::new(i32_ty));
+        let opt_const_b_ty = RustType::Adt(RustPathAndGenerics {
+            path: vec!["std".to_owned(), "option".to_owned(), "Option".to_owned()],
+            lifetimes: vec![],
+            generics: vec![RustType::Ref(
+                Mutability::Not,
+                Some(lt_a.clone()),
+                Box::new(RustType::CppConst(Box::new(b.clone()))),
+            )],
+            named_generics: vec![],
+        });
+        let str_ty = RustType::Primitive(PrimitiveRustType::Str);
+        let mut ty = minimal_opaque_cpp_type(b);
+        ty.cpp_methods = vec![
+            ZngurCppMethod {
+                cpp_name: "check".to_owned(),
+                lifetimes: vec![lt_a.clone()],
+                rust_name: None,
+                receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+                receiver_constness: CppConstness::Const,
+                receiver_lifetime: Some(lt_a.clone()),
+                raw_receiver: None,
+                inputs: vec![
+                    bool_ty.clone(),
+                    ref_foo_ty.clone(),
+                    RustType::Ref(Mutability::Not, Some(lt_a.clone()), Box::new(str_ty)),
+                ],
+                output: bool_ty,
+                is_safe: true,
+            },
+            ZngurCppMethod {
+                cpp_name: "borrow_foo".to_owned(),
+                lifetimes: vec![lt_a.clone()],
+                rust_name: None,
+                receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+                receiver_constness: CppConstness::Const,
+                receiver_lifetime: Some(lt_a.clone()),
+                raw_receiver: None,
+                inputs: vec![],
+                output: ref_foo_ty,
+                is_safe: true,
+            },
+            ZngurCppMethod {
+                cpp_name: "nullable_and_builtin_refs".to_owned(),
+                lifetimes: vec![lt_a.clone()],
+                rust_name: None,
+                receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+                receiver_constness: CppConstness::Const,
+                receiver_lifetime: Some(lt_a),
+                raw_receiver: None,
+                inputs: vec![opt_const_b_ty.clone(), ref_i32_ty, mut_ref_i32_ty.clone()],
+                output: opt_const_b_ty,
+                is_safe: true,
+            },
+            ZngurCppMethod {
+                cpp_name: "mut_int".to_owned(),
+                lifetimes: vec![Lifetime("a".to_owned())],
+                rust_name: None,
+                receiver: ZngurMethodReceiver::Ref(Mutability::Mut),
+                receiver_constness: CppConstness::Var,
+                receiver_lifetime: Some(Lifetime("a".to_owned())),
+                raw_receiver: None,
+                inputs: vec![],
+                output: mut_ref_i32_ty,
+                is_safe: true,
+            },
+        ];
+        let spec = ZngurSpec {
+            types: vec![ty],
+            ..Default::default()
+        };
+        let (rust_code, _h, cpp_code) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let cpp_code = cpp_code.expect("C++ member functions need a C++ file");
+        assert!(
+            rust_code.contains(
+                "pub fn nullable_and_builtin_refs<'a, __C1: ::zngur_lib::Constness>(&'a self, \
+                 i1: ::std::option::Option<&'a a::B::<__C1>>, i2: &'a i32, i3: &'a mut i32, ) \
+                 -> ::std::option::Option::<&'a a::B::<::zngur_lib::Const>>"
+            ),
+            "expected generic-constness nullable C++ ref and Rust builtin refs in:\n{rust_code}"
+        );
+        assert!(
+            cpp_code.contains("static_cast<bool>(*i1)"),
+            "expected by-value bool cast in:\n{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains("bool __zngur_o = "),
+            "expected direct bool return handling in:\n{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains("::rust::Ref< ::rust::test_crate::Foo >"),
+            "expected `::rust::Ref< ::rust::test_crate::Foo >` in:\n{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains(
+                "static_assert(::rust::__zngur_same_repr< decltype((::rust::__zngur_internal_move_from_rust< \
+                 ::rust::CppPtr< ::rust::CppConst< ::rust::cpp::a::B > > >(i0))->borrow_foo()), \
+                 ::rust::Ref< ::rust::test_crate::Foo > >::value,"
+            ),
+            "expected return-type static_assert for `&'a crate::Foo` in:\n{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains(
+                "::rust::__zngur_internal_move_from_rust< ::rust::CppPtr< ::rust::CppConst< ::rust::cpp::a::B > > >(i1)"
+            ) && cpp_code.contains(
+                "::rust::CppPtr< ::rust::CppConst< ::rust::cpp::a::B > > __zngur_o = "
+            ),
+            "expected `CppPtr<CppConst<...>>` lowering for `Option<&'a const c++::a::B>` in:\n{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains(
+                "*::rust::__zngur_internal_move_from_rust< ::rust::CppPtr< ::rust::CppConst< ::int32_t > > >(i2)"
+            ) && cpp_code.contains(
+                "*::rust::__zngur_internal_move_from_rust< ::rust::CppPtr< ::int32_t > >(i3)"
+            ) && cpp_code.contains(
+                "::rust::CppTypeOf< ::int32_t >::type&"
+            ) && cpp_code.contains(
+                "::rust::CppPtr< ::int32_t > __zngur_o = &("
+            ),
+            "expected C++ reference lowering for `&i32` / `&mut i32` in:\n{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains("::rust::Ref< ::rust::Str >"),
+            "expected `::rust::Ref< ::rust::Str >` in:\n{cpp_code}"
+        );
+        assert!(
+            !cpp_code.contains("CppPtr< ::rust::test_crate::Foo >"),
+            "unexpected `CppPtr` on Rust ADT in:\n{cpp_code}"
+        );
+        assert!(
+            !cpp_code.contains("CppPtr< ::rust::Str >"),
+            "unexpected `CppPtr` on `str` in:\n{cpp_code}"
+        );
+    }
+
+    #[test]
+    fn cpp_methods_move_imported_by_value_types_like_local_ones() {
+        let imported_bar = cpp(&["ns", "Bar"]);
+        let mut local_ty = minimal_opaque_cpp_type(cpp(&["ns", "Local"]));
+        local_ty.cpp_methods = vec![ZngurCppMethod {
+            cpp_name: "round_trip".to_owned(),
+            lifetimes: vec![],
+            rust_name: None,
+            receiver: ZngurMethodReceiver::Static,
+            receiver_constness: CppConstness::Var,
+            receiver_lifetime: None,
+            raw_receiver: None,
+            inputs: vec![imported_bar.clone()],
+            output: imported_bar.clone(),
+            is_safe: true,
+        }];
+        let spec = ZngurSpec {
+            imported_modules: vec![ModuleImport {
+                path: "./bar.zng".into(),
+                crate_name: Some("bar_bindings".to_owned()),
+                cpp_types: vec![vec!["ns".to_owned(), "Bar".to_owned()]],
+                cpp_heap_allocated_types: vec![],
+                cpp_by_value_types: vec![(imported_bar, "::ns::Bar".to_owned())],
+            }],
+            types: vec![local_ty],
+            ..Default::default()
+        };
+        let (_rust_code, _h, cpp_code) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let cpp_code = cpp_code.expect("C++ member functions need a C++ file");
+        assert!(
+            cpp_code.contains(
+                "::rust::__zngur_internal_move_from_rust< ::rust::cpp::ns::Bar >(i0).cpp()"
+            ),
+            "{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains("::new (static_cast<void*>(o)) ::ns::Bar(::ns::Local::round_trip("),
+            "{cpp_code}"
+        );
+    }
+
+    #[test]
+    fn cpp_method_bridge_symbols_do_not_collide_across_underscore_boundaries_or_extern_cpp() {
+        let mut foo_cpp_method = minimal_opaque_cpp_type(cpp(&["Foo_cpp_method"]));
+        foo_cpp_method.cpp_methods = vec![ZngurCppMethod {
+            cpp_name: "bar".to_owned(),
+            lifetimes: vec![],
+            rust_name: None,
+            receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+            receiver_constness: CppConstness::Const,
+            receiver_lifetime: None,
+            raw_receiver: None,
+            inputs: vec![],
+            output: RustType::UNIT,
+            is_safe: true,
+        }];
+        let mut foo = minimal_opaque_cpp_type(cpp(&["Foo"]));
+        foo.cpp_methods = vec![
+            ZngurCppMethod {
+                cpp_name: "cpp_method_bar".to_owned(),
+                lifetimes: vec![],
+                rust_name: None,
+                receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+                receiver_constness: CppConstness::Const,
+                receiver_lifetime: None,
+                raw_receiver: None,
+                inputs: vec![],
+                output: RustType::UNIT,
+                is_safe: true,
+            },
+            ZngurCppMethod {
+                cpp_name: "bar".to_owned(),
+                lifetimes: vec![],
+                rust_name: None,
+                receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+                receiver_constness: CppConstness::Const,
+                receiver_lifetime: None,
+                raw_receiver: None,
+                inputs: vec![],
+                output: RustType::UNIT,
+                is_safe: true,
+            },
+        ];
+        let spec = ZngurSpec {
+            types: vec![foo_cpp_method, foo],
+            extern_cpp_funcs: vec![ZngurExternCppFn {
+                name: "Foo_cpp_method_bar".to_owned(),
+                lifetimes: vec![],
+                inputs: vec![],
+                output: RustType::UNIT,
+                is_safe: true,
+            }],
+            ..Default::default()
+        };
+        let (rust_code, _h, _cpp) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let extern_fns: Vec<&str> = rust_code
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("unsafe extern \"C\" { fn ")
+                    .and_then(|rest| rest.split('(').next())
+            })
+            .collect();
+        assert_eq!(
+            extern_fns.len(),
+            4,
+            "expected 4 extern C declarations:\n{rust_code}"
+        );
+        let unique: std::collections::HashSet<&str> = extern_fns.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            extern_fns.len(),
+            "colliding extern C bridge symbols: {extern_fns:?}"
+        );
+    }
+
+    #[test]
+    fn const_cpp_method_does_not_shadow_cpp_type_or_namespace_named_c() {
+        let mut top_c = minimal_opaque_cpp_type(cpp(&["C"]));
+        let mut nested_c_foo = minimal_opaque_cpp_type(cpp(&["ns", "C", "Foo"]));
+        let lt_a = Lifetime("a".to_owned());
+        top_c.cpp_methods = vec![ZngurCppMethod {
+            cpp_name: "id".to_owned(),
+            lifetimes: vec![lt_a.clone()],
+            rust_name: None,
+            receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+            receiver_constness: CppConstness::Const,
+            receiver_lifetime: Some(lt_a.clone()),
+            raw_receiver: None,
+            inputs: vec![RustType::Ref(
+                Mutability::Not,
+                Some(lt_a.clone()),
+                Box::new(RustType::CppConst(Box::new(cpp(&["C"])))),
+            )],
+            output: RustType::Ref(
+                Mutability::Not,
+                Some(lt_a.clone()),
+                Box::new(RustType::CppConst(Box::new(cpp(&["C"])))),
+            ),
+            is_safe: true,
+        }];
+        nested_c_foo.cpp_methods = vec![ZngurCppMethod {
+            cpp_name: "get".to_owned(),
+            lifetimes: vec![lt_a.clone()],
+            rust_name: None,
+            receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+            receiver_constness: CppConstness::Const,
+            receiver_lifetime: Some(lt_a),
+            raw_receiver: None,
+            inputs: vec![],
+            output: RustType::Primitive(PrimitiveRustType::Int(32)),
+            is_safe: true,
+        }];
+        let spec = ZngurSpec {
+            types: vec![top_c, nested_c_foo],
+            ..Default::default()
+        };
+        let (rust_code, _h, _cpp) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        assert!(
+            rust_code.contains(
+                "impl<__C0: ::zngur_lib::Constness> C<__C0> {\n#[allow(non_snake_case, \
+                 clippy::too_many_arguments)]\npub fn id<'a, __C1: ::zngur_lib::Constness>(&'a \
+                 self, i1: &'a C::<__C1>, ) -> &'a C::<::zngur_lib::Const>"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains("impl<__C0: ::zngur_lib::Constness> ns::C::Foo<__C0>"),
+            "{rust_code}"
+        );
     }
 }

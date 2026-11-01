@@ -20,13 +20,13 @@ pointer) are always C++ objects, so references to them always say `const` or `va
 &['a] [unique] (const | var) T
 ```
 
-| `.zng`                    | C++                                            | Rust (class `T`)   | Rust (builtin `i32`)                     |
-| ------------------------- | ---------------------------------------------- | ------------------ | ---------------------------------------- |
-| `&'a const T`             | `const T&`                                     | `&'a T<Const>`     | `&'a Cpp<i32, Const>`                    |
-| `&'a var T`               | `T&`, shared                                   | `&'a T`            | `&'a Cpp<i32>`                           |
-| `&'a unique var T`        | `T&`, and Rust has the only access             | `&'a mut T`        | `&'a mut Cpp<i32>`                       |
-| `&'a unique const T`      | `const T&`, and Rust has the only access       | `&'a mut T<Const>` | `&'a mut Cpp<i32, Const>`                |
-| `&'a i32` / `&'a mut i32` | `rust::Ref<int32_t>` / `rust::RefMut<int32_t>` | —                  | `&'a i32` / `&'a mut i32` (a Rust value) |
+| `.zng`                    | C++                                                                                                                | Rust (class `T`)   | Rust (builtin `i32`)                     |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------ | ---------------------------------------- |
+| `&'a const T`             | `const T&`                                                                                                         | `&'a T<Const>`     | `&'a Cpp<i32, Const>`                    |
+| `&'a var T`               | `T&`, shared                                                                                                       | `&'a T`            | `&'a Cpp<i32>`                           |
+| `&'a unique var T`        | `T&`, and Rust has the only access                                                                                 | `&'a mut T`        | `&'a mut Cpp<i32>`                       |
+| `&'a unique const T`      | `const T&`, and Rust has the only access                                                                           | `&'a mut T<Const>` | `&'a mut Cpp<i32, Const>`                |
+| `&'a i32` / `&'a mut i32` | `const int32_t&` / `int32_t&` (or `rust::Ref<int32_t>` / `rust::RefMut<int32_t>` in `extern "C++"` and Rust items) | —                  | `&'a i32` / `&'a mut i32` (a Rust value) |
 
 - **Sharing is the default.** `&'a const T` and `&'a var T` are shared references: Rust may have
   others, and C++ may have others too. A `var` object can change through any of them. That's

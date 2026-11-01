@@ -52,6 +52,10 @@ extern "C" {
   {% endif %}
 {% endfor %}
 
+{% for bridge in self.cpp_method_bridges %}
+  {{ bridge }}
+{% endfor %}
+
 } // extern "C"
 
 {% if let Some(coro) = self.coro_support %}

@@ -944,12 +944,90 @@ type crate::Holder<Box<dyn for<'b> Fn(&'b str)>> {
 }
 
 #[test]
+fn reparse_cpp_methods() {
+    let _ = check_round_trip(
+        r#"
+#crate my_crate
+type c++::a::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    unsafe fn value(&const self) -> i32;
+    unsafe fn set(&unique var self, i32, const c++::a::B&);
+    safe fn make(i32) -> c++::a::B;
+    unsafe fn get<'a>(&'a const self, i32) -> &'a const i32 as get_const;
+    safe fn type<'a>(&'a const self) -> i32 as kind;
+}
+
+type crate::Foo {
+    #layout(size = 8, align = 4);
+    safe fn get(&self) -> i32;
+    unsafe fn make_raw(i32) -> crate::Foo;
+    fn plain(&mut self);
+}
+        "#,
+        expect![[r#"
+            #crate my_crate
+
+            type c++::a::B {
+                #layout(size = 8, align = 4);
+                #trivially_relocatable;
+
+                unsafe fn value(&const self) -> i32;
+                unsafe fn set(&unique var self, i32, const c++::a::B&);
+                safe fn make(i32) -> c++::a::B;
+                unsafe fn get<'a>(&'a const self, i32) -> &'a const i32 as get_const;
+                safe fn type<'a>(&'a const self) -> i32 as kind;
+            }
+
+            type crate::Foo {
+                #layout(size = 8, align = 4);
+
+                safe fn get(&self) -> i32;
+                unsafe fn make_raw(i32) -> crate::Foo;
+                fn plain(&mut self);
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn reparse_cpp_receivers() {
+    let _ = check_round_trip(
+        r#"
+type c++::a::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe fn get<'a>(&'a const self) -> &'a const i32;
+    safe fn set<'a>(&'a unique var self, &'a const c++::a::B);
+    unsafe fn raw_get(const self*) -> i32;
+    unsafe fn raw_set(self&, i32);
+}
+"#,
+        expect![[r#"
+            type c++::a::B {
+                #layout(size = 8, align = 4);
+                #trivially_relocatable;
+
+                safe fn get<'a>(&'a const self) -> &'a const i32;
+                safe fn set<'a>(&'a unique var self, &'a const c++::a::B);
+                unsafe fn raw_get(const self*) -> i32;
+                unsafe fn raw_set(self&, i32);
+            }
+        "#]],
+    );
+}
+
+#[test]
 fn reparse_cpp_objects() {
     let _ = check_round_trip(
         r#"
 type c++::a::B {
     #layout(size = 16, align = 8);
     #trivially_relocatable;
+    safe fn refs<'a>(&'a const self, &'a const c++::a::B, &'a var c++::a::B, &'a unique var c++::a::B, &'a unique const c++::a::B);
+    safe fn builtins<'a>(&'a var self, &'a const i32, &'a var i32, &'a unique var i32, &'a unique const i32, &'a i32, &'a mut i32) -> &'a var bool;
+    safe fn peek<'a>(&'a unique const self) -> &'a const c++::a::B*;
+    unsafe fn raw(c++::a::B*, const i32*);
 }
 
 type crate::Foo {
@@ -968,6 +1046,11 @@ extern "C++" {
             type c++::a::B {
                 #layout(size = 16, align = 8);
                 #trivially_relocatable;
+
+                safe fn refs<'a>(&'a const self, &'a const c++::a::B, &'a var c++::a::B, &'a unique var c++::a::B, &'a unique const c++::a::B);
+                safe fn builtins<'a>(&'a var self, &'a const i32, &'a var i32, &'a unique var i32, &'a unique const i32, &'a i32, &'a mut i32) -> &'a var bool;
+                safe fn peek<'a>(&'a unique const self) -> &'a const c++::a::B*;
+                unsafe fn raw(c++::a::B*, const i32*);
             }
 
             type crate::Foo {

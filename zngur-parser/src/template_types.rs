@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use zngur_def::{
     CppConstness, Lifetime, Merge, RustPathAndGenerics, RustTrait, RustType, TypeVar,
-    ZngurConstructor, ZngurField, ZngurMethod, ZngurMethodDetails, ZngurType, ZngurVariant,
+    ZngurConstructor, ZngurCppMethod, ZngurField, ZngurMethod, ZngurMethodDetails,
+    ZngurMethodReceiver, ZngurType, ZngurVariant,
 };
 
 fn match_lifetime<'a, 'b>(
@@ -713,6 +714,88 @@ fn substitute_method_vars(
     })
 }
 
+fn substitute_cpp_method_vars(
+    m: &ZngurCppMethod,
+    mapping: &HashMap<&TypeVar, &RustType>,
+    lt_mapping: &HashMap<&Lifetime, Option<&Lifetime>>,
+    target_lts: &HashSet<Lifetime>,
+    fresh_avoid: &HashSet<Lifetime>,
+    outer_in_scope: &HashSet<Lifetime>,
+) -> Result<ZngurCppMethod, OwnedSubstitutionError> {
+    let mut local_avoid = fresh_avoid.clone();
+    local_avoid.extend(m.lifetimes.iter().cloned());
+    let mut method_renames: Vec<(Lifetime, Lifetime)> = Vec::new();
+    let new_method_lts: Vec<Lifetime> = m
+        .lifetimes
+        .iter()
+        .map(|ml| {
+            if target_lts.contains(ml) || outer_in_scope.contains(ml) {
+                let fresh = fresh_lifetime(&ml.0, &local_avoid);
+                local_avoid.insert(fresh.clone());
+                method_renames.push((ml.clone(), fresh.clone()));
+                fresh
+            } else {
+                ml.clone()
+            }
+        })
+        .collect();
+
+    let mut method_in_scope = outer_in_scope.clone();
+    method_in_scope.extend(new_method_lts.iter().cloned());
+
+    let rename_method_lt = |l: &Lifetime| -> Lifetime {
+        method_renames
+            .iter()
+            .find(|(old, _)| old == l)
+            .map(|(_, new)| new.clone())
+            .unwrap_or_else(|| l.clone())
+    };
+    let sub_ty = |ty: &RustType| -> Result<RustType, OwnedSubstitutionError> {
+        let pre = if method_renames.is_empty() {
+            ty.clone()
+        } else {
+            ty.map_free_lifetimes(&mut { rename_method_lt })
+        };
+        substitute_vars(
+            &pre,
+            mapping,
+            lt_mapping,
+            target_lts,
+            &local_avoid,
+            &method_in_scope,
+        )
+        .map_err(|SubstitutionError::UnboundVar(v)| OwnedSubstitutionError::UnboundVar(v.clone()))
+    };
+
+    let receiver_lifetime = match &m.receiver_lifetime {
+        Some(rl) => {
+            let renamed = rename_method_lt(rl);
+            if new_method_lts.contains(&renamed) {
+                Some(renamed)
+            } else {
+                match lt_mapping.get(&renamed) {
+                    Some(bound) => (*bound).cloned(),
+                    None => Some(renamed),
+                }
+            }
+        }
+        None => None,
+    };
+
+    Ok(ZngurCppMethod {
+        cpp_name: m.cpp_name.clone(),
+        lifetimes: new_method_lts,
+        rust_name: m.rust_name.clone(),
+        receiver: m.receiver,
+        receiver_constness: m.receiver_constness,
+        receiver_lifetime,
+        raw_receiver: m.raw_receiver,
+        inputs: m.inputs.iter().map(&sub_ty).collect::<Result<_, _>>()?,
+        output: sub_ty(&m.output)?,
+        is_safe: m.is_safe,
+    })
+}
+
 pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<TemplateMatch> {
     let mut mapping = HashMap::new();
     let mut lt_mapping = HashMap::new();
@@ -760,6 +843,17 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
             fresh_avoid.extend(t.all_lifetimes());
         }
     }
+    for m in &template.cpp_methods {
+        fresh_avoid.extend(m.lifetimes.iter().cloned());
+        if let Some(rl) = &m.receiver_lifetime
+            && !rl.is_builtin()
+        {
+            fresh_avoid.insert(rl.clone());
+        }
+        for t in m.inputs.iter().chain([&m.output]) {
+            fresh_avoid.extend(t.all_lifetimes());
+        }
+    }
     for f in &template.fields {
         fresh_avoid.extend(f.ty.all_lifetimes());
     }
@@ -785,6 +879,7 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
         wellknown_traits,
         exhaustive,
         methods,
+        cpp_methods,
         constructor,
         variants,
         fields,
@@ -806,6 +901,69 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
         target.ty.canonicalize_lifetimes(&target.lifetimes)
     );
     let ty = &target.ty;
+    let mut new_cpp_methods: Vec<ZngurCppMethod> = cpp_methods
+        .iter()
+        .map(|method| {
+            match substitute_cpp_method_vars(
+                method,
+                &mapping,
+                &lt_mapping,
+                &target_lts,
+                &fresh_avoid,
+                &outer_in_scope,
+            ) {
+                Ok(m) => m,
+                Err(OwnedSubstitutionError::UnboundVar(var)) => unreachable!(
+                    "Unbound type variable {} in C++ method {} in template {} for type {}",
+                    var.0,
+                    method.rust_name(),
+                    template.ty,
+                    ty
+                ),
+            }
+        })
+        .collect();
+    let mut new_methods: Vec<ZngurMethodDetails> = Vec::new();
+    for method in methods {
+        let m = match substitute_method_vars(
+            method,
+            &mapping,
+            &lt_mapping,
+            &target_lts,
+            &fresh_avoid,
+            &outer_in_scope,
+        ) {
+            Ok(m) => m,
+            Err(OwnedSubstitutionError::UnboundVar(var)) => unreachable!(
+                "Unbound type variable {} in method {} in template {} for type {}",
+                var.0, method.data.name, template.ty, ty
+            ),
+        };
+        if matches!(ty, RustType::Cpp(_))
+            && let Some(is_safe) = m.data.is_safe
+            && m.data.receiver == ZngurMethodReceiver::Static
+            && m.data.generics.is_empty()
+            && m.use_path.is_none()
+            && m.deref.is_none()
+        {
+            let cpp_name = m.data.name;
+            let rust_name = m.cpp_name.filter(|n| n != &cpp_name);
+            new_cpp_methods.push(ZngurCppMethod {
+                cpp_name,
+                lifetimes: m.data.lifetimes,
+                rust_name,
+                receiver: ZngurMethodReceiver::Static,
+                receiver_constness: CppConstness::Var,
+                receiver_lifetime: None,
+                raw_receiver: None,
+                inputs: m.data.inputs,
+                output: m.data.output,
+                is_safe,
+            });
+        } else {
+            new_methods.push(m);
+        }
+    }
     let new_ty = ZngurType {
         ty: ty.clone(),
         lifetimes: target.lifetimes.clone(),
@@ -813,25 +971,8 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
         trivially_relocatable: *trivially_relocatable,
         wellknown_traits: wellknown_traits.clone(),
         exhaustive: *exhaustive,
-        methods: methods
-            .iter()
-            .map(|method| {
-                match substitute_method_vars(
-                    method,
-                    &mapping,
-                    &lt_mapping,
-                    &target_lts,
-                    &fresh_avoid,
-                    &outer_in_scope,
-                ) {
-                    Ok(m) => m,
-                    Err(OwnedSubstitutionError::UnboundVar(var)) => unreachable!(
-                        "Unbound type variable {} in method {} in template {} for type {}",
-                        var.0, method.data.name, template.ty, ty
-                    ),
-                }
-            })
-            .collect(),
+        cpp_methods: new_cpp_methods,
+        methods: new_methods,
         constructor: constructor.as_ref().map(|constructor| {
             match constructor
                 .inputs
@@ -921,7 +1062,7 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
 }
 
 // Represents a ZngurType created from a template type
-pub struct TemplateMatch(ZngurType);
+pub struct TemplateMatch(pub(crate) ZngurType);
 
 impl Merge<ZngurType> for TemplateMatch {
     fn merge(self, into: &mut ZngurType) -> zngur_def::MergeResult {

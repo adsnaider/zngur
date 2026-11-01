@@ -206,6 +206,36 @@ impl IntoCpp for RustType {
     }
 }
 
+/// The receiver of the Rust function for a C++ member function.
+pub enum CppRustReceiver {
+    /// A static member function.
+    Static,
+    /// A method: `&'a self` (a shared receiver, `&'a const self` / `&'a var self`) or
+    /// `&'a mut self` (a unique one).
+    Ref {
+        mutability: Mutability,
+        constness: CppConstness,
+        lifetime: Option<Lifetime>,
+    },
+    /// An associated function taking `*const Self` (`const` member functions) or `*mut Self`.
+    Raw { constness: CppConstness },
+}
+
+impl CppRustReceiver {
+    /// Whether it's for a `const` member function, which both constnesses have.
+    fn is_const(&self) -> bool {
+        matches!(
+            self,
+            CppRustReceiver::Ref {
+                constness: CppConstness::Const,
+                ..
+            } | CppRustReceiver::Raw {
+                constness: CppConstness::Const
+            }
+        )
+    }
+}
+
 pub struct RustFile {
     pub text: String,
     pub panic_to_exception: bool,
@@ -1210,6 +1240,87 @@ pub {}fn {rust_name}{params}("#,
         wln!(self, ") -> {output} {{ unsafe {{");
         self.call_cpp_function(&format!("{mangled_name}("), inputs.len());
         wln!(self, "}} }}");
+        mangled_name
+    }
+
+    /// Adds the Rust function for a C++ member function of `owner`, which calls the C++ bridge
+    /// function whose (mangled) name is returned. `const` member functions are in an `impl<C>
+    /// T<C>` block, so both constnesses have them, and the others in an `impl T` (`T<NonConst>`)
+    /// block. `inputs` and `output` are their Rust types.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_cpp_method(
+        &mut self,
+        owner: &RustType,
+        rust_name: &str,
+        lifetimes: &[Lifetime],
+        receiver: CppRustReceiver,
+        inputs: &[RustType],
+        output: &RustType,
+        is_safe: bool,
+    ) -> String {
+        let mangled_name = self.mangle_name(&format!("_c++::{owner}=cpp_method={rust_name}"));
+        let has_this = !matches!(receiver, CppRustReceiver::Static);
+        let n_args = inputs.len() + usize::from(has_this);
+        w!(
+            self,
+            r#"
+unsafe extern "C" {{ fn {mangled_name}("#
+        );
+        for n in 0..n_args {
+            w!(self, "i{n}: *mut u8, ");
+        }
+        wln!(self, r#"o: *mut u8); }}"#);
+        let target = owner.to_string();
+        let impl_header = if receiver.is_const() {
+            format!("impl<__C0: ::zngur_lib::Constness> {target}<__C0>")
+        } else {
+            format!("impl {target}")
+        };
+        let offset = usize::from(has_this);
+        let (params, input_tys) = cpp_fn_inputs(lifetimes, inputs);
+        w!(
+            self,
+            r#"
+{impl_header} {{
+#[allow(non_snake_case, clippy::too_many_arguments)]
+pub {}fn {rust_name}{params}("#,
+            if is_safe { "" } else { "unsafe " },
+        );
+        match &receiver {
+            CppRustReceiver::Static => {}
+            CppRustReceiver::Ref {
+                mutability,
+                lifetime,
+                ..
+            } => {
+                let lifetime = lifetime
+                    .as_ref()
+                    .map(|l| format!("{l} "))
+                    .unwrap_or_default();
+                let m = if *mutability == Mutability::Mut {
+                    "mut "
+                } else {
+                    ""
+                };
+                w!(self, "&{lifetime}{m}self, ");
+            }
+            CppRustReceiver::Raw { constness } => {
+                let ptr = match constness {
+                    CppConstness::Var => "*mut",
+                    CppConstness::Const => "*const",
+                };
+                w!(self, "i0: {ptr} Self, ");
+            }
+        }
+        for (n, ty) in input_tys.iter().enumerate() {
+            w!(self, "i{}: {ty}, ", n + offset);
+        }
+        wln!(self, ") -> {output} {{ unsafe {{");
+        if matches!(receiver, CppRustReceiver::Ref { .. }) {
+            wln!(self, "let i0 = self;");
+        }
+        self.call_cpp_function(&format!("{mangled_name}("), n_args);
+        wln!(self, "}} }} }}");
         mangled_name
     }
 

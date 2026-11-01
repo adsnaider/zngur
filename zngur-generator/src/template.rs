@@ -596,6 +596,7 @@ pub(crate) struct CppSourceTemplate<'a> {
     pub(crate) trait_defs: &'a IndexMap<RustTrait, CppTraitDefinition>,
     pub(crate) exported_fn_defs: &'a Vec<CppExportedFnDefinition>,
     pub(crate) exported_impls: &'a Vec<CppExportedImplDefinition>,
+    pub(crate) cpp_method_bridges: &'a Vec<String>,
     pub(crate) cpp_namespace: &'a str,
     pub(crate) coro_support: &'a Option<crate::rust::CoroSupport>,
 }
