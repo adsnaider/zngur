@@ -77,8 +77,11 @@ It's also `Debug`, `PartialEq` (with `Cpp<T, _>` and `T`) and `PartialOrd` (with
 through `get`.
 
 ```rust
+let count: &Cpp<i32> = counter.count_var(); // `field &var count (type = i32) as count_var;`
+count.set(count.get() + 1);
+
 let mut sum = 0;
-generated::sum_into(&point, Cpp::from_mut(&mut sum));
+counter.add_to(Cpp::from_mut(&mut sum)); // `safe fn add_to<'a>(&'a const self, &'a unique var i32);`
 ```
 
 There's no `Cpp::from_ref(&T) -> &Cpp<T, _>`: C++ could change a `Cpp<T>` behind it (`set` is
@@ -87,10 +90,12 @@ doesn't change it either, which a `&T` promises.
 
 ### Pointers
 
-C++ pointers are builtins too. Pointers to pointers are pointers to `Cpp`: `c++::Node**` is a
-`*mut Cpp<*mut Node>`, just like `i32*` is a `*mut Cpp<i32>`. In a reference to a pointer, the
-leading `const` or `var` qualifies the pointer itself: `&'a const c++::Node*` is `Node* const&`,
-whereas `&'a const c++::Node const*` is `const Node* const&`.
+C++ pointers are builtins too. A field of type `c++::Node*` is a `Cpp<*mut Node>` behind a
+reference (`unsafe field &var next (type = c++::Node*)` returns a `&Cpp<*mut Node>`, which can be
+`set`), and a `*mut Node` when it's copied. Pointers to pointers are pointers to `Cpp`:
+`c++::Node**` is a `*mut Cpp<*mut Node>`, just like `i32*` is a `*mut Cpp<i32>`. In a reference to
+a pointer, the leading `const` or `var` qualifies the pointer itself: `&'a const c++::Node*` is
+`Node* const&`, whereas `&'a const c++::Node const*` is `const Node* const&`.
 
 ## Raw pointers
 
@@ -98,3 +103,9 @@ C++-style references and pointers (`const T&`, `T*`, ...) point to C++ objects a
 Rust types are the same: `const T*` is `*const T<Const>` (`*const Cpp<i32, Const>` for a builtin),
 and `T*` is `*mut T` (`*mut Cpp<i32>`). As parameters, `const` ones are generic over the constness
 (`*const T<C1>`), like references. See [C++ references and pointers](./cpp_pointers.md).
+
+## Fields
+
+[Field accessors](./cpp_fields.md) use the same words: `field &const x`, `field &var x`,
+`field &unique var x` and `field &unique const x` return references, and `field const x` /
+`field var x` return copies (`Cpp<i32, Const>` / `i32`, or `T<Const>` / `T` for a class).

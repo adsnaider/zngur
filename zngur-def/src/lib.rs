@@ -398,6 +398,81 @@ mod tests {
     }
 
     #[test]
+    fn test_cpp_field_accessors() {
+        let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+        let field = |access, is_safe| ZngurCppField {
+            name: "x".to_owned(),
+            rust_name: None,
+            ty: i32.clone(),
+            access,
+            is_safe,
+        };
+        let f = field(
+            CppFieldAccess::Ref {
+                unique: true,
+                constness: CppConstness::Var,
+            },
+            true,
+        );
+        assert_eq!(
+            f.access.receiver(),
+            CppMethodReceiver::Ref {
+                mutability: Mutability::Mut,
+                constness: CppConstness::Var,
+                lifetime: None,
+            }
+        );
+        assert_eq!(f.output().to_string(), "&mut ::zngur_lib::Cpp<i32>");
+        assert!(f.is_safe);
+        let f = field(
+            CppFieldAccess::Ref {
+                unique: true,
+                constness: CppConstness::Const,
+            },
+            true,
+        );
+        assert_eq!(
+            f.access.receiver(),
+            CppMethodReceiver::Ref {
+                mutability: Mutability::Mut,
+                constness: CppConstness::Var,
+                lifetime: None,
+            }
+        );
+        assert_eq!(
+            f.output().to_string(),
+            "&mut ::zngur_lib::Cpp<i32, ::zngur_lib::Const>"
+        );
+        let f = field(
+            CppFieldAccess::Copy {
+                constness: CppConstness::Const,
+            },
+            false,
+        );
+        assert_eq!(
+            f.access.receiver(),
+            CppMethodReceiver::Ref {
+                mutability: Mutability::Not,
+                constness: CppConstness::Const,
+                lifetime: None,
+            }
+        );
+        assert_eq!(
+            f.output().to_string(),
+            "::zngur_lib::Cpp<i32, ::zngur_lib::Const>"
+        );
+        assert!(!f.is_safe);
+        let f = field(
+            CppFieldAccess::Copy {
+                constness: CppConstness::Var,
+            },
+            true,
+        );
+        assert_eq!(f.access.receiver_constness(), CppConstness::Const);
+        assert_eq!(f.output(), i32);
+    }
+
+    #[test]
     fn test_cpp_display() {
         let cpp = RustType::Cpp(vec!["a".to_owned(), "b".to_owned(), "Name".to_owned()]);
         assert_eq!(cpp.to_string(), "a::b::Name");
@@ -693,6 +768,8 @@ pub struct ZngurType {
     pub cpp_methods: Vec<ZngurCppMethod>,
     /// The C++ constructors of a C++ type that Rust holds by value.
     pub cpp_constructors: Vec<ZngurCppConstructor>,
+    /// Accessors for the fields of a C++ type.
+    pub cpp_fields: Vec<ZngurCppField>,
     pub constructor: Option<ZngurConstructor>,
     pub variants: Vec<ZngurVariant>,
     pub fields: Vec<ZngurField>,
@@ -748,6 +825,9 @@ impl ZngurType {
             for t in &c.inputs {
                 out.extend(t.all_lifetimes());
             }
+        }
+        for f in &self.cpp_fields {
+            out.extend(f.ty.all_lifetimes());
         }
         for f in &self.fields {
             out.extend(f.ty.all_lifetimes());
@@ -927,6 +1007,99 @@ pub struct ZngurCppConstructor {
     pub lifetimes: Vec<Lifetime>,
     pub inputs: Vec<RustType>,
     pub is_safe: bool,
+}
+
+/// An accessor for a field (data member) of a C++ type, declared like
+/// `field &const x (type = i32);`, `field &unique var x (type = i32) as x_mut;` or
+/// `unsafe field &var next (type = c++::Node*) as next_var;`. zngur generates a method that
+/// returns a reference to the field (`&Cpp<i32, Const>`, `&mut Cpp<i32>`, ...) or a copy of it
+/// (see [`CppFieldAccess`]).
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct ZngurCppField {
+    /// The name of the C++ field.
+    pub name: String,
+    /// The name of the Rust function (from `as`), if it isn't `name`.
+    pub rust_name: Option<String>,
+    /// The type of the field.
+    pub ty: RustType,
+    /// What the accessor returns.
+    pub access: CppFieldAccess,
+    /// Whether calling the generated Rust accessor is safe (`true` by default, or `false` for
+    /// `unsafe field`).
+    pub is_safe: bool,
+}
+
+/// What a C++ field accessor ([`ZngurCppField`]) returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CppFieldAccess {
+    /// A reference to the field (`field &[unique] (const | var) x ...`): `&'a [unique] const T` or
+    /// `&'a [unique] var T`, through a receiver of the same kind (`&'a [unique] const self`, ...).
+    Ref {
+        unique: bool,
+        constness: CppConstness,
+    },
+    /// A copy of the field (`field (const | var) x ...`): a `const T` (`T<Const>` /
+    /// `Cpp<i32, Const>` in Rust) or a `T` (`T` / `i32`). Copying only reads the field, so the
+    /// accessor is a `&'a const self` method either way.
+    Copy { constness: CppConstness },
+}
+
+impl CppFieldAccess {
+    /// Receiver constness: `unique` reference accessors require a non-`const` receiver
+    /// (`Owner<NonConst>`) even when `constness` is `Const`, because `&mut` in Rust allows
+    /// replacing a `Sized` field value via `*r = ...` or `core::mem::swap`.
+    pub fn receiver_constness(self) -> CppConstness {
+        match self {
+            Self::Ref { unique: true, .. } => CppConstness::Var,
+            Self::Ref {
+                unique: false,
+                constness,
+            } => constness,
+            Self::Copy { .. } => CppConstness::Const,
+        }
+    }
+
+    /// The accessor's receiver (`&self` or `&mut self`, with [`Self::receiver_constness`]).
+    pub fn receiver(self) -> CppMethodReceiver {
+        let mutability = match self {
+            Self::Ref { unique: true, .. } => Mutability::Mut,
+            Self::Ref { unique: false, .. } | Self::Copy { .. } => Mutability::Not,
+        };
+        CppMethodReceiver::Ref {
+            mutability,
+            constness: self.receiver_constness(),
+            lifetime: None,
+        }
+    }
+}
+
+impl ZngurCppField {
+    /// The name of the Rust function.
+    pub fn rust_name(&self) -> &str {
+        self.rust_name.as_deref().unwrap_or(&self.name)
+    }
+
+    /// The Rust return type of the accessor: a reference (`&'a [unique] (const | var) T`) or a
+    /// copy (`const T` or `T`).
+    pub fn output(&self) -> RustType {
+        match self.access {
+            CppFieldAccess::Ref { unique, constness } => RustType::Ref(
+                if unique {
+                    Mutability::Mut
+                } else {
+                    Mutability::Not
+                },
+                None,
+                Box::new(RustType::cpp_object(constness, self.ty.clone())),
+            ),
+            CppFieldAccess::Copy {
+                constness: CppConstness::Const,
+            } => RustType::cpp_object(CppConstness::Const, self.ty.clone()),
+            CppFieldAccess::Copy {
+                constness: CppConstness::Var,
+            } => self.ty.clone(),
+        }
+    }
 }
 
 /// A free C++ function, declared with a `c++::` path or in a `c++::` scope like

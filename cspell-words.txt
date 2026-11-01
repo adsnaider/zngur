@@ -4,6 +4,7 @@ assocs
 autozng
 barbaz
 barbazxxx
+bitfields
 blobstore
 cerr
 chumsky
@@ -140,3 +141,5 @@ compl
 consteval
 constinit
 reflexpr
+addressof
+bitfield
