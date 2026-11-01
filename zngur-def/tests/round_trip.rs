@@ -131,6 +131,7 @@ fn check_round_trip_with_resolver(
         parsed.spec.convert_panic_to_exception,
         reparsed.spec.convert_panic_to_exception
     );
+    assert_eq!(parsed.spec.crate_name, reparsed.spec.crate_name);
 
     (parsed.spec, reparsed.spec)
 }
@@ -713,7 +714,8 @@ fn reparse_all_examples() {
             extern_cpp_impls,
             imported_modules,
             additional_includes,
-            convert_panic_to_exception
+            convert_panic_to_exception,
+            crate_name
         );
     }
     assert!(
@@ -723,4 +725,71 @@ fn reparse_all_examples() {
         files.len(),
         failures.join("\n\n========\n\n")
     );
+}
+
+#[test]
+fn reparse_crate_directive() {
+    let _ = check_round_trip(
+        r#"
+#crate bar_bindings
+
+type c++::ns::Bar {
+}
+    "#,
+        expect![[r#"
+            #crate bar_bindings
+
+            type c++::ns::Bar {
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn reparse_resolved_module_imports_including_nested_merge_rebasing() {
+    let resolver = MockFilesystem::new(vec![
+        (
+            "./sub/part.zng",
+            "import \"./bar.zng\";\nimport \"../other/baz.zng\";\n",
+        ),
+        (
+            "./sub/bar.zng",
+            "#crate bar_bindings\ntype c++::ns::Bar {}\n",
+        ),
+        (
+            "./other/baz.zng",
+            "#crate baz_bindings\ntype c++::ns::Baz {\n    #layout(size = 8, align = 4);\n    #trivially_relocatable;\n}\n",
+        ),
+    ]);
+    let (parsed, reparsed) = check_round_trip_with_resolver(
+        r#"
+#crate app_crate
+merge "./sub/part.zng";
+
+mod crate {
+    fn use_imported(&c++::ns::Bar, c++::ns::Baz);
+}
+    "#,
+        Some(Box::new(resolver)),
+        expect![[r#"
+            import "./sub/bar.zng";
+            import "./other/baz.zng";
+
+            #crate app_crate
+
+            mod crate {
+                fn use_imported(&c++::ns::Bar, c++::ns::Baz);
+            }
+        "#]],
+    );
+    assert_eq!(parsed.imported_modules.len(), 2);
+    assert_eq!(
+        parsed.imported_modules[0].crate_name.as_deref(),
+        Some("bar_bindings")
+    );
+    assert_eq!(
+        parsed.imported_modules[1].crate_name.as_deref(),
+        Some("baz_bindings")
+    );
+    assert_eq!(parsed.imported_modules, reparsed.imported_modules);
 }

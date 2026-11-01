@@ -297,6 +297,10 @@ impl WriteIDL for crate::ZngurSpec {
             separate(p)?;
             writeln!(p, "#convert_panic_to_exception")?;
         }
+        if let Some(crate_name) = &self.crate_name {
+            separate(p)?;
+            writeln!(p, "#crate {crate_name}")?;
+        }
         if !self.additional_includes.0.is_empty() {
             separate(p)?;
             let includes = &self.additional_includes.0;
