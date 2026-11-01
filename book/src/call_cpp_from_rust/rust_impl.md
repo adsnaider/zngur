@@ -88,7 +88,8 @@ extern "C++" {
 }
 ```
 
-There, references to C++ objects, and the receivers, are C++ references (see
+There, references to C++ objects, and the receivers, are C++ references, and nullable references
+(`::std::option::Option<&'a const c++::geo::Point>`) are C++ pointers (see
 [C++ references and pointers](./cpp_pointers.md#in-c)):
 
 ```C++
