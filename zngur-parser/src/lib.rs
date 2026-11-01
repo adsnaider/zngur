@@ -547,16 +547,20 @@ enum ParsedTypeItem<'a> {
         field: &'a str,
         cpp_type: &'a str,
     },
+    // For the `#cpp_*` directives, `cpp_type` is `None` if the C++ type name is omitted, which is
+    // allowed for `c++::` types: the name is the type's path.
     CppHeapAllocated {
-        cpp_type: &'a str,
+        cpp_type: Option<&'a str>,
     },
     CppRef {
-        cpp_type: &'a str,
+        cpp_type: Option<&'a str>,
     },
     CppStackOwned {
-        cpp_type: &'a str,
+        cpp_type: Option<&'a str>,
         props: Option<Vec<(Spanned<&'a str>, usize)>>,
     },
+    /// `#trivially_relocatable`.
+    TriviallyRelocatable,
     MatchOnCfg(Condition<CfgConditional<'a>, ParsedTypeItem<'a>, NItems>),
 }
 
@@ -603,6 +607,27 @@ impl ParsedMethod<'_> {
 struct MergeContext {
     outer_ty: RustType,
     variant: Option<String>,
+}
+
+/// The C++ type name of a `#cpp_heap_allocated`, `#cpp_ref` or `#cpp_stack_owned` directive on
+/// `ty`: the explicit one if given, otherwise the path of a `c++::` type (`c++::a::B` is `::a::B`).
+fn cpp_type_name(
+    explicit: Option<&str>,
+    ty: &RustType,
+    span: Span,
+    ctx: &mut ParseContext,
+) -> Option<String> {
+    match (explicit, ty.cpp_spelling()) {
+        (Some(name), _) => Some(name.to_owned()),
+        (None, Some(name)) => Some(name),
+        (None, None) => {
+            ctx.add_error_str(
+                "the C++ type name can only be omitted for `c++::` types, whose path is the name",
+                span,
+            );
+            None
+        }
+    }
 }
 
 fn checked_merge<T, U>(
@@ -867,6 +892,7 @@ impl ProcessedItem<'_> {
                 let mut cpp_heap_allocated = None;
                 let mut cpp_ref = None;
                 let mut cpp_stack_owned = None;
+                let mut trivially_relocatable = false;
                 let mut to_process = items;
                 to_process.reverse(); // create a stack of items to process
                 let check_size_align = |props: Vec<(Spanned<&str>, usize)>| {
@@ -954,6 +980,12 @@ impl ProcessedItem<'_> {
                             }
                         }
                         ParsedTypeItem::Traits(tr) => {
+                            for t in &tr {
+                                ctx.record_span(
+                                    &PartialSpanKey::WellknownTrait(rust_ty.clone(), t.inner),
+                                    t.span.into_range(),
+                                );
+                            }
                             wellknown_traits.extend(tr);
                         }
                         ParsedTypeItem::NonExhaustive => {
@@ -1105,7 +1137,11 @@ impl ProcessedItem<'_> {
                             cpp_heap_allocated = Some(cpp);
                         }
                         ParsedTypeItem::CppHeapAllocated { cpp_type } => {
-                            let cpp = CppHeapAllocated(cpp_type.to_owned());
+                            let Some(cpp_type) = cpp_type_name(cpp_type, &rust_ty, item_span, ctx)
+                            else {
+                                continue;
+                            };
+                            let cpp = CppHeapAllocated(cpp_type);
                             ctx.record_span(
                                 &cpp.into_span_key_with(rust_ty.clone()),
                                 item_span.into_range(),
@@ -1113,6 +1149,10 @@ impl ProcessedItem<'_> {
                             cpp_heap_allocated = Some(cpp);
                         }
                         ParsedTypeItem::CppRef { cpp_type } => {
+                            let Some(cpp_type) = cpp_type_name(cpp_type, &rust_ty, item_span, ctx)
+                            else {
+                                continue;
+                            };
                             match layout_span {
                                 Some(span) => {
                                     ctx.add_error_str("Duplicate layout policy found", span);
@@ -1123,7 +1163,7 @@ impl ProcessedItem<'_> {
                                     layout_span = Some(item_span);
                                 }
                             }
-                            let cpp = CppRef(cpp_type.to_owned());
+                            let cpp = CppRef(cpp_type);
                             ctx.record_span(
                                 &cpp.into_span_key_with(rust_ty.clone()),
                                 item_span.into_range(),
@@ -1131,6 +1171,10 @@ impl ProcessedItem<'_> {
                             cpp_ref = Some(cpp);
                         }
                         ParsedTypeItem::CppStackOwned { cpp_type, props } => {
+                            let Some(cpp_type) = cpp_type_name(cpp_type, &rust_ty, item_span, ctx)
+                            else {
+                                continue;
+                            };
                             let has_legacy_props = props.is_some();
                             if let Some(props) = props {
                                 let size = props
@@ -1157,7 +1201,7 @@ impl ProcessedItem<'_> {
                                     .finish();
                                 ctx.add_fatal_report(report);
                             }
-                            let cpp = CppStackOwned(cpp_type.to_owned());
+                            let cpp = CppStackOwned(cpp_type);
                             ctx.record_span(
                                 &cpp.into_span_key_with(rust_ty.clone()),
                                 item_span.into_range(),
@@ -1166,6 +1210,21 @@ impl ProcessedItem<'_> {
                             if has_legacy_props && layout.is_none() {
                                 layout = Some(LayoutPolicy::ZERO_SIZED_TYPE);
                             }
+                        }
+                        ParsedTypeItem::TriviallyRelocatable => {
+                            if !is_template && !matches!(rust_ty, RustType::Cpp(_)) {
+                                ctx.add_error_str(
+                                    "`#trivially_relocatable` is only for `c++::` types (Rust types \
+                                     are always trivially relocatable)",
+                                    item_span,
+                                );
+                                continue;
+                            }
+                            ctx.record_span(
+                                &PartialSpanKey::TriviallyRelocatable(rust_ty.clone()),
+                                item_span.into_range(),
+                            );
+                            trivially_relocatable = true;
                         }
                         ParsedTypeItem::MatchOnCfg(match_) => {
                             let result = match_.eval(ctx);
@@ -1220,6 +1279,7 @@ impl ProcessedItem<'_> {
                     cpp_heap_allocated,
                     cpp_ref,
                     cpp_stack_owned,
+                    trivially_relocatable,
                 };
                 if is_template {
                     r.templates.push(TemplateDef {
@@ -1524,6 +1584,12 @@ enum PartialSpanKey {
     /// a [`CppStackOwned`](zngur_def::CppStackOwned)
     /// outer_ty
     CppStackOwned(RustType),
+    /// a `#trivially_relocatable` directive
+    /// outer_ty
+    TriviallyRelocatable(RustType),
+    /// a [`ZngurWellknownTrait`](zngur_def::ZngurWellknownTrait)
+    /// outer_ty, trait
+    WellknownTrait(RustType, ZngurWellknownTrait),
     /// a [`Method`](zngur_def::ZngurMethod) on a
     /// [`Type`](zngur_def::ZngurType) or [`Trait`](zngur_def::ZngurTrait)
     /// outer_ty, method
@@ -2528,7 +2594,38 @@ impl ZngurSpecBuilder {
                 ctx.add_fatal_report(report.finish());
                 continue;
             }
-            if ty.layout.is_none() {
+            if ty.wellknown_traits.contains(&ZngurWellknownTrait::Unsized)
+                && (matches!(ty.ty, RustType::Cpp(_)) || !cpp_directives.is_empty())
+            {
+                let unsized_spans = ctx.fetch_spans_global(&PartialSpanKey::WellknownTrait(
+                    ty.ty.clone(),
+                    ZngurWellknownTrait::Unsized,
+                ));
+                let report_span = unsized_spans
+                    .last()
+                    .copied()
+                    .cloned()
+                    .or_else(|| template_locations.last().cloned())
+                    .or_else(|| ctx.fetch_spans_global(ty).first().copied().cloned())
+                    .unwrap_or((0, 0usize..0));
+                let msg = "`?Sized` is not supported on C++ types; a `c++::` type without a \
+                           layout is already reference-only";
+                ctx.add_fatal_report(
+                    Report::build(ReportKind::Error, report_span.clone())
+                        .with_message(msg)
+                        .with_label(
+                            Label::new(report_span)
+                                .with_message(msg)
+                                .with_color(Color::Red),
+                        )
+                        .finish(),
+                );
+                continue;
+            }
+            let needs_layout = !matches!(ty.ty, RustType::Cpp(_))
+                || ty.cpp_stack_owned.is_some()
+                || ty.cpp_heap_allocated.is_some();
+            if ty.layout.is_none() && needs_layout {
                 let spans = ctx.fetch_spans_global(ty);
                 let (first, rest) = {
                     let mut it = spans.into_iter();
@@ -2540,6 +2637,10 @@ impl ZngurSpecBuilder {
                 if ty.cpp_stack_owned.is_some() {
                     report = report.with_note(
                         "Type is declared with `#cpp_stack_owned` which requires a layout directive like `#layout(size = X, align = Y)` or `#layout_conservative(size = X, align = Y)`.",
+                    );
+                } else if ty.cpp_heap_allocated.is_some() && matches!(ty.ty, RustType::Cpp(_)) {
+                    report = report.with_note(
+                        "Type is declared with `#cpp_heap_allocated` which requires `#layout(size = 16, align = 8)` or `#heap_allocated`.",
                     );
                 } else {
                     report = report.with_note(
@@ -2570,7 +2671,7 @@ impl ZngurSpecBuilder {
                     }
                 }
                 let t_count = template_locations.len();
-                for (i, location) in template_locations.into_iter().enumerate() {
+                for (i, location) in template_locations.iter().cloned().enumerate() {
                     report = report.with_label(
                         Label::new(location)
                             .with_message("Matching template defined here")
@@ -2633,6 +2734,86 @@ impl ZngurSpecBuilder {
                 }
 
                 ctx.add_fatal_report(report.finish());
+            } else if matches!(ty.ty, RustType::Cpp(_))
+                && (matches!(ty.layout, Some(LayoutPolicy::OnlyByRef))
+                    || (matches!(ty.layout, Some(LayoutPolicy::HeapAllocated))
+                        && ty.cpp_heap_allocated.is_none()))
+            {
+                let layout_spans = ctx.fetch_spans_global(&PartialSpanKey::Layout(ty.ty.clone()));
+                let report_span = layout_spans
+                    .last()
+                    .copied()
+                    .cloned()
+                    .or_else(|| template_locations.last().cloned())
+                    .or_else(|| ctx.fetch_spans_global(ty).first().copied().cloned())
+                    .unwrap_or((0, 0usize..0));
+                let msg = "`#heap_allocated` and `#only_by_ref` are for Rust types; a `c++::` \
+                           type without a layout is already reference-only";
+                ctx.add_fatal_report(
+                    Report::build(ReportKind::Error, report_span.clone())
+                        .with_message(msg)
+                        .with_label(
+                            Label::new(report_span)
+                                .with_message(msg)
+                                .with_color(Color::Red),
+                        )
+                        .finish(),
+                );
+            }
+            if ty.trivially_relocatable {
+                let tr_spans =
+                    ctx.fetch_spans_global(&PartialSpanKey::TriviallyRelocatable(ty.ty.clone()));
+                let tr_span = tr_spans
+                    .last()
+                    .copied()
+                    .cloned()
+                    .or_else(|| template_locations.last().cloned())
+                    .or_else(|| ctx.fetch_spans_global(ty).first().copied().cloned())
+                    .unwrap_or((0, 0usize..0));
+                if !matches!(ty.ty, RustType::Cpp(_)) {
+                    let msg = "`#trivially_relocatable` is only for `c++::` types (Rust types \
+                               are always trivially relocatable)";
+                    ctx.add_fatal_report(
+                        Report::build(ReportKind::Error, tr_span.clone())
+                            .with_message(msg)
+                            .with_label(
+                                Label::new(tr_span).with_message(msg).with_color(Color::Red),
+                            )
+                            .finish(),
+                    );
+                } else if !cpp_directives.is_empty() {
+                    let msg = "`#trivially_relocatable` cannot be combined with \
+                               `#cpp_stack_owned`, `#cpp_ref`, or `#cpp_heap_allocated`";
+                    let mut report = Report::build(ReportKind::Error, tr_span.clone())
+                        .with_message(msg)
+                        .with_label(
+                            Label::new(tr_span)
+                                .with_message("`#trivially_relocatable` declared here")
+                                .with_color(Color::Red),
+                        );
+                    for (dir_name, dir_key) in &cpp_directives {
+                        if let Some(span) = ctx.fetch_spans_global(dir_key).last() {
+                            report = report.with_label(
+                                Label::new((*span).clone())
+                                    .with_message(format!("`{dir_name}` declared here"))
+                                    .with_color(Color::Yellow),
+                            );
+                        }
+                    }
+                    ctx.add_fatal_report(report.finish());
+                } else if ty.cpp_by_value_layout().is_none() {
+                    let msg = "`#trivially_relocatable` needs a `#layout(...)` or \
+                               `#layout_conservative(...)`, which Rust needs to hold the C++ type \
+                               by value";
+                    ctx.add_fatal_report(
+                        Report::build(ReportKind::Error, tr_span.clone())
+                            .with_message(msg)
+                            .with_label(
+                                Label::new(tr_span).with_message(msg).with_color(Color::Red),
+                            )
+                            .finish(),
+                    );
+                }
             }
         }
         spec
@@ -3312,21 +3493,30 @@ fn inner_type_item<'a>()
         });
     let cpp_heap_allocated = just(Token::Sharp)
         .then(just(Token::Ident("cpp_heap_allocated")))
-        .ignore_then(select! {
-            Token::Str(c) => c,
-        })
+        .ignore_then(
+            select! {
+                Token::Str(c) => c,
+            }
+            .or_not(),
+        )
         .map(|cpp_type| ParsedTypeItem::CppHeapAllocated { cpp_type });
     let cpp_ref = just(Token::Sharp)
         .then(just(Token::Ident("cpp_ref")))
-        .ignore_then(select! {
-            Token::Str(c) => c,
-        })
+        .ignore_then(
+            select! {
+                Token::Str(c) => c,
+            }
+            .or_not(),
+        )
         .map(|x| ParsedTypeItem::CppRef { cpp_type: x });
     let cpp_stack_owned = just(Token::Sharp)
         .then(just(Token::Ident("cpp_stack_owned")))
-        .ignore_then(select! {
-            Token::Str(c) => c,
-        })
+        .ignore_then(
+            select! {
+                Token::Str(c) => c,
+            }
+            .or_not(),
+        )
         .then(
             property_item
                 .clone()
@@ -3337,6 +3527,8 @@ fn inner_type_item<'a>()
                 .boxed(),
         )
         .map(|(cpp_type, props)| ParsedTypeItem::CppStackOwned { cpp_type, props });
+    let trivially_relocatable = just([Token::Sharp, Token::Ident("trivially_relocatable")])
+        .to(ParsedTypeItem::TriviallyRelocatable);
 
     let variant = just(Token::Ident("variant"))
         .ignore_then(select! { Token::Ident(c) => c })
@@ -3361,6 +3553,7 @@ fn inner_type_item<'a>()
             cpp_heap_allocated.boxed(),
             cpp_ref.boxed(),
             cpp_stack_owned.boxed(),
+            trivially_relocatable.boxed(),
             method()
                 .then(
                     just(Token::KwUse)
