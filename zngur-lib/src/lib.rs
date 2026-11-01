@@ -15,6 +15,10 @@ pub unsafe trait ZngCppObject: Sized {}
 /// `Foo<Const>` is explicit (`as_const()`), and there's no way back. Builtins have the same
 /// parameter through [`Cpp<T, C>`](Cpp).
 ///
+/// Like in C++, passing a non-`const` object where C++ takes a `const` one is implicit: the
+/// arguments of C++ functions that are `const` objects are generic over their constness, e.g.
+/// `&'a Foo<C1>` for a `&'a const Foo`.
+///
 /// ```compile_fail
 /// # use core::marker::PhantomData;
 /// # use zngur_lib::*;
@@ -112,7 +116,7 @@ impl<T: ?Sized, C: Constness> From<Cpp<*mut T, C>> for *mut T {
 ///
 /// ```compile_fail
 /// # use zngur_lib::*;
-/// let x: Cpp<i32, Const> = Cpp::new(1);
+/// let x: Cpp<i32, Const> = Cpp::new_const(1);
 /// x.set(2); // Error: `set` only exists for `Cpp<i32, NonConst>`.
 /// ```
 #[repr(transparent)]
@@ -122,14 +126,6 @@ pub struct Cpp<T: CppRustBuiltin, C: Constness = NonConst> {
 }
 
 impl<T: CppRustBuiltin, C: Constness> Cpp<T, C> {
-    /// A C++ object with the value `value`.
-    pub const fn new(value: T) -> Self {
-        Cpp {
-            value: core::cell::UnsafeCell::new(value),
-            _constness: core::marker::PhantomData,
-        }
-    }
-
     /// The value, consuming the object.
     pub fn into_inner(self) -> T {
         self.value.into_inner()
@@ -150,6 +146,14 @@ impl<T: CppRustBuiltin, C: Constness> Cpp<T, C> {
 }
 
 impl<T: CppRustBuiltin> Cpp<T> {
+    /// A (non-`const`) C++ object with the value `value`.
+    pub const fn new(value: T) -> Self {
+        Cpp {
+            value: core::cell::UnsafeCell::new(value),
+            _constness: core::marker::PhantomData,
+        }
+    }
+
     /// Sets the value, through a shared reference (like [`Cell::set`](core::cell::Cell::set)).
     pub fn set(&self, value: T) {
         // SAFETY: Like `Cell::set`: `Cpp` isn't `Sync`, and no reference to the value is handed out
@@ -182,7 +186,7 @@ impl<T: CppRustBuiltin> Cpp<T> {
 
     /// The object as a `const` one.
     pub fn into_const(self) -> Cpp<T, Const> {
-        Cpp::new(self.into_inner())
+        Cpp::new_const(self.into_inner())
     }
 
     /// A Rust value as a (non-`const`) C++ object, e.g. to pass it to C++ as a pointer (like
@@ -194,7 +198,19 @@ impl<T: CppRustBuiltin> Cpp<T> {
     }
 }
 
-impl<T: CppRustBuiltin, C: Constness> From<T> for Cpp<T, C> {
+impl<T: CppRustBuiltin> Cpp<T, Const> {
+    /// A `const` C++ object with the value `value`.
+    pub const fn new_const(value: T) -> Self {
+        Cpp {
+            value: core::cell::UnsafeCell::new(value),
+            _constness: core::marker::PhantomData,
+        }
+    }
+}
+
+/// Only for non-`const` objects, so that `x.into()` knows which one to build even where either
+/// would do (e.g. `f(&x.into())`, where `f` takes a `&'a const i32`).
+impl<T: CppRustBuiltin> From<T> for Cpp<T> {
     fn from(value: T) -> Self {
         Cpp::new(value)
     }
@@ -316,7 +332,7 @@ mod tests {
 
     #[test]
     fn cpp_builtin_conversions() {
-        let x: Cpp<u64, Const> = 7.into();
+        let x: Cpp<u64, Const> = Cpp::new_const(7);
         let y: u64 = x.into();
         assert_eq!(y, 7);
         let c: Cpp<bool> = Cpp::from(true);
@@ -326,6 +342,20 @@ mod tests {
         let p: *mut i32 = p.into();
         unsafe { *p = 4 };
         assert_eq!(v, 4);
+    }
+
+    /// What the inputs of C++ functions that take `const` objects look like (see `Constness`):
+    /// `into()` and `Cpp::new` still know what to build.
+    #[test]
+    fn cpp_builtin_generic_constness_inference() {
+        fn takes_const<C: Constness>(x: &Cpp<i32, C>) -> i32 {
+            x.get()
+        }
+        let x: Cpp<i32> = Cpp::new(1);
+        let c: Cpp<i32, Const> = Cpp::new_const(2);
+        assert_eq!(takes_const(&x) + takes_const(&c), 3);
+        assert_eq!(takes_const(&4.into()), 4);
+        assert_eq!(takes_const(&Cpp::new(5)), 5);
     }
 
     #[test]
@@ -348,7 +378,7 @@ mod tests {
     #[test]
     fn cpp_builtin_comparisons() {
         let a: Cpp<i32> = Cpp::new(1);
-        let b: Cpp<i32, Const> = Cpp::new(2);
+        let b: Cpp<i32, Const> = Cpp::new_const(2);
         assert!(a < b);
         assert!(a != b);
         assert_eq!(a, 1);
