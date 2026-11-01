@@ -12,10 +12,10 @@ use itertools::{Either, Itertools};
 use zngur_def::{
     AdditionalIncludes, ConflictSource, ConvertPanicToException, CppHeapAllocated, CppRef,
     CppStackOwned, Import, LayoutPolicy, Merge, MergeFailure, ModuleImport, Mutability,
-    PrimitiveRustType, RustPathAndGenerics, RustTrait, RustType, TypeVar, ZngurConstructor,
-    ZngurExternCppFn, ZngurExternCppImpl, ZngurField, ZngurFn, ZngurMethod, ZngurMethodDetails,
-    ZngurMethodReceiver, ZngurSpec, ZngurTrait, ZngurType, ZngurVariant, ZngurWellknownTrait,
-    cpp_handle_field_name, cpp_handle_keyword,
+    PrimitiveRustType, RustPathAndGenerics, RustTrait, RustType, TriviallyRelocatable, TypeVar,
+    ZngurConstructor, ZngurExternCppFn, ZngurExternCppImpl, ZngurField, ZngurFn, ZngurMethod,
+    ZngurMethodDetails, ZngurMethodReceiver, ZngurSpec, ZngurTrait, ZngurType, ZngurVariant,
+    ZngurWellknownTrait, cpp_handle_field_name, cpp_handle_keyword,
 };
 
 pub type Span = SimpleSpan<usize>;
@@ -559,8 +559,10 @@ enum ParsedTypeItem<'a> {
         cpp_type: Option<&'a str>,
         props: Option<Vec<(Spanned<&'a str>, usize)>>,
     },
-    /// `#trivially_relocatable`.
-    TriviallyRelocatable,
+    /// `#trivially_relocatable`, or `#unsafe(trivially_relocatable)` if `unchecked`.
+    TriviallyRelocatable {
+        unchecked: bool,
+    },
     MatchOnCfg(Condition<CfgConditional<'a>, ParsedTypeItem<'a>, NItems>),
 }
 
@@ -892,7 +894,7 @@ impl ProcessedItem<'_> {
                 let mut cpp_heap_allocated = None;
                 let mut cpp_ref = None;
                 let mut cpp_stack_owned = None;
-                let mut trivially_relocatable = false;
+                let mut trivially_relocatable = TriviallyRelocatable::No;
                 let mut to_process = items;
                 to_process.reverse(); // create a stack of items to process
                 let check_size_align = |props: Vec<(Spanned<&str>, usize)>| {
@@ -1211,20 +1213,28 @@ impl ProcessedItem<'_> {
                                 layout = Some(LayoutPolicy::ZERO_SIZED_TYPE);
                             }
                         }
-                        ParsedTypeItem::TriviallyRelocatable => {
+                        ParsedTypeItem::TriviallyRelocatable { unchecked } => {
+                            let kind = if unchecked {
+                                TriviallyRelocatable::Unchecked
+                            } else {
+                                TriviallyRelocatable::Checked
+                            };
+                            let directive = kind.directive().unwrap();
                             if !is_template && !matches!(rust_ty, RustType::Cpp(_)) {
                                 ctx.add_error_str(
-                                    "`#trivially_relocatable` is only for `c++::` types (Rust types \
-                                     are always trivially relocatable)",
+                                    &format!(
+                                        "`{directive}` is only for `c++::` types (Rust types \
+                                         are always trivially relocatable)"
+                                    ),
                                     item_span,
                                 );
                                 continue;
                             }
                             ctx.record_span(
-                                &PartialSpanKey::TriviallyRelocatable(rust_ty.clone()),
+                                &PartialSpanKey::TriviallyRelocatable(rust_ty.clone(), kind),
                                 item_span.into_range(),
                             );
-                            trivially_relocatable = true;
+                            trivially_relocatable = trivially_relocatable.combine(kind);
                         }
                         ParsedTypeItem::MatchOnCfg(match_) => {
                             let result = match_.eval(ctx);
@@ -1584,9 +1594,9 @@ enum PartialSpanKey {
     /// a [`CppStackOwned`](zngur_def::CppStackOwned)
     /// outer_ty
     CppStackOwned(RustType),
-    /// a `#trivially_relocatable` directive
-    /// outer_ty
-    TriviallyRelocatable(RustType),
+    /// a `#trivially_relocatable` or `#unsafe(trivially_relocatable)` directive
+    /// outer_ty, kind
+    TriviallyRelocatable(RustType, TriviallyRelocatable),
     /// a [`ZngurWellknownTrait`](zngur_def::ZngurWellknownTrait)
     /// outer_ty, trait
     WellknownTrait(RustType, ZngurWellknownTrait),
@@ -2760,9 +2770,11 @@ impl ZngurSpecBuilder {
                         .finish(),
                 );
             }
-            if ty.trivially_relocatable {
-                let tr_spans =
-                    ctx.fetch_spans_global(&PartialSpanKey::TriviallyRelocatable(ty.ty.clone()));
+            if let Some(directive) = ty.trivially_relocatable.directive() {
+                let tr_spans = ctx.fetch_spans_global(&PartialSpanKey::TriviallyRelocatable(
+                    ty.ty.clone(),
+                    ty.trivially_relocatable,
+                ));
                 let tr_span = tr_spans
                     .last()
                     .copied()
@@ -2771,24 +2783,30 @@ impl ZngurSpecBuilder {
                     .or_else(|| ctx.fetch_spans_global(ty).first().copied().cloned())
                     .unwrap_or((0, 0usize..0));
                 if !matches!(ty.ty, RustType::Cpp(_)) {
-                    let msg = "`#trivially_relocatable` is only for `c++::` types (Rust types \
-                               are always trivially relocatable)";
+                    let msg = format!(
+                        "`{directive}` is only for `c++::` types (Rust types are always trivially \
+                         relocatable)"
+                    );
                     ctx.add_fatal_report(
                         Report::build(ReportKind::Error, tr_span.clone())
-                            .with_message(msg)
+                            .with_message(&msg)
                             .with_label(
-                                Label::new(tr_span).with_message(msg).with_color(Color::Red),
+                                Label::new(tr_span)
+                                    .with_message(&msg)
+                                    .with_color(Color::Red),
                             )
                             .finish(),
                     );
                 } else if !cpp_directives.is_empty() {
-                    let msg = "`#trivially_relocatable` cannot be combined with \
-                               `#cpp_stack_owned`, `#cpp_ref`, or `#cpp_heap_allocated`";
+                    let msg = format!(
+                        "`{directive}` cannot be combined with `#cpp_stack_owned`, `#cpp_ref`, or \
+                         `#cpp_heap_allocated`"
+                    );
                     let mut report = Report::build(ReportKind::Error, tr_span.clone())
-                        .with_message(msg)
+                        .with_message(&msg)
                         .with_label(
                             Label::new(tr_span)
-                                .with_message("`#trivially_relocatable` declared here")
+                                .with_message(format!("`{directive}` declared here"))
                                 .with_color(Color::Red),
                         );
                     for (dir_name, dir_key) in &cpp_directives {
@@ -2802,14 +2820,17 @@ impl ZngurSpecBuilder {
                     }
                     ctx.add_fatal_report(report.finish());
                 } else if ty.cpp_by_value_layout().is_none() {
-                    let msg = "`#trivially_relocatable` needs a `#layout(...)` or \
-                               `#layout_conservative(...)`, which Rust needs to hold the C++ type \
-                               by value";
+                    let msg = format!(
+                        "`{directive}` needs a `#layout(...)` or `#layout_conservative(...)`, \
+                         which Rust needs to hold the C++ type by value"
+                    );
                     ctx.add_fatal_report(
                         Report::build(ReportKind::Error, tr_span.clone())
-                            .with_message(msg)
+                            .with_message(&msg)
                             .with_label(
-                                Label::new(tr_span).with_message(msg).with_color(Color::Red),
+                                Label::new(tr_span)
+                                    .with_message(&msg)
+                                    .with_color(Color::Red),
                             )
                             .finish(),
                     );
@@ -3527,8 +3548,18 @@ fn inner_type_item<'a>()
                 .boxed(),
         )
         .map(|(cpp_type, props)| ParsedTypeItem::CppStackOwned { cpp_type, props });
-    let trivially_relocatable = just([Token::Sharp, Token::Ident("trivially_relocatable")])
-        .to(ParsedTypeItem::TriviallyRelocatable);
+    let trivially_relocatable = choice((
+        just([Token::Sharp, Token::Ident("trivially_relocatable")]).to(false),
+        just([
+            Token::Sharp,
+            Token::KwUnsafe,
+            Token::ParenOpen,
+            Token::Ident("trivially_relocatable"),
+            Token::ParenClose,
+        ])
+        .to(true),
+    ))
+    .map(|unchecked| ParsedTypeItem::TriviallyRelocatable { unchecked });
 
     let variant = just(Token::Ident("variant"))
         .ignore_then(select! { Token::Ident(c) => c })

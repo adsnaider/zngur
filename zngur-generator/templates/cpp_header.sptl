@@ -392,7 +392,9 @@ namespace {{ self.namespace }} {
 
       {% if let Some(cpp_stack_owned) = td.cpp_stack_owned %}
           {{ td.layout.layout_checks(cpp_stack_owned.cpp_type) }}
+          {% if td.check_trivially_relocatable %}
           static_assert(::{{ self.namespace }}::is_trivially_relocatable< {{ cpp_stack_owned.cpp_type }} >::value, "Type must be trivially relocatable");
+          {% endif %}
 
           inline {{ cpp_stack_owned.cpp_type }}& cpp() & {
               return *reinterpret_cast< {{ cpp_stack_owned.cpp_type }}* >(__zngur_data.data());

@@ -448,6 +448,8 @@ impl ZngurGenerator {
                 }),
                 cpp_ref,
                 cpp_stack_owned: cpp_stack_owned_data,
+                check_trivially_relocatable: ty_def.cpp_stack_owned.is_some()
+                    || ty_def.trivially_relocatable == TriviallyRelocatable::Checked,
                 from_trait: if let RustType::Boxed(b) = &ty {
                     if let RustType::Dyn(tr, _) = b.as_ref() {
                         if let RustTrait::Fn {
@@ -600,7 +602,7 @@ mod tests {
         ZngurType {
             ty,
             layout: Some(LayoutPolicy::HeapAllocated),
-            trivially_relocatable: false,
+            trivially_relocatable: TriviallyRelocatable::No,
             wellknown_traits: vec![],
             exhaustive: true,
             methods: vec![],
@@ -622,7 +624,7 @@ mod tests {
         ZngurType {
             ty,
             layout: Some(LayoutPolicy::StackAllocated { size, align }),
-            trivially_relocatable: false,
+            trivially_relocatable: TriviallyRelocatable::No,
             wellknown_traits: vec![],
             exhaustive: true,
             methods: vec![],
@@ -639,7 +641,7 @@ mod tests {
         ZngurType {
             ty,
             layout: Some(LayoutPolicy::ZERO_SIZED_TYPE),
-            trivially_relocatable: false,
+            trivially_relocatable: TriviallyRelocatable::No,
             wellknown_traits: vec![],
             exhaustive: true,
             methods: vec![],
@@ -657,7 +659,7 @@ mod tests {
         ZngurType {
             ty,
             layout: Some(LayoutPolicy::StackAllocated { size, align }),
-            trivially_relocatable: true,
+            trivially_relocatable: TriviallyRelocatable::Checked,
             wellknown_traits: vec![],
             exhaustive: true,
             methods: vec![],
@@ -674,7 +676,7 @@ mod tests {
     fn minimal_opaque_cpp_type(ty: RustType) -> ZngurType {
         ZngurType {
             layout: None,
-            trivially_relocatable: false,
+            trivially_relocatable: TriviallyRelocatable::No,
             ..minimal_by_value_cpp_type(ty, 0, 1)
         }
     }
@@ -699,7 +701,7 @@ mod tests {
         let rust_adt = |segments: &[&str], methods: Vec<ZngurMethodDetails>| ZngurType {
             ty: adt(segments),
             layout: Some(LayoutPolicy::StackAllocated { size: 1, align: 1 }),
-            trivially_relocatable: false,
+            trivially_relocatable: TriviallyRelocatable::No,
             wellknown_traits: vec![],
             exhaustive: true,
             methods,
@@ -736,7 +738,7 @@ mod tests {
                 RustType::Primitive(PrimitiveRustType::Int(32)),
             ]),
             layout: Some(LayoutPolicy::StackAllocated { size: 8, align: 4 }),
-            trivially_relocatable: false,
+            trivially_relocatable: TriviallyRelocatable::No,
             wellknown_traits: vec![],
             exhaustive: true,
             methods: vec![],
@@ -864,7 +866,7 @@ mod tests {
             types: vec![ZngurType {
                 ty: adt(&["crate", "Way"]),
                 layout: Some(LayoutPolicy::Conservative { size: 20, align: 8 }),
-                trivially_relocatable: false,
+                trivially_relocatable: TriviallyRelocatable::No,
                 wellknown_traits: vec![],
                 exhaustive: true,
                 methods: vec![],
@@ -1183,7 +1185,7 @@ pub type Handle = super::Handle;
                 ZngurType {
                     ty: RustType::Boxed(Box::new(RustType::Dyn(my_trait.clone(), vec![]))),
                     layout: Some(LayoutPolicy::StackAllocated { size: 16, align: 8 }),
-                    trivially_relocatable: false,
+                    trivially_relocatable: TriviallyRelocatable::No,
                     wellknown_traits: vec![],
                     exhaustive: true,
                     methods: vec![],
@@ -1197,7 +1199,7 @@ pub type Handle = super::Handle;
                 ZngurType {
                     ty: RustType::Ref(Mutability::Not, Box::new(RustType::Dyn(my_trait, vec![]))),
                     layout: Some(LayoutPolicy::StackAllocated { size: 16, align: 8 }),
-                    trivially_relocatable: false,
+                    trivially_relocatable: TriviallyRelocatable::No,
                     wellknown_traits: vec![],
                     exhaustive: true,
                     methods: vec![],
@@ -1218,7 +1220,7 @@ pub type Handle = super::Handle;
                         vec![],
                     ))),
                     layout: Some(LayoutPolicy::StackAllocated { size: 16, align: 8 }),
-                    trivially_relocatable: false,
+                    trivially_relocatable: TriviallyRelocatable::No,
                     wellknown_traits: vec![],
                     exhaustive: true,
                     methods: vec![],
@@ -1232,7 +1234,7 @@ pub type Handle = super::Handle;
                 ZngurType {
                     ty: adt(&["crate", "MyEnum"]),
                     layout: Some(LayoutPolicy::StackAllocated { size: 8, align: 4 }),
-                    trivially_relocatable: false,
+                    trivially_relocatable: TriviallyRelocatable::No,
                     wellknown_traits: vec![],
                     exhaustive: true,
                     methods: vec![],
@@ -1285,7 +1287,7 @@ pub type Handle = super::Handle;
         let rust_string = ZngurType {
             ty: adt(&["std", "string", "String"]),
             layout: Some(LayoutPolicy::StackAllocated { size: 24, align: 8 }),
-            trivially_relocatable: false,
+            trivially_relocatable: TriviallyRelocatable::No,
             wellknown_traits: vec![],
             exhaustive: true,
             methods: vec![],
@@ -1333,16 +1335,36 @@ pub type Handle = super::Handle;
     }
 
     #[test]
+    fn cpp_type_with_unchecked_trivially_relocatable_is_held_by_value_without_the_check() {
+        let spec = ZngurSpec {
+            types: vec![ZngurType {
+                trivially_relocatable: TriviallyRelocatable::Unchecked,
+                ..minimal_by_value_cpp_type(cpp(&["geo", "Point"]), 16, 8)
+            }],
+            ..Default::default()
+        };
+        let (rust_code, h, _cpp) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        assert!(rust_code.contains("unsafe impl ::zngur_lib::ZngCppStackObject for Point {}"));
+        // The layout is still checked, but not that the type is trivially relocatable.
+        assert!(h.contains("static_assert(sizeof(::geo::Point) == 16, \"Size mismatch\");"));
+        assert!(
+            !h.contains("is_trivially_relocatable< ::geo::Point >"),
+            "{h}"
+        );
+    }
+
+    #[test]
     fn cpp_type_with_layout_but_not_trivially_relocatable_is_reference_only() {
         let spec = ZngurSpec {
             types: vec![
                 ZngurType {
-                    trivially_relocatable: false,
+                    trivially_relocatable: TriviallyRelocatable::No,
                     ..minimal_by_value_cpp_type(cpp(&["geo", "Point"]), 16, 8)
                 },
                 ZngurType {
                     layout: Some(LayoutPolicy::Conservative { size: 20, align: 8 }),
-                    trivially_relocatable: false,
+                    trivially_relocatable: TriviallyRelocatable::No,
                     ..minimal_by_value_cpp_type(cpp(&["geo", "Box2d"]), 0, 1)
                 },
             ],

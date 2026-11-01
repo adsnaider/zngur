@@ -2,7 +2,8 @@ use std::panic::catch_unwind;
 
 use expect_test::{Expect, expect};
 use zngur_def::{
-    CppHeapAllocated, CppRef, CppStackOwned, LayoutPolicy, RustPathAndGenerics, RustType, ZngurSpec,
+    CppHeapAllocated, CppRef, CppStackOwned, LayoutPolicy, RustPathAndGenerics, RustType,
+    TriviallyRelocatable, ZngurSpec,
 };
 
 use crate::{
@@ -2024,6 +2025,12 @@ type c++::a::Conservative {
     #trivially_relocatable;
 }
 
+// Promised, rather than checked in C++.
+type c++::a::Unchecked {
+    #layout(size = 8, align = 8);
+    #unsafe(trivially_relocatable);
+}
+
 // A layout without `#trivially_relocatable` is only checked in C++.
 type c++::a::NotRelocatable {
     #layout(size = 8, align = 4);
@@ -2055,6 +2062,18 @@ type c++::a::Opaque {
             size: 32,
             align: 16
         })
+    );
+    assert_eq!(
+        ty("Unchecked").cpp_by_value_layout(),
+        Some(LayoutPolicy::StackAllocated { size: 8, align: 8 })
+    );
+    assert_eq!(
+        ty("Unchecked").trivially_relocatable,
+        TriviallyRelocatable::Unchecked
+    );
+    assert_eq!(
+        ty("ByValue").trivially_relocatable,
+        TriviallyRelocatable::Checked
     );
     assert_eq!(ty("NotRelocatable").cpp_by_value_layout(), None);
     assert_eq!(
@@ -2088,6 +2107,60 @@ type c++::B {
     );
     let ty = parsed.spec.types.first().expect("no type parsed");
     assert!(ty.cpp_by_value_layout().is_some());
+    assert_eq!(ty.trivially_relocatable, TriviallyRelocatable::Checked);
+}
+
+#[test]
+fn trivially_relocatable_merge_precedence() {
+    // Direction 1: `Unchecked` in root + `Checked` in merged file -> `Unchecked`.
+    let resolver1 = MockFilesystem::new(vec![(
+        "./a.zng",
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+}
+"#,
+    )]);
+    let parsed1 = parse_str_with_resolver(
+        r#"
+merge "./a.zng";
+type c++::B {
+    #unsafe(trivially_relocatable);
+}
+"#,
+        NullCfg,
+        &resolver1,
+        |e| panic!("unexpected diagnostic: {e}"),
+    );
+    let ty1 = parsed1.spec.types.first().expect("no type parsed");
+    assert!(ty1.cpp_by_value_layout().is_some());
+    assert_eq!(ty1.trivially_relocatable, TriviallyRelocatable::Unchecked);
+
+    // Direction 2: `Checked` in root + `Unchecked` in merged file -> `Unchecked`.
+    let resolver2 = MockFilesystem::new(vec![(
+        "./a.zng",
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #unsafe(trivially_relocatable);
+}
+"#,
+    )]);
+    let parsed2 = parse_str_with_resolver(
+        r#"
+merge "./a.zng";
+type c++::B {
+    #trivially_relocatable;
+}
+"#,
+        NullCfg,
+        &resolver2,
+        |e| panic!("unexpected diagnostic: {e}"),
+    );
+    let ty2 = parsed2.spec.types.first().expect("no type parsed");
+    assert!(ty2.cpp_by_value_layout().is_some());
+    assert_eq!(ty2.trivially_relocatable, TriviallyRelocatable::Unchecked);
 }
 
 #[test]
@@ -2097,6 +2170,10 @@ fn trivially_relocatable_without_layout_is_rejected() {
 type c++::B {
     #trivially_relocatable;
 }
+
+type c++::C {
+    #unsafe(trivially_relocatable);
+}
 "#,
         expect![[r#"
             Error: `#trivially_relocatable` needs a `#layout(...)` or `#layout_conservative(...)`, which Rust needs to hold the C++ type by value
@@ -2105,6 +2182,13 @@ type c++::B {
              3 │     #trivially_relocatable;
                │     ───────────┬───────────  
                │                ╰───────────── `#trivially_relocatable` needs a `#layout(...)` or `#layout_conservative(...)`, which Rust needs to hold the C++ type by value
+            ───╯
+            Error: `#unsafe(trivially_relocatable)` needs a `#layout(...)` or `#layout_conservative(...)`, which Rust needs to hold the C++ type by value
+               ╭─[ test.zng:7:5 ]
+               │
+             7 │     #unsafe(trivially_relocatable);
+               │     ───────────────┬───────────────  
+               │                    ╰───────────────── `#unsafe(trivially_relocatable)` needs a `#layout(...)` or `#layout_conservative(...)`, which Rust needs to hold the C++ type by value
             ───╯
         "#]],
     );
@@ -2118,6 +2202,11 @@ type crate::Foo {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
 }
+
+type crate::Bar {
+    #layout(size = 8, align = 4);
+    #unsafe(trivially_relocatable);
+}
 "#,
         expect![[r#"
             Error: `#trivially_relocatable` is only for `c++::` types (Rust types are always trivially relocatable)
@@ -2126,6 +2215,13 @@ type crate::Foo {
              4 │     #trivially_relocatable;
                │     ───────────┬───────────  
                │                ╰───────────── `#trivially_relocatable` is only for `c++::` types (Rust types are always trivially relocatable)
+            ───╯
+            Error: `#unsafe(trivially_relocatable)` is only for `c++::` types (Rust types are always trivially relocatable)
+               ╭─[ test.zng:9:5 ]
+               │
+             9 │     #unsafe(trivially_relocatable);
+               │     ───────────────┬───────────────  
+               │                    ╰───────────────── `#unsafe(trivially_relocatable)` is only for `c++::` types (Rust types are always trivially relocatable)
             ───╯
         "#]],
     );
@@ -2218,6 +2314,28 @@ type c++::C {
     assert!(
         err.contains("`#trivially_relocatable` declared here"),
         "missing `#trivially_relocatable` label in:\n{err}"
+    );
+
+    // `#unsafe(trivially_relocatable)` also names the exact directive written.
+    let r_unchecked = catch_unwind(|| {
+        let _ = parse_str(
+            "type c++::D {\n    #cpp_ref;\n    #unsafe(trivially_relocatable);\n}\n",
+            NullCfg,
+            |_| {},
+        );
+    });
+    let err_unchecked = r_unchecked
+        .expect_err("expected failure")
+        .downcast::<ErrorText>()
+        .expect("expected ErrorText")
+        .0;
+    assert!(
+        err_unchecked.contains("`#unsafe(trivially_relocatable)` cannot be combined with"),
+        "missing `#unsafe(trivially_relocatable)` message in:\n{err_unchecked}"
+    );
+    assert!(
+        err_unchecked.contains("`#unsafe(trivially_relocatable)` declared here"),
+        "missing `#unsafe(trivially_relocatable)` label in:\n{err_unchecked}"
     );
 }
 

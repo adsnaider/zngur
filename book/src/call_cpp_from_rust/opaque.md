@@ -5,11 +5,11 @@ is the C++ type `::osmium::Way`. Multiple declarations sharing a prefix can also
 `mod c++::osmium { type Way { ... } }`. What Rust can do with such a type follows from what the
 `.zng` file says about it:
 
-| Declaration                                | Rust can                                        |
-| ------------------------------------------ | ----------------------------------------------- |
-| no layout                                  | only refer to it (`&T`, `&mut T`)               |
-| a layout, without `#trivially_relocatable` | only refer to it (the layout is checked in C++) |
-| a layout and `#trivially_relocatable`      | hold it by value, like a Rust value             |
+| Declaration                                                                    | Rust can                                        |
+| ------------------------------------------------------------------------------ | ----------------------------------------------- |
+| no layout                                                                      | only refer to it (`&T`, `&mut T`)               |
+| a layout, without `#trivially_relocatable` or `#unsafe(trivially_relocatable)` | only refer to it (the layout is checked in C++) |
+| a layout and `#trivially_relocatable` (or `#unsafe(trivially_relocatable)`)    | hold it by value, like a Rust value             |
 
 > **NOTE**: In C++, the Rust wrapper of a `c++::a::B` type is `rust::cpp::a::B`, apart from the
 > wrappers of Rust types (`rust::crate::...`, `rust::std::...`, ...). In Rust, its wrapper is at
@@ -200,6 +200,19 @@ template <> struct is_trivially_relocatable<CppType> : std::true_type {};
 
 In a future where `std::is_trivially_relocatable` exists in the standard, we can specialize it for
 all types.
+
+If you can't (or don't want to) specialize the type trait, write `#unsafe(trivially_relocatable)`
+instead. Rust still holds the type by value, but the C++ code doesn't check that it's trivially
+relocatable: you promise it. This is meant for types that are relocatable but not trivially
+copyable, like `[[clang::trivial_abi]]` types, and for tools that generate `.zng` files and already
+know the answer. If the promise is wrong, moving the value in Rust is undefined behavior.
+
+```zng
+type c++::ns::Handle {
+    #layout(size = 8, align = 8);
+    #unsafe(trivially_relocatable);
+}
+```
 
 ## Legacy `#cpp_*` Directives
 
