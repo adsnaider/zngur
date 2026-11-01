@@ -633,6 +633,171 @@ mod tests {
     }
 
     #[test]
+    fn rust_type_named_unit_is_not_the_unit_type() {
+        assert_eq!(crate::cpp::CppPath::from("other_ns::Unit").name(), "Unit");
+        assert_eq!(crate::cpp::CppPath::from("rust::Unit").name(), "Unit");
+
+        let rust_adt = |segments: &[&str], methods: Vec<ZngurMethodDetails>| ZngurType {
+            ty: adt(segments),
+            layout: Some(LayoutPolicy::StackAllocated { size: 1, align: 1 }),
+            wellknown_traits: vec![],
+            exhaustive: true,
+            methods,
+            constructor: None,
+            variants: vec![],
+            fields: vec![],
+            cpp_heap_allocated: None,
+            cpp_ref: None,
+            cpp_stack_owned: None,
+        };
+        let noop_method = ZngurMethodDetails {
+            data: ZngurMethod {
+                name: "noop".to_owned(),
+                generics: vec![],
+                receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+                inputs: vec![],
+                output: RustType::UNIT,
+                is_safe: None,
+            },
+            use_path: None,
+            deref: None,
+            cpp_name: None,
+        };
+        let mut unit_ty = rust_adt(&["crate", "Unit"], vec![noop_method]);
+        unit_ty.constructor = Some(ZngurConstructor {
+            inputs: vec![(
+                "0".to_owned(),
+                RustType::Primitive(PrimitiveRustType::Int(32)),
+            )],
+        });
+        let real_tuple_ty = ZngurType {
+            ty: RustType::Tuple(vec![
+                RustType::Primitive(PrimitiveRustType::Int(32)),
+                RustType::Primitive(PrimitiveRustType::Int(32)),
+            ]),
+            layout: Some(LayoutPolicy::StackAllocated { size: 8, align: 4 }),
+            wellknown_traits: vec![],
+            exhaustive: true,
+            methods: vec![],
+            constructor: None,
+            variants: vec![],
+            fields: vec![],
+            cpp_heap_allocated: None,
+            cpp_ref: None,
+            cpp_stack_owned: None,
+        };
+        let spec = ZngurSpec {
+            types: vec![
+                unit_ty,
+                rust_adt(&["my_crate", "Unit"], vec![]),
+                rust_adt(&["crate", "Tuple"], vec![]),
+                real_tuple_ty,
+            ],
+            ..Default::default()
+        };
+        let (_rust_code, h, _cpp) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        assert!(
+            h.contains("namespace test_crate {\nstruct Unit {"),
+            "missing `rust::test_crate::Unit` definition in:\n{h}"
+        );
+        assert!(
+            h.contains("Unit(\n        ::int32_t\n    ) noexcept ;"),
+            "missing `Unit(::int32_t)` constructor declaration in:\n{h}"
+        );
+        assert!(
+            h.contains("inline rust::test_crate::Unit::Unit(::int32_t i0) noexcept"),
+            "missing `rust::test_crate::Unit::Unit` constructor definition in:\n{h}"
+        );
+        assert!(
+            h.contains("inline ::rust::Unit rust::test_crate::Unit::noop("),
+            "missing `::rust::Unit` return type on `crate::Unit::noop` in:\n{h}"
+        );
+        assert!(
+            h.contains("namespace my_crate {\nstruct Unit {"),
+            "missing `rust::my_crate::Unit` definition in:\n{h}"
+        );
+        assert!(
+            h.contains("namespace test_crate {\nstruct Tuple {"),
+            "missing non-template `rust::test_crate::Tuple` definition in:\n{h}"
+        );
+        assert!(
+            h.contains("template<> struct Tuple< ::int32_t, ::int32_t > {"),
+            "missing `template<> struct Tuple< ::int32_t, ::int32_t >` specialization in:\n{h}"
+        );
+        assert!(
+            !h.contains("template<> struct Tuple<  >"),
+            "unexpected empty `template<> struct Tuple<  >` specialization in:\n{h}"
+        );
+
+        let fn_spec = ZngurSpec {
+            funcs: vec![ZngurFn {
+                path: RustPathAndGenerics {
+                    path: vec!["crate".to_owned(), "Unit".to_owned()],
+                    generics: vec![],
+                    named_generics: vec![],
+                },
+                inputs: vec![],
+                output: RustType::UNIT,
+                is_safe: None,
+            }],
+            ..Default::default()
+        };
+        let (fn_rust_code, fn_h, _cpp) =
+            ZngurGenerator::build_from_zng(fn_spec, "test_crate".to_owned()).render(false);
+        assert!(
+            fn_h.contains("namespace test_crate {\ninline ::rust::Unit Unit() noexcept {"),
+            "module-scoped free `fn Unit()` was renamed in:\n{fn_h}"
+        );
+        assert!(
+            fn_rust_code.contains("crate::Unit("),
+            "missing `crate::Unit(...)` call in:\n{fn_rust_code}"
+        );
+
+        let mk_trait = |name: &str| {
+            let tr = RustTrait::Normal(RustPathAndGenerics {
+                path: vec!["crate".to_owned(), name.to_owned()],
+                generics: vec![],
+                named_generics: vec![],
+            });
+            (
+                tr.clone(),
+                ZngurTrait {
+                    tr,
+                    methods: vec![],
+                },
+            )
+        };
+        let mut traits = indexmap::IndexMap::new();
+        let (u_tr, u_def) = mk_trait("Unit");
+        let (t_tr, t_def) = mk_trait("Tuple");
+        traits.insert(u_tr, u_def);
+        traits.insert(t_tr, t_def);
+        let trait_spec = ZngurSpec {
+            traits,
+            ..Default::default()
+        };
+        let (_trait_rust, trait_h, _trait_cpp) =
+            ZngurGenerator::build_from_zng(trait_spec, "test_crate".to_owned()).render(false);
+        assert!(
+            trait_h.contains(
+                "namespace test_crate {\nstruct Unit {\n  public:\n    virtual ~Unit() {};"
+            ),
+            "missing `trait crate::Unit` class definition in:\n{trait_h}"
+        );
+        assert!(
+            trait_h.contains(
+                "namespace test_crate {\nstruct Tuple {\n  public:\n    virtual ~Tuple() {};"
+            ),
+            "missing `trait crate::Tuple` class definition in:\n{trait_h}"
+        );
+        assert!(
+            !trait_h.contains("template<> struct Tuple"),
+            "unexpected `template<> struct Tuple` specialization in:\n{trait_h}"
+        );
+    }
+
+    #[test]
     fn cpp_stack_owned_conservative_layout_rounds_buffer_to_alignment() {
         let spec = ZngurSpec {
             types: vec![ZngurType {

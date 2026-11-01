@@ -41,12 +41,7 @@ impl CppPath {
     }
 
     pub(crate) fn name(&self) -> &str {
-        // Unit is a valid type alias for Tuple<> except when defining the constructors
-        if self.0 == ["rust", "Unit"] {
-            "Tuple"
-        } else {
-            self.0.split_last().unwrap().0
-        }
+        self.0.last().expect("C++ paths aren't empty")
     }
 
     fn need_header(&self) -> bool {
@@ -115,8 +110,7 @@ impl CppType {
         }
 
         let name = self.path.name();
-        // Tuple<> is a little special because it is a template even though self.generic_args is empty
-        if self.generic_args.is_empty() && name != "Tuple" {
+        if self.generic_args.is_empty() {
             format!("struct {}", name)
         } else {
             format!(

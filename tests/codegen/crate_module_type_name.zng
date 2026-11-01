@@ -6,6 +6,45 @@ type crate::Unit {
     variant Meter {}
 }
 
+type crate::Tuple {
+    #layout(size = 8, align = 4);
+    constructor(i32, i32);
+    field 0 (offset = 0, type = i32);
+    field 1 (offset = 4, type = i32);
+}
+
+type (i32, i32) {
+    #layout(size = 8, align = 4);
+    field 0 (offset = 0, type = i32);
+    field 1 (offset = 4, type = i32);
+}
+
+mod crate::enums {
+    type Tuple {
+        #layout(size = 1, align = 1);
+        variant Empty {}
+        variant Single {}
+    }
+}
+
+mod crate::traits {
+    trait Tuple {
+        fn total(&self) -> i32;
+    }
+
+    type Box<dyn Tuple> {
+        #layout_conservative(size = 16, align = 8);
+    }
+}
+
+mod crate::fns {
+    fn Unit();
+}
+
 extern "C++" {
     safe fn use_units(()) -> crate::Unit;
+    safe fn make_user_tuple((i32, i32)) -> crate::Tuple;
+    safe fn make_enum_tuple() -> crate::enums::Tuple;
+    safe fn make_trait_tuple() -> Box<dyn crate::traits::Tuple>;
+    safe fn call_unit_fn();
 }

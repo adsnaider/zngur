@@ -424,7 +424,7 @@ namespace {{ self.namespace }} {
     {% endfor %}
 
     {% if let Some(constructor) = td.constructor %}
-      {{ td.ty.path.0.last().unwrap() }}(
+      {{ name }}(
         {{ splat!(&constructor.inputs, |n, ty|, "{ty}") }}
       ) noexcept ;
     {% endif %}
@@ -452,7 +452,7 @@ namespace {{ self.namespace }} {
 #endif
 
     {% for variant in td.variants %}
-      inline {{ td.ty.path.0.last().unwrap() }}({{ variant.name }}&& child) noexcept;
+      inline {{ name }}({{ variant.name }}&& child) noexcept;
     {% endfor %}
 
   }; // {{ td.ty.specialization_decl() }}
@@ -1019,7 +1019,7 @@ struct __zngur_internal< {{ ref_kind }} < {{ td.ty }} > > {
 
   {% let cpp_type = td.ty.to_string() %}
   {% let name = cpp_type.strip_prefix("::").unwrap() %}
-  {% let constructor_name = name.to_owned() + "::" + td.ty.path.0.last().unwrap() %}
+  {% let constructor_name = name.to_owned() + "::" + td.ty.path.name() %}
 
   {% if let Some(c) = td.constructor %}
     {#  do default construction first to ensure allocation  #}
