@@ -956,6 +956,9 @@ type c++::a::B {
     safe fn make(i32) -> c++::a::B;
     unsafe fn get<'a>(&'a const self, i32) -> &'a const i32 as get_const;
     safe fn type<'a>(&'a const self) -> i32 as kind;
+    safe constructor() as new;
+    safe constructor(i32, i32) as from_xy;
+    unsafe constructor(const c++::a::B&) as copy_from;
 }
 
 type crate::Foo {
@@ -971,6 +974,10 @@ type crate::Foo {
             type c++::a::B {
                 #layout(size = 8, align = 4);
                 #trivially_relocatable;
+
+                safe constructor() as new;
+                safe constructor(i32, i32) as from_xy;
+                unsafe constructor(const c++::a::B&) as copy_from;
 
                 unsafe fn value(&const self) -> i32;
                 unsafe fn set(&unique var self, i32, const c++::a::B&);
@@ -1001,12 +1008,15 @@ type c++::a::B {
     safe fn set<'a>(&'a unique var self, &'a const c++::a::B);
     unsafe fn raw_get(const self*) -> i32;
     unsafe fn raw_set(self&, i32);
+    safe constructor<'a>(&'a const c++::a::B) as copy;
 }
 "#,
         expect![[r#"
             type c++::a::B {
                 #layout(size = 8, align = 4);
                 #trivially_relocatable;
+
+                safe constructor<'a>(&'a const c++::a::B) as copy;
 
                 safe fn get<'a>(&'a const self) -> &'a const i32;
                 safe fn set<'a>(&'a unique var self, &'a const c++::a::B);

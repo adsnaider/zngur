@@ -52,6 +52,8 @@ pub enum ConflictSource {
     CppStackOwned,
     Method(ZngurMethod),
     CppMethod(Box<crate::ZngurCppMethod>),
+    /// A C++ constructor, by its Rust name.
+    CppConstructor(String),
     Field(String),
 }
 
@@ -184,6 +186,9 @@ impl Merge for ZngurType {
         merge_by_identity(self.cpp_methods, &mut into.cpp_methods, |a, b| {
             a.rust_name() == b.rust_name()
         })?;
+        merge_by_identity(self.cpp_constructors, &mut into.cpp_constructors, |a, b| {
+            a.rust_name == b.rust_name
+        })?;
         self.constructor.merge(&mut into.constructor)?;
         into.exhaustive = self.exhaustive && into.exhaustive;
         merge_by_identity(self.variants, &mut into.variants, |a, b| a.name == b.name)?;
@@ -220,6 +225,19 @@ impl Merge for crate::ZngurCppMethod {
                     ConflictSource::CppMethod(Box::new(self)),
                     ConflictSource::CppMethod(Box::new(into.clone())),
                 ),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Merge for crate::ZngurCppConstructor {
+    fn merge(self, into: &mut Self) -> MergeResult {
+        if canonicalize_cpp_constructor(&self) != canonicalize_cpp_constructor(into) {
+            let source = |c: &Self| ConflictSource::CppConstructor(c.rust_name.clone());
+            return Err(MergeFailure::Conflict(
+                "C++ constructor mismatch".to_string(),
+                (source(&self), source(into)),
             ));
         }
         Ok(())
@@ -383,6 +401,12 @@ fn align_type_lifetimes(src: &mut ZngurType, dst_lifetimes: &[Lifetime], dst_ty:
                 avoid.extend(t.all_lifetimes());
             }
         }
+        for c in &src.cpp_constructors {
+            avoid.extend(c.lifetimes.iter().cloned());
+            for t in &c.inputs {
+                avoid.extend(t.all_lifetimes());
+            }
+        }
         for f in &src.fields {
             avoid.extend(f.ty.all_lifetimes());
         }
@@ -422,6 +446,21 @@ fn align_type_lifetimes(src: &mut ZngurType, dst_lifetimes: &[Lifetime], dst_ty:
             m.receiver_lifetime = tmp.receiver_lifetime;
             m.inputs = tmp.inputs;
             m.output = tmp.output;
+        }
+        for c in &mut src.cpp_constructors {
+            let mut tmp = ZngurMethod {
+                name: c.rust_name.clone(),
+                lifetimes: c.lifetimes.clone(),
+                generics: vec![],
+                receiver: ZngurMethodReceiver::Static,
+                receiver_lifetime: None,
+                inputs: c.inputs.clone(),
+                output: RustType::UNIT,
+                is_safe: Some(c.is_safe),
+            };
+            align_method_lifetimes(&mut tmp, None, &src.lifetimes, dst_lifetimes, &mut avoid);
+            c.lifetimes = tmp.lifetimes;
+            c.inputs = tmp.inputs;
         }
 
         let mapping: Vec<(Lifetime, Lifetime)> = src
@@ -524,6 +563,19 @@ fn canonicalize_cpp_method(m: &crate::ZngurCppMethod) -> crate::ZngurCppMethod {
         inputs: m.inputs.iter().map(canon_ty).collect(),
         output: canon_ty(&m.output),
         is_safe: m.is_safe,
+    }
+}
+
+fn canonicalize_cpp_constructor(c: &crate::ZngurCppConstructor) -> crate::ZngurCppConstructor {
+    let outer = &c.lifetimes;
+    let canon_ty = |t: &RustType| t.canonicalize_lifetimes(outer);
+    crate::ZngurCppConstructor {
+        rust_name: c.rust_name.clone(),
+        lifetimes: (0..outer.len())
+            .map(|i| Lifetime(format!("__outer_{i}")))
+            .collect(),
+        inputs: c.inputs.iter().map(canon_ty).collect(),
+        is_safe: c.is_safe,
     }
 }
 

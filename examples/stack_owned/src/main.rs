@@ -1,8 +1,10 @@
 #[rustfmt::skip]
 mod generated;
 
+use std::mem::MaybeUninit;
+
 use generated::{BoxedInt, MyConservativeWrapper, MyCppWrapper, OpaqueRef};
-use zngur_lib::{Const, Cpp};
+use zngur_lib::{Const, Cpp, CppCtor};
 
 trait CheckNotSend<M> {
     fn check() {}
@@ -185,14 +187,28 @@ fn main() {
     c.swapped().print();
     MyCppWrapper::diagonal(7).print();
 
+    // C++ constructors, which return the constructor call (a `CppCtor`): `build()` returns the
+    // object, and `init()` constructs it in a slot. Calling an `unsafe` constructor is `unsafe`.
+    let built = MyCppWrapper::from_xy(3, 4).build();
+    built.print();
+    let copy = MyCppWrapper::copy(&built).build();
+    copy.print();
+    let moved = unsafe { MyCppWrapper::shifted(&raw const built, 10) }.build();
+    moved.print();
+    let mut slot = MaybeUninit::uninit();
+    // `MaybeUninit` doesn't run the destructor (which `CppType` doesn't have anyway).
+    let constructed: &mut MyCppWrapper = MyCppWrapper::from_xy(8, 9).init(&mut slot);
+    constructed.print();
+    MyConservativeWrapper::from_values(30, 40).build().print();
+
     // `const` is part of the type: `MyCppWrapper<Const>` is a `const` object, which only has the
     // `const` member functions. Going from a `T` to a `T<Const>` is explicit, apart from passing
     // it to C++ as a `const` object.
-    let mut point = MyCppWrapper::new(2, 3);
+    let mut point = MyCppWrapper::from_xy(2, 3).build();
     let exclusive: &mut MyCppWrapper<Const> = point.as_const_mut();
     println!("const sum() = {}", exclusive.sum());
     assert_eq!(unsafe { MyCppWrapper::raw_sum(exclusive) }, 5);
-    let frozen: MyCppWrapper<Const> = MyCppWrapper::new(4, 5).into_const();
+    let frozen: MyCppWrapper<Const> = MyCppWrapper::from_xy(4, 5).build().into_const();
     println!("frozen sum() = {}", frozen.sum());
 
     let mut flag = false;

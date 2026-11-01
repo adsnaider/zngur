@@ -217,6 +217,17 @@ impl ZngurGenerator {
                         method,
                     ));
                 }
+                // C++ constructors (by-value types only, checked by the parser): an associated
+                // function returning a `CppCtor`, and a C++ function that runs the constructor in
+                // place.
+                for constructor in &ty_def.cpp_constructors {
+                    let mangled_name = rust_file.add_cpp_constructor(ty, constructor);
+                    cpp_file.cpp_method_bridges.push(bridges.constructor(
+                        &mangled_name,
+                        owner_cpp_type,
+                        constructor,
+                    ));
+                }
             }
             let is_copy = ty_def.wellknown_traits.contains(&ZngurWellknownTrait::Copy);
             // In Rust, C++ types that are only referred to are zero-sized. (Their layout, if
@@ -808,6 +819,7 @@ mod tests {
             exhaustive: true,
             methods: vec![],
             cpp_methods: vec![],
+            cpp_constructors: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -832,6 +844,7 @@ mod tests {
             exhaustive: true,
             methods: vec![],
             cpp_methods: vec![],
+            cpp_constructors: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -851,6 +864,7 @@ mod tests {
             exhaustive: true,
             methods: vec![],
             cpp_methods: vec![],
+            cpp_constructors: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -871,6 +885,7 @@ mod tests {
             exhaustive: true,
             methods: vec![],
             cpp_methods: vec![],
+            cpp_constructors: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -914,6 +929,7 @@ mod tests {
             exhaustive: true,
             methods,
             cpp_methods: vec![],
+            cpp_constructors: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -955,6 +971,7 @@ mod tests {
             exhaustive: true,
             methods: vec![],
             cpp_methods: vec![],
+            cpp_constructors: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -1084,6 +1101,7 @@ mod tests {
                 exhaustive: true,
                 methods: vec![],
                 cpp_methods: vec![],
+                cpp_constructors: vec![],
                 constructor: None,
                 variants: vec![],
                 fields: vec![],
@@ -1412,6 +1430,7 @@ pub type Handle = super::Handle;
                     exhaustive: true,
                     methods: vec![],
                     cpp_methods: vec![],
+                    cpp_constructors: vec![],
                     constructor: None,
                     variants: vec![],
                     fields: vec![],
@@ -1432,6 +1451,7 @@ pub type Handle = super::Handle;
                     exhaustive: true,
                     methods: vec![],
                     cpp_methods: vec![],
+                    cpp_constructors: vec![],
                     constructor: None,
                     variants: vec![],
                     fields: vec![],
@@ -1456,6 +1476,7 @@ pub type Handle = super::Handle;
                     exhaustive: true,
                     methods: vec![],
                     cpp_methods: vec![],
+                    cpp_constructors: vec![],
                     constructor: None,
                     variants: vec![],
                     fields: vec![],
@@ -1472,6 +1493,7 @@ pub type Handle = super::Handle;
                     exhaustive: true,
                     methods: vec![],
                     cpp_methods: vec![],
+                    cpp_constructors: vec![],
                     constructor: None,
                     variants: vec![ZngurVariant {
                         name: "Val".to_owned(),
@@ -1527,6 +1549,7 @@ pub type Handle = super::Handle;
             exhaustive: true,
             methods: vec![],
             cpp_methods: vec![],
+            cpp_constructors: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -1967,6 +1990,7 @@ pub type Handle = super::Handle;
             exhaustive: true,
             methods: vec![],
             cpp_methods: vec![],
+            cpp_constructors: vec![],
             constructor: None,
             variants: vec![],
             fields: vec![],
@@ -1986,6 +2010,7 @@ pub type Handle = super::Handle;
                     exhaustive: true,
                     methods: vec![],
                     cpp_methods: vec![],
+                    cpp_constructors: vec![],
                     constructor: None,
                     variants: vec![],
                     fields: vec![],
@@ -2002,6 +2027,7 @@ pub type Handle = super::Handle;
                     exhaustive: true,
                     methods: vec![],
                     cpp_methods: vec![],
+                    cpp_constructors: vec![],
                     constructor: Some(ZngurConstructor {
                         inputs: vec![
                             ("first".to_owned(), ref_a_str.clone()),
@@ -2038,6 +2064,7 @@ pub type Handle = super::Handle;
                     exhaustive: true,
                     methods: vec![],
                     cpp_methods: vec![],
+                    cpp_constructors: vec![],
                     constructor: None,
                     variants: vec![],
                     fields: vec![],
@@ -2987,6 +3014,204 @@ pub type Handle = super::Handle;
         assert!(
             rust_code.contains("impl<__C0: ::zngur_lib::Constness> ns::C::Foo<__C0>"),
             "{rust_code}"
+        );
+    }
+
+    #[test]
+    fn cpp_constructors_get_associated_functions_and_cpp_bridges() {
+        let b = cpp(&["a", "B"]);
+        let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+        let dyn_trait = RustType::Boxed(Box::new(RustType::Dyn(
+            RustTrait::Normal(RustPathAndGenerics {
+                path: vec!["crate".to_owned(), "MyTrait".to_owned()],
+                lifetimes: vec![Lifetime("_".to_owned())],
+                generics: vec![RustType::Ref(Mutability::Not, None, Box::new(i32.clone()))],
+                ..Default::default()
+            }),
+            vec![],
+        )));
+        let dyn_fn = RustType::Boxed(Box::new(RustType::Dyn(
+            RustTrait::Fn {
+                name: "Fn".to_owned(),
+                lifetimes: vec![],
+                inputs: vec![RustType::Ref(Mutability::Not, None, Box::new(i32.clone()))],
+                output: Box::new(RustType::UNIT),
+            },
+            vec![],
+        )));
+        let higher_ranked_fn = RustType::Boxed(Box::new(RustType::Dyn(
+            RustTrait::Fn {
+                name: "Fn".to_owned(),
+                lifetimes: vec![Lifetime("__l1".to_owned())],
+                inputs: vec![RustType::Ref(
+                    Mutability::Not,
+                    Some(Lifetime("__l1".to_owned())),
+                    Box::new(i32.clone()),
+                )],
+                output: Box::new(RustType::UNIT),
+            },
+            vec![],
+        )));
+        let mut ty = minimal_by_value_cpp_type(b.clone(), 8, 4);
+        ty.cpp_constructors = vec![
+            ZngurCppConstructor {
+                rust_name: "new".to_owned(),
+                lifetimes: vec![],
+                inputs: vec![],
+                is_safe: true,
+            },
+            ZngurCppConstructor {
+                rust_name: "shifted".to_owned(),
+                lifetimes: vec![],
+                inputs: vec![
+                    i32,
+                    RustType::cpp_ptr(Mutability::Not, CppIndirection::Reference, b.clone()),
+                ],
+                is_safe: false,
+            },
+            ZngurCppConstructor {
+                rust_name: "copy".to_owned(),
+                lifetimes: vec![Lifetime("a".to_owned())],
+                inputs: vec![RustType::Ref(
+                    Mutability::Not,
+                    Some(Lifetime("a".to_owned())),
+                    Box::new(RustType::CppConst(Box::new(b.clone()))),
+                )],
+                is_safe: true,
+            },
+            // With `#allow(elided_lifetimes)`.
+            ZngurCppConstructor {
+                rust_name: "copy_elided".to_owned(),
+                lifetimes: vec![],
+                inputs: vec![RustType::Ref(
+                    Mutability::Not,
+                    None,
+                    Box::new(RustType::CppConst(Box::new(b.clone()))),
+                )],
+                is_safe: true,
+            },
+            // Normal `dyn Trait<'_, &T>` elided lifetimes are free function-input lifetimes (not
+            // higher-ranked like `dyn Fn(&T)`) and must be named and captured in `use<...>`.
+            ZngurCppConstructor {
+                rust_name: "from_traits".to_owned(),
+                lifetimes: vec![],
+                inputs: vec![
+                    RustType::Ref(
+                        Mutability::Not,
+                        None,
+                        Box::new(RustType::CppConst(Box::new(b.clone()))),
+                    ),
+                    dyn_trait,
+                    dyn_fn,
+                ],
+                is_safe: true,
+            },
+            // Synthesized `'__l{n}` names skip user-declared lifetimes of the same name.
+            ZngurCppConstructor {
+                rust_name: "from_two".to_owned(),
+                lifetimes: vec![Lifetime("__l1".to_owned())],
+                inputs: vec![
+                    RustType::Ref(
+                        Mutability::Not,
+                        Some(Lifetime("__l1".to_owned())),
+                        Box::new(RustType::CppConst(Box::new(b.clone()))),
+                    ),
+                    RustType::Ref(
+                        Mutability::Not,
+                        Some(Lifetime("_".to_owned())),
+                        Box::new(RustType::CppConst(Box::new(b.clone()))),
+                    ),
+                ],
+                is_safe: true,
+            },
+            // Synthesized `'__l{n}` names also skip higher-ranked `for<...>` binders in inputs.
+            ZngurCppConstructor {
+                rust_name: "from_higher_ranked".to_owned(),
+                lifetimes: vec![],
+                inputs: vec![
+                    higher_ranked_fn,
+                    RustType::Ref(
+                        Mutability::Not,
+                        None,
+                        Box::new(RustType::CppConst(Box::new(b))),
+                    ),
+                ],
+                is_safe: true,
+            },
+        ];
+        let spec = ZngurSpec {
+            types: vec![ty],
+            ..Default::default()
+        };
+        let (rust_code, _h, cpp_code) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let cpp_code = cpp_code.expect("C++ constructors need a C++ file");
+
+        assert!(
+            rust_code.contains("pub fn new() -> impl ::zngur_lib::CppCtor<Output = Self> {"),
+            "{rust_code}"
+        );
+        // `unsafe` constructors are `unsafe` functions, and inputs that are `const` C++ objects
+        // are generic over their constness. The returned constructor call captures the generic
+        // parameters, borrowed inputs' lifetimes included.
+        assert!(
+            rust_code.contains(
+                "pub unsafe fn shifted<__C1: ::zngur_lib::Constness>(i0: i32, i1: *const \
+                 a::B::<__C1>, ) -> impl ::zngur_lib::CppCtor<Output = Self> + use<__C1> {"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "pub fn copy<'a, __C1: ::zngur_lib::Constness>(i0: &'a a::B::<__C1>, ) -> impl \
+                 ::zngur_lib::CppCtor<Output = Self> + use<'a, __C1> {"
+            ),
+            "{rust_code}"
+        );
+        // Elided lifetimes get names, so that the constructor call can capture them.
+        assert!(
+            rust_code.contains(
+                "pub fn copy_elided<'__l1, __C1: ::zngur_lib::Constness>(i0: &'__l1 a::B::<__C1>, \
+                 ) -> impl ::zngur_lib::CppCtor<Output = Self> + use<'__l1, __C1> {"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "pub fn from_traits<'__l1, '__l2, '__l3, __C1: ::zngur_lib::Constness>(i0: &'__l1 \
+                 a::B::<__C1>, i1: Box<dyn crate::MyTrait::<'__l2, &'__l3 i32>>, i2: \
+                 Box<dyn Fn(&i32)>, ) -> impl ::zngur_lib::CppCtor<Output = \
+                 Self> + use<'__l1, '__l2, '__l3, __C1> {"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "pub fn from_two<'__l1, '__l2, __C1: ::zngur_lib::Constness, __C2: \
+                 ::zngur_lib::Constness>(i0: &'__l1 a::B::<__C1>, i1: &'__l2 a::B::<__C2>, ) -> \
+                 impl ::zngur_lib::CppCtor<Output = Self> + use<'__l1, '__l2, __C1, __C2> {"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "pub fn from_higher_ranked<'__l2, __C1: ::zngur_lib::Constness>(i0: Box<dyn \
+                 for<'__l1> Fn(&'__l1 i32)>, i1: &'__l2 a::B::<__C1>, ) -> impl \
+                 ::zngur_lib::CppCtor<Output = Self> + use<'__l2, __C1> {"
+            ),
+            "{rust_code}"
+        );
+
+        assert!(
+            cpp_code.contains("::new (static_cast<void*>(o)) ::a::B();"),
+            "{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains(
+                "::new (static_cast<void*>(o)) \
+                 ::a::B(::rust::__zngur_internal_move_from_rust< ::int32_t >(i0), *"
+            ),
+            "{cpp_code}"
         );
     }
 }

@@ -2,7 +2,7 @@ use std::panic::catch_unwind;
 
 use expect_test::{Expect, expect};
 use zngur_def::{
-    CppHeapAllocated, CppIndirection, CppRef, CppStackOwned, LayoutPolicy, Mutability,
+    CppHeapAllocated, CppIndirection, CppRef, CppStackOwned, LayoutPolicy, Lifetime, Mutability,
     PrimitiveRustType, RustPathAndGenerics, RustType, TriviallyRelocatable, ZngurSpec,
 };
 
@@ -5023,12 +5023,12 @@ type c++::B {
 }
 "#,
         expect![[r#"
-            Error: `get` is already the Rust name of another member function of this type
+            Error: `get` is already the Rust name of another constructor or member function of this type
                ╭─[ test.zng:4:5 ]
                │
              4 │     safe fn get<'a>(&'a unique var self) -> i32;
                │     ──────────────────────┬─────────────────────  
-               │                           ╰─────────────────────── `get` is already the Rust name of another member function of this type
+               │                           ╰─────────────────────── `get` is already the Rust name of another constructor or member function of this type
             ───╯
         "#]],
     );
@@ -5040,12 +5040,12 @@ type c++::B {
 }
 "#,
         expect![[r#"
-            Error: `get` is already the Rust name of another member function of this type
+            Error: `get` is already the Rust name of another constructor or member function of this type
                ╭─[ test.zng:4:5 ]
                │
              4 │     safe fn other<'a>(&'a const self) -> i32 as get;
                │     ────────────────────────┬───────────────────────  
-               │                             ╰───────────────────────── `get` is already the Rust name of another member function of this type
+               │                             ╰───────────────────────── `get` is already the Rust name of another constructor or member function of this type
             ───╯
         "#]],
     );
@@ -5844,4 +5844,678 @@ type c++::B {
             .any(|w| w.contains("#allow(elided_lifetimes)")),
         "missing elided_lifetimes warning in: {warnings:?}"
     );
+}
+
+#[test]
+fn cpp_constructors_parse() {
+    use zngur_def::{CppIndirection, Mutability, PrimitiveRustType};
+
+    let parsed = parse_str(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+
+    safe constructor() as new;
+    safe constructor(i32, i32) as from_xy;
+    unsafe constructor(const c++::B&) as copy_from;
+    safe constructor<'a>(::core::option::Option<&'a unique var c++::B>) as from_option;
+}
+"#,
+        NullCfg,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    let ty = parsed.spec.types.first().expect("no type parsed");
+    let b = RustType::Cpp(vec!["B".to_owned()]);
+    let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+    let constructors = &ty.cpp_constructors;
+    let names: Vec<_> = constructors.iter().map(|c| c.rust_name.as_str()).collect();
+    assert_eq!(names, ["new", "from_xy", "copy_from", "from_option"]);
+    assert!(constructors[0].inputs.is_empty());
+    assert!(constructors[0].is_safe);
+    assert_eq!(constructors[1].inputs, vec![i32.clone(), i32]);
+    assert_eq!(
+        constructors[2].inputs,
+        vec![RustType::cpp_ptr(
+            Mutability::Not,
+            CppIndirection::Reference,
+            b
+        )]
+    );
+    assert!(!constructors[2].is_safe);
+    assert_eq!(constructors[3].lifetimes, vec![Lifetime("a".to_owned())]);
+}
+
+#[test]
+fn safe_cpp_constructor_with_cpp_ptr_warns() {
+    check_warnings(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe constructor(const c++::B*) as from_ptr;
+}
+"#,
+        expect![[r#"
+            Warning: this C++ constructor is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     safe constructor(const c++::B*) as from_ptr;
+               │     ──────────────────────┬─────────────────────  
+               │                           ╰─────────────────────── this C++ constructor is `safe` but takes a raw pointer, which may be null or invalid; it should probably be `unsafe` (silence this with `#allow(safe_raw_pointer)`)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_constructor_without_a_rust_name_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe constructor(i32);
+}
+"#,
+        expect![[r#"
+            Error: C++ constructors need a Rust name: `as <name>`
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     safe constructor(i32);
+               │     ───────────┬──────────  
+               │                ╰──────────── C++ constructors need a Rust name: `as <name>`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn bare_constructor_without_safety_on_cpp_type_is_rejected() {
+    check_fail(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    constructor(i32);
+    constructor(i32) as new;
+}
+"#,
+        expect![[r#"
+            Error: C++ constructors start with `safe` or `unsafe` and need a Rust name with `as <name>` (e.g. `safe constructor(...) as new;`)
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     constructor(i32);
+               │     ────────┬────────  
+               │             ╰────────── C++ constructors start with `safe` or `unsafe` and need a Rust name with `as <name>` (e.g. `safe constructor(...) as new;`)
+            ───╯
+            Error: C++ constructors start with `safe` or `unsafe` and need a Rust name with `as <name>` (e.g. `safe constructor(...) as new;`)
+               ╭─[ test.zng:6:5 ]
+               │
+             6 │     constructor(i32) as new;
+               │     ────────────┬───────────  
+               │                 ╰───────────── C++ constructors start with `safe` or `unsafe` and need a Rust name with `as <name>` (e.g. `safe constructor(...) as new;`)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn members_with_the_same_rust_name_are_rejected() {
+    check_fail(
+        r#"
+#allow(elided_lifetimes)
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe constructor(i32) as new;
+    unsafe constructor(i64) as new;
+    safe fn new(&const self) -> i32;
+    safe fn value(&const self) -> i32;
+    safe fn value(&const self) -> i64;
+    safe constructor() as value;
+}
+"#,
+        expect![[r#"
+            Error: `new` is already the Rust name of another constructor or member function of this type
+               ╭─[ test.zng:7:5 ]
+               │
+             7 │     unsafe constructor(i64) as new;
+               │     ───────────────┬───────────────  
+               │                    ╰───────────────── `new` is already the Rust name of another constructor or member function of this type
+            ───╯
+            Error: `new` is already the Rust name of another constructor or member function of this type
+               ╭─[ test.zng:8:5 ]
+               │
+             8 │     safe fn new(&const self) -> i32;
+               │     ────────────────┬───────────────  
+               │                     ╰───────────────── `new` is already the Rust name of another constructor or member function of this type
+            ───╯
+            Error: `value` is already the Rust name of another constructor or member function of this type
+                ╭─[ test.zng:10:5 ]
+                │
+             10 │     safe fn value(&const self) -> i64;
+                │     ─────────────────┬────────────────  
+                │                      ╰────────────────── `value` is already the Rust name of another constructor or member function of this type
+            ────╯
+            Error: `value` is already the Rust name of another constructor or member function of this type
+                ╭─[ test.zng:11:5 ]
+                │
+             11 │     safe constructor() as value;
+                │     ──────────────┬─────────────  
+                │                   ╰─────────────── `value` is already the Rust name of another constructor or member function of this type
+            ────╯
+        "#]],
+    );
+}
+
+#[test]
+fn members_with_the_same_rust_name_in_different_files_are_rejected() {
+    let resolver = MockFilesystem::new(vec![(
+        "./a.zng",
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe fn make() -> c++::B;
+    safe constructor(i32) as new;
+}
+"#,
+    )]);
+
+    check_import_fail(
+        r#"
+merge "./a.zng";
+type c++::B {
+    safe constructor() as make;
+    safe constructor(i64) as new;
+}
+"#,
+        expect![[r#"
+            Error: C++ constructor mismatch
+               ╭─[ ./a.zng:2:6 ]
+               │
+             2 │ type c++::B {
+               │      ───┬──  
+               │         ╰──── C++ constructor mismatch
+               │ 
+             6 │     safe constructor(i32) as new;
+               │     ──────────────┬──────────────  
+               │                   ╰──────────────── declaration here ...
+               │
+               ├─[ test.zng:5:5 ]
+               │
+             5 │     safe constructor(i64) as new;
+               │     ──────────────┬──────────────  
+               │                   ╰──────────────── conflicts with the declaration here.
+            ───╯
+            Error: `make` is already the Rust name of another constructor or member function of this type
+               ╭─[ ./a.zng:5:5 ]
+               │
+             5 │     safe fn make() -> c++::B;
+               │     ────────────┬────────────  
+               │                 ╰────────────── `make` is already the Rust name of another constructor or member function of this type
+               │
+               ├─[ test.zng:4:5 ]
+               │
+             4 │     safe constructor() as make;
+               │     ─────────────┬─────────────  
+               │                  ╰─────────────── also declared here
+            ───╯
+        "#]],
+        &resolver,
+    );
+
+    let safety_resolver = MockFilesystem::new(vec![(
+        "./a.zng",
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe constructor(i32) as from_int;
+}
+"#,
+    )]);
+    check_import_fail(
+        r#"
+merge "./a.zng";
+type c++::B {
+    unsafe constructor(i32) as from_int;
+}
+"#,
+        expect![[r#"
+            Error: C++ constructor mismatch
+               ╭─[ ./a.zng:2:6 ]
+               │
+             2 │ type c++::B {
+               │      ───┬──  
+               │         ╰──── C++ constructor mismatch
+               │ 
+             5 │     safe constructor(i32) as from_int;
+               │     ─────────────────┬────────────────  
+               │                      ╰────────────────── declaration here ...
+               │
+               ├─[ test.zng:4:5 ]
+               │
+             4 │     unsafe constructor(i32) as from_int;
+               │     ──────────────────┬─────────────────  
+               │                       ╰─────────────────── conflicts with the declaration here.
+            ───╯
+        "#]],
+        &safety_resolver,
+    );
+}
+
+#[test]
+fn cpp_constructors_can_be_declared_and_deduplicated_across_files() {
+    let resolver = MockFilesystem::new(vec![(
+        "./a.zng",
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe constructor() as new;
+    safe constructor<'a>(&'a const c++::B) as copy;
+}
+"#,
+    )]);
+    let parsed = parse_str_with_resolver(
+        r#"
+merge "./a.zng";
+type c++::B {
+    safe constructor() as new;
+    safe constructor<'b>(&'b const c++::B) as copy;
+    safe constructor(i32) as from_i32;
+}
+"#,
+        NullCfg,
+        &resolver,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    let ty = parsed.spec.types.first().expect("no type parsed");
+    let names: Vec<_> = ty
+        .cpp_constructors
+        .iter()
+        .map(|c| c.rust_name.as_str())
+        .collect();
+    assert_eq!(names, ["new", "copy", "from_i32"]);
+}
+
+#[test]
+fn cpp_constructors_with_the_same_argument_types_are_fine() {
+    // Each one is its own Rust function, so nothing overlaps.
+    let parsed = parse_str(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe constructor(i32) as new;
+    unsafe constructor(i32) as new_unchecked;
+    safe constructor<'a>(i32, &'a const c++::B) as from_const;
+    safe constructor<'b>(i32, &'b var c++::B) as from_var;
+    safe constructor(const c++::B&) as from_ref;
+    unsafe constructor(const c++::B*) as from_ptr;
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let ty = parsed.spec.types.first().expect("no type parsed");
+    assert_eq!(ty.cpp_constructors.len(), 6);
+}
+
+#[test]
+fn cpp_constructor_on_non_by_value_or_non_cpp_type_is_rejected() {
+    for src in [
+        // Reference-only `c++::` type without layout.
+        "type c++::B { safe constructor(i32) as new; }\n",
+        // `c++::` type with `#layout`, but without `#trivially_relocatable`.
+        "type c++::B { #layout(size = 8, align = 4); safe constructor(i32) as new; }\n",
+        // `c++::` type with legacy `#cpp_stack_owned` (not `#trivially_relocatable`).
+        "type c++::B { #cpp_stack_owned \"::B\"; #layout(size = 8, align = 4); safe constructor(i32) as new; }\n",
+        // Non-`c++::` type with `#cpp_stack_owned`.
+        "type crate::MyWrapper { #cpp_stack_owned \"::B\"; #layout(size = 8, align = 4); safe constructor(i32) as new; }\n",
+        // Ordinary Rust type.
+        "type crate::Foo { #layout(size = 8, align = 4); safe constructor(i32) as new; }\n",
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(
+                "C++ constructors can only be declared on `c++::` types that Rust holds by value \
+                 (with a layout and `#trivially_relocatable`)"
+            ),
+            "expected non-by-value/non-cpp constructor error for `{src}`, got:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn cpp_constructor_lifetime_diagnostics() {
+    check_fail(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe constructor(&'a const c++::B) as copy;
+}
+"#,
+        expect![[r#"
+            Error: undeclared lifetime `'a`: declare it on the function, `impl` or `type` (e.g. `fn f<'a>(...)`)
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     safe constructor(&'a const c++::B) as copy;
+               │     ─────────────────────┬─────────────────────  
+               │                          ╰─────────────────────── undeclared lifetime `'a`: declare it on the function, `impl` or `type` (e.g. `fn f<'a>(...)`)
+            ───╯
+        "#]],
+    );
+    check_warnings(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe constructor(&const c++::B) as copy;
+}
+"#,
+        expect![[r#"
+            Warning: this C++ constructor has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `safe constructor<'a>(&'a const c++::T) as from_ref`), or silence this with `#allow(elided_lifetimes)`
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     safe constructor(&const c++::B) as copy;
+               │     ────────────────────┬───────────────────  
+               │                         ╰───────────────────── this C++ constructor has a reference without a lifetime, which can't be checked against C++; name the lifetimes (e.g. `safe constructor<'a>(&'a const c++::T) as from_ref`), or silence this with `#allow(elided_lifetimes)`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_constructor_with_self_in_parameter_is_rejected() {
+    check_fail(
+        r#"
+type c++::Foo {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe constructor<'a>(&'a const self) as copy;
+}
+
+mod c++::geo {
+    type Point {
+        #layout(size = 8, align = 4);
+        #trivially_relocatable;
+        safe constructor<'a>(&'a const self) as copy;
+    }
+}
+"#,
+        expect![[r#"
+            Error: C++ constructors do not have a `self` receiver; spell out the C++ type path explicitly (e.g. `&'a const c++::ns::Foo`)
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     safe constructor<'a>(&'a const self) as copy;
+               │     ──────────────────────┬──────────────────────  
+               │                           ╰──────────────────────── C++ constructors do not have a `self` receiver; spell out the C++ type path explicitly (e.g. `&'a const c++::ns::Foo`)
+            ───╯
+            Error: C++ constructors do not have a `self` receiver; spell out the C++ type path explicitly (e.g. `&'a const c++::ns::Foo`)
+                ╭─[ test.zng:12:9 ]
+                │
+             12 │         safe constructor<'a>(&'a const self) as copy;
+                │         ──────────────────────┬──────────────────────  
+                │                               ╰──────────────────────── C++ constructors do not have a `self` receiver; spell out the C++ type path explicitly (e.g. `&'a const c++::ns::Foo`)
+            ────╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_constructor_additional_validation_paths() {
+    // `constructor<'a>(...)` and `constructor(...) as foo` on a Rust type are rejected.
+    check_fail(
+        r#"
+type crate::Foo {
+    #layout(size = 4, align = 4);
+    constructor<'a>(i32);
+    constructor(i32) as foo;
+}
+"#,
+        expect![[r#"
+            Error: Rust tuple/struct `constructor` declarations don't take lifetime parameters or `as <name>` (C++ constructors start with `safe` or `unsafe` on `c++::` types)
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     constructor<'a>(i32);
+               │     ──────────┬──────────  
+               │               ╰──────────── Rust tuple/struct `constructor` declarations don't take lifetime parameters or `as <name>` (C++ constructors start with `safe` or `unsafe` on `c++::` types)
+            ───╯
+            Error: Rust tuple/struct `constructor` declarations don't take lifetime parameters or `as <name>` (C++ constructors start with `safe` or `unsafe` on `c++::` types)
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     constructor(i32) as foo;
+               │     ────────────┬───────────  
+               │                 ╰───────────── Rust tuple/struct `constructor` declarations don't take lifetime parameters or `as <name>` (C++ constructors start with `safe` or `unsafe` on `c++::` types)
+            ───╯
+        "#]],
+    );
+
+    // Rust keywords and inherent wrapper method names (`as_const`, `as_const_mut`, `into_const`)
+    // are rejected on `CppConstructor` with a rename-aware hint.
+    check_fail(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe constructor() as type;
+    safe constructor() as as_const;
+    safe constructor() as as_const_mut;
+    safe constructor() as into_const;
+}
+"#,
+        expect![[r#"
+            Error: `type` is a Rust keyword and cannot be used as the Rust function name in `as type`
+               ╭─[ test.zng:5:5 ]
+               │
+             5 │     safe constructor() as type;
+               │     ─────────────┬─────────────  
+               │                  ╰─────────────── `type` is a Rust keyword and cannot be used as the Rust function name in `as type`
+            ───╯
+            Error: `as_const` collides with an inherent conversion method on `c++::` wrappers; choose a different name in `as <rust_name>`
+               ╭─[ test.zng:6:5 ]
+               │
+             6 │     safe constructor() as as_const;
+               │     ───────────────┬───────────────  
+               │                    ╰───────────────── `as_const` collides with an inherent conversion method on `c++::` wrappers; choose a different name in `as <rust_name>`
+            ───╯
+            Error: `as_const_mut` collides with an inherent conversion method on `c++::` wrappers; choose a different name in `as <rust_name>`
+               ╭─[ test.zng:7:5 ]
+               │
+             7 │     safe constructor() as as_const_mut;
+               │     ─────────────────┬─────────────────  
+               │                      ╰─────────────────── `as_const_mut` collides with an inherent conversion method on `c++::` wrappers; choose a different name in `as <rust_name>`
+            ───╯
+            Error: `into_const` collides with an inherent conversion method on `c++::` wrappers; choose a different name in `as <rust_name>`
+               ╭─[ test.zng:8:5 ]
+               │
+             8 │     safe constructor() as into_const;
+               │     ────────────────┬────────────────  
+               │                     ╰────────────────── `into_const` collides with an inherent conversion method on `c++::` wrappers; choose a different name in `as <rust_name>`
+            ───╯
+        "#]],
+    );
+
+    // Reference-only / undeclared `c++::` parameter by value in a constructor is rejected.
+    check_fail(
+        r#"
+type c++::RefOnly {}
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe constructor(c++::RefOnly) as from_ref_only;
+}
+"#,
+        expect![[r#"
+            Error: `c++::RefOnly` cannot be passed or returned by value without `#layout(...)` and `#trivially_relocatable`
+               ╭─[ test.zng:6:5 ]
+               │
+             6 │     safe constructor(c++::RefOnly) as from_ref_only;
+               │     ────────────────────────┬───────────────────────  
+               │                             ╰───────────────────────── `c++::RefOnly` cannot be passed or returned by value without `#layout(...)` and `#trivially_relocatable`
+            ───╯
+        "#]],
+    );
+
+    // `#unsafe(trivially_relocatable)` allows C++ constructors just like `#trivially_relocatable`.
+    let parsed = parse_str(
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #unsafe(trivially_relocatable);
+    safe constructor(i32) as new;
+}
+"#,
+        NullCfg,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    assert_eq!(parsed.spec.types[0].cpp_constructors.len(), 1);
+}
+
+#[test]
+fn template_types_substitute_cpp_constructors_and_reject_invalid_targets() {
+    use zngur_def::{Lifetime, Mutability, PrimitiveRustType, TypeVar, ZngurCppConstructor};
+
+    let parsed = parse_str(
+        r#"
+#unstable(template_types)
+type<T> T {
+    safe constructor<'a>(&'a const T) as copy;
+    safe constructor(i32) as from_int;
+}
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+}
+"#,
+        NullCfg,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    let ty = &parsed.spec.types[0];
+    assert_eq!(ty.cpp_constructors.len(), 2);
+    assert_eq!(ty.cpp_constructors[0].rust_name, "copy");
+    assert_eq!(ty.cpp_constructors[0].lifetimes, vec![Lifetime("a".into())]);
+    assert_eq!(
+        ty.cpp_constructors[0].inputs,
+        vec![RustType::Ref(
+            Mutability::Not,
+            Some(Lifetime("a".into())),
+            Box::new(RustType::CppConst(Box::new(RustType::Cpp(vec![
+                "B".into()
+            ])))),
+        )]
+    );
+    assert_eq!(ty.cpp_constructors[1].rust_name, "from_int");
+    assert_eq!(
+        ty.cpp_constructors[1].inputs,
+        vec![RustType::Primitive(PrimitiveRustType::Int(32))]
+    );
+
+    // Colliding constructor lifetime parameters are alpha-renamed when `target_lts` /
+    // `outer_in_scope` already contains the lifetime.
+    let lt_a = Lifetime("a".into());
+    let var_t = RustType::TypeVar(TypeVar("T".into()));
+    let template = zngur_def::ZngurType {
+        ty: var_t.clone(),
+        lifetimes: vec![],
+        layout: None,
+        trivially_relocatable: zngur_def::TriviallyRelocatable::No,
+        wellknown_traits: vec![],
+        exhaustive: true,
+        methods: vec![],
+        cpp_methods: vec![],
+        cpp_constructors: vec![ZngurCppConstructor {
+            rust_name: "from_borrow".into(),
+            lifetimes: vec![lt_a.clone()],
+            inputs: vec![
+                RustType::Ref(
+                    Mutability::Not,
+                    Some(lt_a.clone()),
+                    Box::new(RustType::Primitive(PrimitiveRustType::Int(32))),
+                ),
+                var_t,
+            ],
+            is_safe: true,
+        }],
+        constructor: None,
+        variants: vec![],
+        fields: vec![],
+        cpp_heap_allocated: None,
+        cpp_ref: None,
+        cpp_stack_owned: None,
+    };
+    let target_ty = RustType::Adt(zngur_def::RustPathAndGenerics {
+        path: vec!["crate".into(), "Foo".into()],
+        lifetimes: vec![lt_a.clone()],
+        generics: vec![],
+        named_generics: vec![],
+    });
+    let target = zngur_def::ZngurType {
+        ty: target_ty.clone(),
+        lifetimes: vec![lt_a.clone()],
+        cpp_constructors: vec![],
+        ..template.clone()
+    };
+    let matched = crate::try_match_template(&target, &template)
+        .expect("template should match")
+        .0;
+    let fresh_a = Lifetime("a_0".into());
+    assert_eq!(matched.cpp_constructors[0].lifetimes, vec![fresh_a.clone()]);
+    assert_eq!(
+        matched.cpp_constructors[0].inputs,
+        vec![
+            RustType::Ref(
+                Mutability::Not,
+                Some(fresh_a),
+                Box::new(RustType::Primitive(PrimitiveRustType::Int(32))),
+            ),
+            target_ty,
+        ]
+    );
+
+    for src in [
+        r#"
+#unstable(template_types)
+type<T> T {
+    safe constructor(i32) as new;
+}
+type crate::Foo {
+    #layout(size = 8, align = 4);
+}
+"#,
+        r#"
+#unstable(template_types)
+type<T> T {
+    safe constructor(i32) as new;
+}
+type c++::RefOnly {}
+"#,
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(
+                "C++ constructors can only be declared on `c++::` types that Rust holds by value \
+                 (with a layout and `#trivially_relocatable`)"
+            ),
+            "unexpected error for `{src}`:\n{err}"
+        );
+    }
 }

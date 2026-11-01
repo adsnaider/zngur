@@ -1,11 +1,12 @@
-//! The C++ side of C++ member functions that Rust calls (`ZngurCppMethod`): `extern "C"`
-//! functions that convert the arguments and call them directly, so that nobody has to write a
-//! forwarding body by hand.
+//! The C++ side of C++ member functions and constructors that Rust calls (`ZngurCppMethod`,
+//! `ZngurCppConstructor`): `extern "C"` functions that convert the arguments and call them
+//! directly, so that nobody has to write a forwarding body by hand.
 
 use std::collections::HashMap;
 
 use zngur_def::{
-    CppConstness, CppIndirection, PrimitiveRustType, RustType, ZngurCppMethod, ZngurMethodReceiver,
+    CppConstness, CppIndirection, PrimitiveRustType, RustType, ZngurCppConstructor, ZngurCppMethod,
+    ZngurMethodReceiver,
 };
 
 use crate::rust::IntoCpp;
@@ -166,6 +167,23 @@ impl BridgeRenderer<'_> {
         };
         format!(
             "void {mangled_name}({}) {{\n  {check}{body}\n}}\n",
+            params.join(", ")
+        )
+    }
+
+    /// The bridge function `mangled_name` for `constructor` of the C++ type `owner_cpp_type`,
+    /// which constructs the object in place, in `o`.
+    pub fn constructor(
+        &self,
+        mangled_name: &str,
+        owner_cpp_type: &str,
+        constructor: &ZngurCppConstructor,
+    ) -> String {
+        let mut params = vec![];
+        let args = self.args(&constructor.inputs, &mut params);
+        params.push("uint8_t* o".to_owned());
+        format!(
+            "void {mangled_name}({}) {{\n  ::new (static_cast<void*>(o)) {owner_cpp_type}({args});\n}}\n",
             params.join(", ")
         )
     }

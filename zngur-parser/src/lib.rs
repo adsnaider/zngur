@@ -13,10 +13,10 @@ use zngur_def::{
     AdditionalIncludes, ConflictSource, ConvertPanicToException, CppConstness, CppHeapAllocated,
     CppIndirection, CppRef, CppStackOwned, Import, LayoutPolicy, Lifetime, Merge, MergeFailure,
     ModuleImport, Mutability, PrimitiveRustType, RustPathAndGenerics, RustTrait, RustType,
-    TriviallyRelocatable, TypeVar, ZngurConstructor, ZngurCppMethod, ZngurExternCppFn,
-    ZngurExternCppImpl, ZngurField, ZngurFn, ZngurMethod, ZngurMethodDetails, ZngurMethodReceiver,
-    ZngurSpec, ZngurTrait, ZngurType, ZngurVariant, ZngurWellknownTrait, cpp_handle_field_name,
-    cpp_handle_keyword,
+    TriviallyRelocatable, TypeVar, ZngurConstructor, ZngurCppConstructor, ZngurCppMethod,
+    ZngurExternCppFn, ZngurExternCppImpl, ZngurField, ZngurFn, ZngurMethod, ZngurMethodDetails,
+    ZngurMethodReceiver, ZngurSpec, ZngurTrait, ZngurType, ZngurVariant, ZngurWellknownTrait,
+    cpp_handle_field_name, cpp_handle_keyword,
 };
 
 pub type Span = SimpleSpan<usize>;
@@ -538,7 +538,9 @@ enum ParsedTypeItem<'a> {
     Traits(Vec<Spanned<ZngurWellknownTrait>>),
     NonExhaustive,
     Constructor {
+        lifetimes: Vec<&'a str>,
         args: ParsedConstructorArgs<'a>,
+        rust_name: Option<&'a str>,
     },
     Variant {
         name: &'a str,
@@ -570,6 +572,15 @@ enum ParsedTypeItem<'a> {
         use_path: Option<ParsedPath<'a>>,
         deref: Option<ParsedRustType<'a>>,
         alias: Option<(&'a str, bool)>,
+    },
+    /// A C++ constructor:
+    /// `(safe | unsafe) constructor[<lifetimes...>](types...) as rust_name;` (`rust_name` is
+    /// `None` if `as` was left off, to give a clear error).
+    CppConstructor {
+        is_safe: bool,
+        lifetimes: Vec<&'a str>,
+        inputs: Vec<ParsedRustType<'a>>,
+        rust_name: Option<&'a str>,
     },
     CppValue {
         field: &'a str,
@@ -1102,10 +1113,14 @@ fn check_rust_fn_name(
         return false;
     }
     if is_type_member && matches!(name, "as_const" | "as_const_mut" | "into_const") {
+        let hint = if has_rename {
+            "choose a different name in `as <rust_name>`"
+        } else {
+            "rename it with `as <rust_name>`"
+        };
         ctx.add_error_str(
             &format!(
-                "`{name}` collides with an inherent conversion method on `c++::` wrappers; rename \
-                 it with `as <rust_name>`"
+                "`{name}` collides with an inherent conversion method on `c++::` wrappers; {hint}"
             ),
             span,
         );
@@ -1187,9 +1202,14 @@ fn check_cpp_signature_lints_at(
     if !is_allowed(ctx, "elided_lifetimes")
         && (elided_receiver || inputs.iter().chain([output]).any(has_elided_ref))
     {
+        let example = if what == "constructor" {
+            "safe constructor<'a>(&'a const c++::T) as from_ref"
+        } else {
+            "fn f<'a>(&'a const self) -> &'a const T"
+        };
         let warning = format!(
             "this C++ {what} has a reference without a lifetime, which can't be checked \
-             against C++; name the lifetimes (e.g. `fn f<'a>(&'a const self) -> &'a const T`), \
+             against C++; name the lifetimes (e.g. `{example}`), \
              or silence this with `#allow(elided_lifetimes)`"
         );
         ctx.add_report(
@@ -1247,15 +1267,17 @@ fn contains_raw_ptr(ty: &RustType) -> bool {
     }
 }
 
-/// Reports a C++ member function whose Rust name `name` an earlier member function of the same
-/// type already has, and returns whether there was none.
+/// Reports a C++ member whose Rust name `name` an earlier constructor or member function of the
+/// same type already has, and returns whether there was none.
 fn check_member_name(
     ctx: &mut ParseContext,
     span: Span,
     name: &str,
+    constructors: &[ZngurCppConstructor],
     methods: &[ZngurCppMethod],
 ) -> bool {
-    let taken = methods.iter().any(|m| m.rust_name() == name);
+    let taken = constructors.iter().any(|c| c.rust_name == name)
+        || methods.iter().any(|m| m.rust_name() == name);
     if taken {
         ctx.add_error_str(&duplicate_member_name(name), span);
     }
@@ -1263,7 +1285,9 @@ fn check_member_name(
 }
 
 fn duplicate_member_name(name: &str) -> String {
-    format!("`{name}` is already the Rust name of another member function of this type")
+    format!(
+        "`{name}` is already the Rust name of another constructor or member function of this type"
+    )
 }
 
 /// How `ty` is spelled in a `.zng` file (for diagnostics).
@@ -1412,9 +1436,9 @@ fn is_valid_cpp_object_inner(ty: &RustType) -> bool {
     )
 }
 
-/// Checks `RustType::Cpp(_)` occurrences in the signature of a direct C++ member function:
-/// every `c++::` type must be declared locally or imported (when `check_undeclared` is true), and
-/// can only appear by value if it is held by value in Rust (`#layout(...)` and
+/// Checks `RustType::Cpp(_)` occurrences in the signature of a direct C++ item (member function,
+/// constructor): every `c++::` type must be declared locally or imported (when `check_undeclared`
+/// is true), and can only appear by value if it is held by value in Rust (`#layout(...)` and
 /// `#trivially_relocatable`).
 fn check_cpp_signature_type(
     ty: &RustType,
@@ -2163,6 +2187,7 @@ impl ProcessedItem<'_> {
 
                 let mut methods = vec![];
                 let mut cpp_methods: Vec<ZngurCppMethod> = vec![];
+                let mut cpp_constructors: Vec<ZngurCppConstructor> = vec![];
                 let mut constructor = None;
                 let mut variants = vec![];
                 let mut fields = vec![];
@@ -2339,7 +2364,29 @@ impl ProcessedItem<'_> {
                             }
                             exhaustive = false;
                         }
-                        ParsedTypeItem::Constructor { args } => {
+                        ParsedTypeItem::Constructor {
+                            lifetimes: ctor_lifetimes,
+                            args,
+                            rust_name,
+                        } => {
+                            if matches!(rust_ty, RustType::Cpp(_)) {
+                                ctx.add_error_str(
+                                    "C++ constructors start with `safe` or `unsafe` and need a \
+                                     Rust name with `as <name>` (e.g. `safe constructor(...) as \
+                                     new;`)",
+                                    item_span,
+                                );
+                                continue;
+                            }
+                            if !ctor_lifetimes.is_empty() || rust_name.is_some() {
+                                ctx.add_error_str(
+                                    "Rust tuple/struct `constructor` declarations don't take \
+                                     lifetime parameters or `as <name>` (C++ constructors start \
+                                     with `safe` or `unsafe` on `c++::` types)",
+                                    item_span,
+                                );
+                                continue;
+                            }
                             if constructor.is_some() {
                                 ctx.add_error_str("Duplicate constructor found", item_span);
                             }
@@ -2671,6 +2718,7 @@ impl ProcessedItem<'_> {
                                     ctx,
                                     item_span,
                                     method.rust_name(),
+                                    &cpp_constructors,
                                     &cpp_methods,
                                 ) {
                                     continue;
@@ -2794,6 +2842,79 @@ impl ProcessedItem<'_> {
                                 );
                                 methods.push(method);
                             }
+                        }
+                        ParsedTypeItem::CppConstructor {
+                            is_safe,
+                            lifetimes: constructor_lifetimes,
+                            inputs,
+                            rust_name,
+                        } => {
+                            let Some(rust_name) = rust_name else {
+                                ctx.add_error_str(
+                                    "C++ constructors need a Rust name: `as <name>`",
+                                    item_span,
+                                );
+                                continue;
+                            };
+                            if inputs.iter().any(contains_relative_self) {
+                                ctx.add_error_str(
+                                    "C++ constructors do not have a `self` receiver; spell out the \
+                                     C++ type path explicitly (e.g. `&'a const c++::ns::Foo`)",
+                                    item_span,
+                                );
+                                continue;
+                            }
+                            let inputs: Vec<RustType> =
+                                inputs.into_iter().map(|x| x.to_zngur(scope, ctx)).collect();
+                            let constructor_lifetimes = lifetimes(&constructor_lifetimes);
+                            if !check_types(
+                                ctx,
+                                item_span,
+                                &constructor_lifetimes,
+                                &inputs,
+                                [],
+                                LifetimeContext::Item,
+                                true,
+                                true,
+                            ) {
+                                continue;
+                            }
+                            if !check_rust_fn_name(ctx, item_span, rust_name, true, true) {
+                                continue;
+                            }
+                            check_cpp_signature_lints(
+                                ctx,
+                                item_span,
+                                "constructor",
+                                is_safe,
+                                false,
+                                false,
+                                &inputs,
+                                &RustType::UNIT,
+                            );
+                            if !check_member_name(
+                                ctx,
+                                item_span,
+                                rust_name,
+                                &cpp_constructors,
+                                &cpp_methods,
+                            ) {
+                                continue;
+                            }
+                            let constructor = ZngurCppConstructor {
+                                rust_name: rust_name.to_owned(),
+                                lifetimes: constructor_lifetimes,
+                                inputs,
+                                is_safe,
+                            };
+                            ctx.record_span(
+                                &PartialSpanKey::cpp_constructor(
+                                    rust_ty.clone(),
+                                    constructor.rust_name.clone(),
+                                ),
+                                item_span.into_range(),
+                            );
+                            cpp_constructors.push(constructor);
                         }
                         ParsedTypeItem::CppValue { field: _, cpp_type } => {
                             ctx.add_warning_str(
@@ -2952,6 +3073,7 @@ impl ProcessedItem<'_> {
                     layout,
                     methods,
                     cpp_methods,
+                    cpp_constructors,
                     wellknown_traits: wt,
                     exhaustive,
                     constructor,
@@ -3472,6 +3594,9 @@ enum PartialSpanKey {
     /// a [`ZngurCppMethod`](zngur_def::ZngurCppMethod) on a [`Type`](zngur_def::ZngurType)
     /// outer_ty, method
     CppMethod(RustType, ZngurCppMethod),
+    /// a [`CppConstructor`](zngur_def::ZngurCppConstructor)
+    /// outer_ty, rust_name
+    CppConstructor(RustType, String),
     /// a [`Field`](`zngur_def::ZngurField`) on a [`Type`](zngur_def::ZngurType)
     /// or it's internal [`Variant`](zngur_def::ZngurVariant)
     /// outer_ty, variant?, field_name
@@ -3552,6 +3677,10 @@ impl PartialSpanKey {
 
     fn field(outer_ty: RustType, variant: Option<String>, name: String) -> Self {
         Self::Field(outer_ty.with_erased_lifetimes(), variant, name)
+    }
+
+    fn cpp_constructor(outer_ty: RustType, name: String) -> Self {
+        Self::CppConstructor(outer_ty.with_erased_lifetimes(), name)
     }
 }
 
@@ -3646,6 +3775,9 @@ impl VariantQualifiedSpanKeyExt for zngur_def::ConflictSource {
             }
             zngur_def::ConflictSource::CppMethod(method) => {
                 PartialSpanKey::cpp_method(outer_ty, (**method).clone())
+            }
+            zngur_def::ConflictSource::CppConstructor(name) => {
+                PartialSpanKey::cpp_constructor(outer_ty, name.clone())
             }
             zngur_def::ConflictSource::Field(name) => {
                 PartialSpanKey::field(outer_ty, variant, name.clone())
@@ -4910,6 +5042,7 @@ impl ZngurSpecBuilder {
                             .iter()
                             .flat_map(|m| m.inputs.iter().chain([&m.output])),
                     )
+                    .chain(ty.cpp_constructors.iter().flat_map(|c| c.inputs.iter()))
                     .try_for_each(|t| check_cpp_objects_inner(t, true, true, Some(&heap_info)))
                     .and_then(|()| {
                         [&ty.ty]
@@ -5295,6 +5428,27 @@ impl ZngurSpecBuilder {
                     );
                 }
             }
+            if matches!(ty.ty, RustType::Cpp(_))
+                && let Some(ctor) = &ty.constructor
+            {
+                let c_key = ctor.clone().into_span_key_with(ty.ty.clone());
+                let c_span = ctx
+                    .fetch_spans_global(&c_key)
+                    .first()
+                    .copied()
+                    .cloned()
+                    .or_else(|| template_locations.last().cloned())
+                    .or_else(|| ctx.fetch_spans_global(ty).first().copied().cloned())
+                    .unwrap_or((0, 0usize..0));
+                let msg = "C++ constructors start with `safe` or `unsafe` and need a Rust name \
+                           with `as <name>` (e.g. `safe constructor(...) as new;`)";
+                ctx.add_fatal_report(
+                    Report::build(ReportKind::Error, c_span.clone())
+                        .with_message(msg)
+                        .with_label(Label::new(c_span).with_message(msg).with_color(Color::Red))
+                        .finish(),
+                );
+            }
             if matches!(ty.ty, RustType::Cpp(_)) && !ty.methods.is_empty() {
                 for rust_method in &ty.methods {
                     let m_key = rust_method.data.clone().into_span_key_with(ty.ty.clone());
@@ -5393,9 +5547,14 @@ impl ZngurSpecBuilder {
                                 method.rust_name(),
                                 "as_const" | "as_const_mut" | "into_const"
                             ) {
+                                let hint = if method.rust_name.is_some() {
+                                    "choose a different name in `as <rust_name>`"
+                                } else {
+                                    "rename it with `as <rust_name>`"
+                                };
                                 let msg = format!(
                                     "`{}` collides with an inherent conversion method on `c++::` \
-                                     wrappers; rename it with `as <rust_name>`",
+                                     wrappers; {hint}",
                                     method.rust_name()
                                 );
                                 ctx.add_fatal_report(
@@ -5425,32 +5584,6 @@ impl ZngurSpecBuilder {
                                 );
                             }
                         }
-                        if let Some(rust_method) = ty
-                            .methods
-                            .iter()
-                            .find(|m| m.data.name == method.rust_name())
-                        {
-                            let other_key =
-                                rust_method.data.clone().into_span_key_with(ty.ty.clone());
-                            let other_span =
-                                ctx.fetch_spans_global(&other_key).first().copied().cloned();
-                            let msg = duplicate_member_name(method.rust_name());
-                            let mut report = Report::build(ReportKind::Error, m_span.clone())
-                                .with_message(&msg)
-                                .with_label(
-                                    Label::new(m_span.clone())
-                                        .with_message(&msg)
-                                        .with_color(Color::Red),
-                                );
-                            if let Some(other_span) = other_span {
-                                report = report.with_label(
-                                    Label::new(other_span)
-                                        .with_message("also declared here")
-                                        .with_color(Color::Yellow),
-                                );
-                            }
-                            ctx.add_fatal_report(report.finish());
-                        }
                         if let Err(msg) =
                             method
                                 .inputs
@@ -5478,6 +5611,133 @@ impl ZngurSpecBuilder {
                             );
                         }
                     }
+                }
+            }
+            if let Some(first_ctor) = ty.cpp_constructors.first() {
+                if !matches!(ty.ty, RustType::Cpp(_))
+                    || !ty.trivially_relocatable.is_relocatable()
+                    || ty.cpp_by_value_layout().is_none()
+                {
+                    let ctor_key = PartialSpanKey::cpp_constructor(
+                        ty.ty.clone(),
+                        first_ctor.rust_name.clone(),
+                    );
+                    let span = ctx
+                        .fetch_spans_global(&ctor_key)
+                        .first()
+                        .copied()
+                        .cloned()
+                        .or_else(|| template_locations.last().cloned())
+                        .or_else(|| ctx.fetch_spans_global(ty).first().copied().cloned())
+                        .unwrap_or((0, 0usize..0));
+                    let msg = "C++ constructors can only be declared on `c++::` types that Rust \
+                               holds by value (with a layout and `#trivially_relocatable`)";
+                    ctx.add_fatal_report(
+                        Report::build(ReportKind::Error, span.clone())
+                            .with_message(msg)
+                            .with_label(Label::new(span).with_message(msg).with_color(Color::Red))
+                            .finish(),
+                    );
+                } else {
+                    for ctor in &ty.cpp_constructors {
+                        let c_key =
+                            PartialSpanKey::cpp_constructor(ty.ty.clone(), ctor.rust_name.clone());
+                        let c_span = ctx
+                            .fetch_spans_global(&c_key)
+                            .first()
+                            .copied()
+                            .cloned()
+                            .or_else(|| template_locations.last().cloned())
+                            .or_else(|| ctx.fetch_spans_global(ty).first().copied().cloned())
+                            .unwrap_or((0, 0usize..0));
+                        if let Err(msg) = ctor.inputs.iter().try_for_each(|t| {
+                            check_cpp_signature_type(
+                                t,
+                                false,
+                                &known_cpp_types,
+                                &by_value_cpp_types,
+                                !had_incomplete_imports,
+                            )
+                        }) {
+                            ctx.add_fatal_report(
+                                Report::build(ReportKind::Error, c_span.clone())
+                                    .with_message(&msg)
+                                    .with_label(
+                                        Label::new(c_span)
+                                            .with_message(&msg)
+                                            .with_color(Color::Red),
+                                    )
+                                    .finish(),
+                            );
+                        }
+                    }
+                }
+            }
+            // Members of the same kind are merged by their Rust name, and duplicates in a
+            // declaration were reported there, so this finds C++ members of different kinds with
+            // the same Rust name (or a C++ member colliding with a Rust `fn` method).
+            let mut member_names: std::collections::HashMap<&str, ReportSpan> =
+                std::collections::HashMap::new();
+            for (name, key) in ty
+                .cpp_constructors
+                .iter()
+                .map(|c| {
+                    (
+                        c.rust_name.as_str(),
+                        PartialSpanKey::cpp_constructor(ty.ty.clone(), c.rust_name.clone()),
+                    )
+                })
+                .chain(
+                    ty.cpp_methods
+                        .iter()
+                        .map(|m| (m.rust_name(), m.into_span_key_with(ty.ty.clone()))),
+                )
+            {
+                let spans = ctx.fetch_spans_global(&key);
+                let prev_span = member_names.get(name).cloned().or_else(|| {
+                    ty.methods
+                        .iter()
+                        .find(|m| m.data.name == name)
+                        .and_then(|rust_method| {
+                            let other_key =
+                                rust_method.data.clone().into_span_key_with(ty.ty.clone());
+                            ctx.fetch_spans_global(&other_key).first().copied().cloned()
+                        })
+                });
+                if let Some(prev_span) = prev_span {
+                    let span = spans
+                        .iter()
+                        .copied()
+                        .find(|s| *s != &prev_span)
+                        .or_else(|| spans.first().copied())
+                        .cloned()
+                        .or_else(|| template_locations.last().cloned())
+                        .or_else(|| ctx.fetch_spans_global(ty).first().copied().cloned())
+                        .unwrap_or((0, 0usize..0));
+                    let msg = duplicate_member_name(name);
+                    let mut report = Report::build(ReportKind::Error, span.clone())
+                        .with_message(&msg)
+                        .with_label(
+                            Label::new(span.clone())
+                                .with_message(&msg)
+                                .with_color(Color::Red),
+                        );
+                    if prev_span != span && prev_span != (0, 0usize..0) {
+                        report = report.with_label(
+                            Label::new(prev_span)
+                                .with_message("also declared here")
+                                .with_color(Color::Yellow),
+                        );
+                    }
+                    ctx.add_fatal_report(report.finish());
+                } else if let Some(first_span) = spans
+                    .first()
+                    .copied()
+                    .cloned()
+                    .or_else(|| template_locations.last().cloned())
+                    .or_else(|| ctx.fetch_spans_global(ty).first().copied().cloned())
+                {
+                    member_names.insert(name, first_span);
                 }
             }
         }
@@ -6503,8 +6763,16 @@ fn inner_type_item<'a>()
         .or(empty().to(ParsedConstructorArgs::Unit))
         .boxed();
     let constructor = just(Token::Ident("constructor"))
-        .ignore_then(constructor_args)
-        .map(|args| ParsedTypeItem::Constructor { args });
+        .ignore_then(lifetime_params())
+        .then(constructor_args)
+        .then(just(Token::KwAs).ignore_then(cpp_name()).or_not())
+        .map(
+            |((lifetimes, args), rust_name)| ParsedTypeItem::Constructor {
+                lifetimes,
+                args,
+                rust_name,
+            },
+        );
     let field = just(Token::Ident("field")).ignore_then(
         (select! {
             Token::Ident(c) => c.to_owned(),
@@ -6602,13 +6870,28 @@ fn inner_type_item<'a>()
         .map(|(name, items)| ParsedTypeItem::Variant { name, items });
 
     recursive(|item| {
-        // Functions inside `type` blocks (`ParsedTypeItem::Fn`), lowered to `ZngurCppMethod` on
-        // `c++::` types and `ZngurMethod` on Rust types.
+        // Functions and C++ constructors inside `type` blocks.
         let fn_params = rust_type()
             .separated_by(just(Token::Comma))
             .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(just(Token::ParenOpen), just(Token::ParenClose));
+        let cpp_constructor = choice((
+            just(Token::KwSafe).to(true),
+            just(Token::KwUnsafe).to(false),
+        ))
+        .then_ignore(just(Token::Ident("constructor")))
+        .then(lifetime_params())
+        .then(fn_params.clone())
+        .then(just(Token::KwAs).ignore_then(cpp_name()).or_not())
+        .map(
+            |(((is_safe, lifetimes), inputs), rust_name)| ParsedTypeItem::CppConstructor {
+                is_safe,
+                lifetimes,
+                inputs,
+                rust_name,
+            },
+        );
         let safety_and_static = choice((
             just(Token::KwSafe).to(true),
             just(Token::KwUnsafe).to(false),
@@ -6688,6 +6971,7 @@ fn inner_type_item<'a>()
             cpp_ref.boxed(),
             cpp_stack_owned.boxed(),
             trivially_relocatable.boxed(),
+            cpp_constructor.boxed(),
             type_fn.boxed(),
         ));
 
@@ -6843,6 +7127,10 @@ fn cpp_name_with_ident_flag<'a>()
         Token::KwUnsafe => ("unsafe", false),
         Token::KwUse => ("use", false),
     }
+}
+
+fn cpp_name<'a>() -> impl Parser<'a, ParserInput<'a>, &'a str, ZngParserExtra<'a>> + Clone {
+    cpp_name_with_ident_flag().map(|(s, _)| s)
 }
 
 fn additional_include_item<'a>()

@@ -32,6 +32,14 @@ type c++::MyCppWrapper {
     safe fn with_rust_tag(&const self, &crate::RustTag) -> i32;
     safe fn swapped(&const self) -> c++::MyCppWrapper;
     safe fn diagonal(i32) -> c++::MyCppWrapper;
+
+    // C++ constructors, which are Rust functions named with `as` (not `new` here, which the
+    // `extern "C++"` block below takes). They return a `zngur_lib::CppCtor`, which runs the
+    // constructor in place. C++-style pointers and references (`const T*`, `T&`, ...) are raw
+    // pointers in Rust.
+    safe constructor(i32, i32) as from_xy;
+    safe constructor(&const c++::MyCppWrapper) as copy;
+    unsafe constructor(const c++::MyCppWrapper*, i32) as shifted;
 }
 
 type c++::MyConservativeWrapper {
@@ -39,6 +47,7 @@ type c++::MyConservativeWrapper {
     #layout_conservative(size = 20, align = 8);
 
     safe fn total_with(&const self, c++::MyConservativeWrapper) -> i64;
+    safe constructor(i64, i32) as from_values;
 }
 
 type c++::BoxedInt {

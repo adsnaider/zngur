@@ -17,8 +17,8 @@ pub unsafe trait ZngCppObject: Sized {}
 /// Builtins have the same parameter through [`Cpp<T, C>`](Cpp).
 ///
 /// Like in C++, passing a non-`const` object where C++ takes a `const` one is implicit: the
-/// arguments of C++ functions that are `const` objects are generic over their constness, e.g.
-/// `&'a Foo<C1>` for a `&'a const Foo`.
+/// arguments of C++ functions (member functions, free functions and constructors) that are
+/// `const` objects are generic over their constness, e.g. `&'a Foo<C1>` for a `&'a const Foo`.
 ///
 /// ```compile_fail
 /// # use core::marker::PhantomData;
@@ -294,6 +294,109 @@ pub unsafe trait ZngCppDestruct: ZngCppObject {
     unsafe fn destruct(&mut self);
 }
 
+/// A C++ constructor call with its arguments, which hasn't run yet: what the functions that zngur
+/// generates for C++ constructors (`safe constructor(i32, i32) as from_xy;`) return. Running it
+/// constructs the object in place, like in C++: [`build`](CppCtor::build) returns the object (for
+/// C++ objects that Rust holds by value, which are trivially relocatable), and
+/// [`init`](CppCtor::init) constructs it in a slot.
+///
+/// For an `unsafe` constructor, the generated function is `unsafe`: calling it is where the
+/// constructor's preconditions are promised, and running the returned value is safe.
+///
+/// ```
+/// # use core::mem::MaybeUninit;
+/// # use zngur_lib::*;
+/// # struct Bar(i32);
+/// # unsafe impl ZngCppObject for Bar {}
+/// # unsafe impl ZngCppStackObject for Bar {}
+/// impl Bar {
+///     // zngur generates this for `safe constructor(i32) as new;`, with a closure that calls C++.
+///     pub fn new(i0: i32) -> impl CppCtor<Output = Self> {
+///         // SAFETY: The closure initializes the slot that it gets.
+///         unsafe { CppCtorFn::new(move |slot: *mut Self| slot.write(Bar(i0))) }
+///     }
+/// }
+/// let bar = Bar::new(1).build();
+/// let mut slot = MaybeUninit::uninit();
+/// let in_slot: &mut Bar = Bar::new(2).init(&mut slot);
+/// assert_eq!(bar.0 + in_slot.0, 3);
+/// ```
+///
+/// # Safety
+///
+/// [`construct_at`](CppCtor::construct_at) must initialize the `Output` that `slot` points to.
+#[must_use = "a C++ constructor call does nothing until it's run with `build()` or `init()`"]
+pub unsafe trait CppCtor: Sized {
+    /// The C++ object that it constructs.
+    type Output: ZngCppObject;
+
+    /// Runs the C++ constructor on `slot`, which is initialized afterwards (without dropping
+    /// what was there).
+    ///
+    /// # Safety
+    ///
+    /// `slot` must be valid for writes and properly aligned.
+    unsafe fn construct_at(self, slot: *mut Self::Output);
+
+    /// Runs the C++ constructor on `slot`, and returns the object, which lives there.
+    ///
+    /// `MaybeUninit` doesn't drop what it contains, so the object's destructor only runs if the
+    /// caller drops it (e.g. with [`MaybeUninit::assume_init_drop`]). Otherwise it leaks, which is
+    /// safe.
+    fn init(self, slot: &mut core::mem::MaybeUninit<Self::Output>) -> &mut Self::Output {
+        // SAFETY: `slot` is a valid and aligned `MaybeUninit`, and `construct_at` initializes it.
+        unsafe {
+            self.construct_at(slot.as_mut_ptr());
+            slot.assume_init_mut()
+        }
+    }
+
+    /// Constructs an object and returns it. Moving it out of the slot it was constructed in is
+    /// fine, because C++ objects that live on the Rust stack are trivially relocatable.
+    fn build(self) -> Self::Output
+    where
+        Self::Output: ZngCppStackObject,
+    {
+        let mut slot = core::mem::MaybeUninit::uninit();
+        // SAFETY: `slot` is a valid and aligned `MaybeUninit`, and `construct_at` initializes it.
+        unsafe {
+            self.construct_at(slot.as_mut_ptr());
+            slot.assume_init()
+        }
+    }
+}
+
+/// A [`CppCtor`] that runs a closure, which zngur's generated code uses: the closure calls the C++
+/// constructor with the arguments that it captured.
+pub struct CppCtorFn<T, F: FnOnce(*mut T)> {
+    construct_at: F,
+    _output: core::marker::PhantomData<fn() -> T>,
+}
+
+impl<T, F: FnOnce(*mut T)> CppCtorFn<T, F> {
+    /// A constructor call that runs `construct_at` on the slot.
+    ///
+    /// # Safety
+    ///
+    /// `construct_at` must initialize the `T` that it gets a (valid for writes and aligned)
+    /// pointer to.
+    pub const unsafe fn new(construct_at: F) -> Self {
+        CppCtorFn {
+            construct_at,
+            _output: core::marker::PhantomData,
+        }
+    }
+}
+
+// SAFETY: `construct_at` initializes the slot (see `CppCtorFn::new`).
+unsafe impl<T: ZngCppObject, F: FnOnce(*mut T)> CppCtor for CppCtorFn<T, F> {
+    type Output = T;
+
+    unsafe fn construct_at(self, slot: *mut T) {
+        (self.construct_at)(slot)
+    }
+}
+
 mod sealed {
     pub trait Sealed {}
     pub trait SealedBuiltin {}
@@ -384,5 +487,77 @@ mod tests {
         assert!(a != b);
         assert_eq!(a, 1);
         assert_eq!(format!("{b:?}"), "2");
+    }
+
+    #[test]
+    fn cpp_ctor_build_init_and_unexecuted_drop() {
+        use core::cell::Cell;
+        use core::mem::MaybeUninit;
+
+        struct DropCounter<'a>(&'a Cell<usize>);
+        impl Drop for DropCounter<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+
+        struct StackObj<'a> {
+            value: i32,
+            drops: &'a Cell<usize>,
+        }
+        impl Drop for StackObj<'_> {
+            fn drop(&mut self) {
+                self.drops.set(self.drops.get() + 1);
+            }
+        }
+        unsafe impl ZngCppObject for StackObj<'_> {}
+        unsafe impl ZngCppStackObject for StackObj<'_> {}
+
+        fn make_ctor<'a>(
+            value: i32,
+            arg_drops: &'a Cell<usize>,
+            obj_drops: &'a Cell<usize>,
+        ) -> impl CppCtor<Output = StackObj<'a>> {
+            let captured = DropCounter(arg_drops);
+            unsafe {
+                CppCtorFn::new(move |slot: *mut StackObj<'a>| {
+                    let _ = &captured;
+                    slot.write(StackObj {
+                        value,
+                        drops: obj_drops,
+                    });
+                })
+            }
+        }
+
+        let arg_drops = Cell::new(0);
+        let obj_drops = Cell::new(0);
+
+        // `build()` constructs and returns by value, dropping captured arguments once run.
+        {
+            let built = make_ctor(10, &arg_drops, &obj_drops).build();
+            assert_eq!(built.value, 10);
+            assert_eq!(arg_drops.get(), 1);
+            assert_eq!(obj_drops.get(), 0);
+        }
+        assert_eq!(obj_drops.get(), 1);
+
+        // `init(&mut slot)` constructs in place without moving or dropping until `assume_init_drop`.
+        let mut slot = MaybeUninit::uninit();
+        let slot_addr = slot.as_ptr() as usize;
+        let in_place = make_ctor(20, &arg_drops, &obj_drops).init(&mut slot);
+        assert_eq!(in_place as *const StackObj<'_> as usize, slot_addr);
+        assert_eq!(in_place.value, 20);
+        assert_eq!(arg_drops.get(), 2);
+        assert_eq!(obj_drops.get(), 1);
+        unsafe { slot.assume_init_drop() };
+        assert_eq!(obj_drops.get(), 2);
+
+        // Dropping an un-executed `CppCtorFn` drops its captured non-`Copy` arguments without
+        // constructing or dropping `Output`.
+        let unexecuted = make_ctor(30, &arg_drops, &obj_drops);
+        drop(unexecuted);
+        assert_eq!(arg_drops.get(), 3);
+        assert_eq!(obj_drops.get(), 2);
     }
 }

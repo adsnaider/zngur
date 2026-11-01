@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use zngur_def::{
     CppConstness, Lifetime, Merge, RustPathAndGenerics, RustTrait, RustType, TypeVar,
-    ZngurConstructor, ZngurCppMethod, ZngurField, ZngurMethod, ZngurMethodDetails,
-    ZngurMethodReceiver, ZngurType, ZngurVariant,
+    ZngurConstructor, ZngurCppConstructor, ZngurCppMethod, ZngurField, ZngurMethod,
+    ZngurMethodDetails, ZngurMethodReceiver, ZngurType, ZngurVariant,
 };
 
 fn match_lifetime<'a, 'b>(
@@ -796,6 +796,67 @@ fn substitute_cpp_method_vars(
     })
 }
 
+fn substitute_cpp_constructor_vars(
+    c: &ZngurCppConstructor,
+    mapping: &HashMap<&TypeVar, &RustType>,
+    lt_mapping: &HashMap<&Lifetime, Option<&Lifetime>>,
+    target_lts: &HashSet<Lifetime>,
+    fresh_avoid: &HashSet<Lifetime>,
+    outer_in_scope: &HashSet<Lifetime>,
+) -> Result<ZngurCppConstructor, OwnedSubstitutionError> {
+    let mut local_avoid = fresh_avoid.clone();
+    local_avoid.extend(c.lifetimes.iter().cloned());
+    let mut ctor_renames: Vec<(Lifetime, Lifetime)> = Vec::new();
+    let new_ctor_lts: Vec<Lifetime> = c
+        .lifetimes
+        .iter()
+        .map(|cl| {
+            if target_lts.contains(cl) || outer_in_scope.contains(cl) {
+                let fresh = fresh_lifetime(&cl.0, &local_avoid);
+                local_avoid.insert(fresh.clone());
+                ctor_renames.push((cl.clone(), fresh.clone()));
+                fresh
+            } else {
+                cl.clone()
+            }
+        })
+        .collect();
+
+    let mut ctor_in_scope = outer_in_scope.clone();
+    ctor_in_scope.extend(new_ctor_lts.iter().cloned());
+
+    let rename_ctor_lt = |l: &Lifetime| -> Lifetime {
+        ctor_renames
+            .iter()
+            .find(|(old, _)| old == l)
+            .map(|(_, new)| new.clone())
+            .unwrap_or_else(|| l.clone())
+    };
+    let sub_ty = |ty: &RustType| -> Result<RustType, OwnedSubstitutionError> {
+        let pre = if ctor_renames.is_empty() {
+            ty.clone()
+        } else {
+            ty.map_free_lifetimes(&mut { rename_ctor_lt })
+        };
+        substitute_vars(
+            &pre,
+            mapping,
+            lt_mapping,
+            target_lts,
+            &local_avoid,
+            &ctor_in_scope,
+        )
+        .map_err(|SubstitutionError::UnboundVar(v)| OwnedSubstitutionError::UnboundVar(v.clone()))
+    };
+
+    Ok(ZngurCppConstructor {
+        rust_name: c.rust_name.clone(),
+        lifetimes: new_ctor_lts,
+        inputs: c.inputs.iter().map(&sub_ty).collect::<Result<_, _>>()?,
+        is_safe: c.is_safe,
+    })
+}
+
 pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<TemplateMatch> {
     let mut mapping = HashMap::new();
     let mut lt_mapping = HashMap::new();
@@ -854,6 +915,12 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
             fresh_avoid.extend(t.all_lifetimes());
         }
     }
+    for c in &template.cpp_constructors {
+        fresh_avoid.extend(c.lifetimes.iter().cloned());
+        for t in &c.inputs {
+            fresh_avoid.extend(t.all_lifetimes());
+        }
+    }
     for f in &template.fields {
         fresh_avoid.extend(f.ty.all_lifetimes());
     }
@@ -880,6 +947,7 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
         exhaustive,
         methods,
         cpp_methods,
+        cpp_constructors,
         constructor,
         variants,
         fields,
@@ -972,6 +1040,25 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
         wellknown_traits: wellknown_traits.clone(),
         exhaustive: *exhaustive,
         cpp_methods: new_cpp_methods,
+        cpp_constructors: cpp_constructors
+            .iter()
+            .map(|ctor| {
+                match substitute_cpp_constructor_vars(
+                    ctor,
+                    &mapping,
+                    &lt_mapping,
+                    &target_lts,
+                    &fresh_avoid,
+                    &outer_in_scope,
+                ) {
+                    Ok(c) => c,
+                    Err(OwnedSubstitutionError::UnboundVar(var)) => unreachable!(
+                        "Unbound type variable {} in C++ constructor {} in template {} for type {}",
+                        var.0, ctor.rust_name, template.ty, ty
+                    ),
+                }
+            })
+            .collect(),
         methods: new_methods,
         constructor: constructor.as_ref().map(|constructor| {
             match constructor
