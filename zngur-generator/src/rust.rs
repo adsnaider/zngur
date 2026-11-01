@@ -1129,16 +1129,24 @@ pub extern "C" fn {mn}(i: *const u8) -> usize {{ unsafe {{
             if tr.is_none() {
                 w!(self, "pub ");
             }
+            // The inputs of inherent methods that are `const` C++ objects are generic over their
+            // constness, like those of other C++ functions. A trait fixes its methods' types.
+            let (params, input_tys) = match tr {
+                None => cpp_fn_inputs(&method.lifetimes, &method.inputs),
+                Some(_) => (
+                    lifetime_params(&method.lifetimes),
+                    method.inputs.iter().map(|ty| ty.to_string()).collect(),
+                ),
+            };
             w!(
                 self,
-                r#"{}fn {}{}("#,
+                r#"{}fn {}{params}("#,
                 if method.is_safe == Some(true) {
                     ""
                 } else {
                     "unsafe "
                 },
                 method.name,
-                lifetime_params(&method.lifetimes)
             );
             if method.receiver != ZngurMethodReceiver::Static {
                 w!(self, "{}, ", method.rust_receiver());
@@ -1148,7 +1156,7 @@ pub extern "C" fn {mn}(i: *const u8) -> usize {{ unsafe {{
             } else {
                 1
             };
-            for (ty, n) in method.inputs.iter().zip(input_offset..) {
+            for (ty, n) in input_tys.iter().zip(input_offset..) {
                 w!(self, "i{n}: {ty}, ");
             }
             wln!(self, ") -> {} {{ unsafe {{", method.output);
@@ -1180,15 +1188,15 @@ unsafe extern "C" {{ fn {mangled_name}("#
             w!(self, "i{n}: *mut u8, ");
         }
         wln!(self, r#"o: *mut u8); }}"#);
+        let (params, input_tys) = cpp_fn_inputs(lifetimes, inputs);
         w!(
             self,
             r#"
 #[allow(non_snake_case)]
-pub {}fn {rust_name}{}("#,
+pub {}fn {rust_name}{params}("#,
             if is_safe { "" } else { "unsafe " },
-            lifetime_params(lifetimes)
         );
-        for (n, ty) in inputs.iter().enumerate() {
+        for (n, ty) in input_tys.iter().enumerate() {
             w!(self, "i{n}: {ty}, ");
         }
         wln!(self, ") -> {output} {{ unsafe {{");

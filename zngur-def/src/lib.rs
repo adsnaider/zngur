@@ -135,6 +135,68 @@ mod tests {
     }
 
     #[test]
+    fn test_generic_const_input() {
+        let a_b = RustType::Cpp(vec!["a".to_owned(), "B".to_owned()]);
+        let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+        let lt = Some(Lifetime("a".to_owned()));
+        let const_ref = |m, l: Option<Lifetime>, t: &RustType| {
+            RustType::Ref(m, l, Box::new(RustType::CppConst(Box::new(t.clone()))))
+        };
+        let inputs = [
+            const_ref(Mutability::Not, lt.clone(), &a_b),
+            const_ref(Mutability::Not, None, &a_b),
+            const_ref(Mutability::Mut, lt.clone(), &i32),
+            RustType::cpp_ptr(Mutability::Not, CppIndirection::Reference, a_b.clone()),
+            RustType::cpp_ptr(Mutability::Not, CppIndirection::Pointer, i32.clone()),
+            RustType::cpp_ptr(Mutability::Mut, CppIndirection::Pointer, a_b.clone()),
+            // Multi-level pointers: only top-level pointee constness (`i32* const*`) is generic;
+            // `const i32**` stays fixed (avoiding `T** -> const T**` unsoundness).
+            RustType::cpp_ptr(
+                Mutability::Mut,
+                CppIndirection::Pointer,
+                RustType::cpp_ptr(Mutability::Not, CppIndirection::Pointer, i32.clone()),
+            ),
+            RustType::cpp_ptr(
+                Mutability::Not,
+                CppIndirection::Pointer,
+                RustType::cpp_ptr(Mutability::Mut, CppIndirection::Pointer, i32.clone()),
+            ),
+            RustType::Ref(
+                Mutability::Not,
+                lt.clone(),
+                Box::new(RustType::CppVar(Box::new(a_b.clone()))),
+            ),
+            RustType::Ref(Mutability::Not, lt.clone(), Box::new(i32.clone())),
+        ];
+        let (params, inputs) = cpp_fn_inputs(&[Lifetime("a".to_owned())], &inputs);
+        assert_eq!(
+            params,
+            "<'a, __C1: ::zngur_lib::Constness, __C2: ::zngur_lib::Constness, \
+             __C3: ::zngur_lib::Constness, __C4: ::zngur_lib::Constness, \
+             __C5: ::zngur_lib::Constness, __C6: ::zngur_lib::Constness>"
+        );
+        assert_eq!(
+            inputs,
+            [
+                "&'a a::B::<__C1>",
+                "&a::B::<__C2>",
+                "&'a mut ::zngur_lib::Cpp<i32, __C3>",
+                "*const a::B::<__C4>",
+                "*const ::zngur_lib::Cpp<i32, __C5>",
+                "*mut a::B",
+                "*mut ::zngur_lib::Cpp<*const ::zngur_lib::Cpp<i32, ::zngur_lib::Const>>",
+                "*const ::zngur_lib::Cpp<*mut ::zngur_lib::Cpp<i32>, __C6>",
+                "&'a a::B",
+                "&'a i32",
+            ]
+        );
+        assert_eq!(
+            cpp_fn_inputs(&[], &[i32]),
+            (String::new(), vec!["i32".to_owned()])
+        );
+    }
+
+    #[test]
     fn test_cpp_ptr_display() {
         let ty = RustType::cpp_ptr(
             Mutability::Not,
@@ -1440,12 +1502,7 @@ impl Display for RustType {
                 RustType::CppConst(_) => write!(f, "*const {pointee}"),
                 pointee => write!(f, "*mut {pointee}"),
             },
-            RustType::CppConst(inner) => match &**inner {
-                // `const` C++ classes have a constness parameter: `a::B::<::zngur_lib::Const>`.
-                RustType::Cpp(segs) => write!(f, "{}::<::zngur_lib::Const>", segs.join("::")),
-                // Builtins and pointers.
-                inner => write!(f, "::zngur_lib::Cpp<{inner}, ::zngur_lib::Const>"),
-            },
+            RustType::CppConst(inner) => write_cpp_object(f, inner, "::zngur_lib::Const"),
             RustType::CppVar(inner) => match &**inner {
                 RustType::Primitive(_) | RustType::CppPtr(..) => {
                     write!(f, "::zngur_lib::Cpp<{inner}>")
@@ -1455,4 +1512,83 @@ impl Display for RustType {
             },
         }
     }
+}
+
+/// Writes the C++ object `inner` (a `c++::` type, a builtin or a C++ pointer) with the constness
+/// `constness` (`::zngur_lib::Const`, or a generic parameter).
+fn write_cpp_object(
+    f: &mut std::fmt::Formatter<'_>,
+    inner: &RustType,
+    constness: &str,
+) -> std::fmt::Result {
+    match inner {
+        // C++ classes have a constness parameter: `a::B::<::zngur_lib::Const>`.
+        RustType::Cpp(segs) => write!(f, "{}::<{constness}>", segs.join("::")),
+        // Builtins and pointers.
+        inner => write!(f, "::zngur_lib::Cpp<{inner}, {constness}>"),
+    }
+}
+
+impl RustType {
+    /// For an input of a C++-implemented function, if it's a reference or a C++ pointer to a
+    /// `const` C++ object (`&'a const T`, `&'a unique const T`, `const T&` or `const T*`), its
+    /// Rust type with the generic constness parameter `constness` in place of `Const`:
+    /// `&'a T<C1>`, `&'a mut T<C1>` or `*const T<C1>`. C++ only reads the object, so Rust may
+    /// pass a non-`const` one too, as C++ does implicitly.
+    pub fn generic_const_input(&self, constness: &str) -> Option<String> {
+        struct Generic<'a>(&'a RustType, &'a str);
+        impl Display for Generic<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write_cpp_object(f, self.0, self.1)
+            }
+        }
+        match self {
+            RustType::Ref(m, lifetime, pointee) => {
+                let RustType::CppConst(inner) = &**pointee else {
+                    return None;
+                };
+                let lifetime = lifetime
+                    .as_ref()
+                    .map(|l| format!("{l} "))
+                    .unwrap_or_default();
+                let m = if *m == Mutability::Mut { "mut " } else { "" };
+                Some(format!("&{lifetime}{m}{}", Generic(inner, constness)))
+            }
+            RustType::CppPtr(_, pointee) => {
+                let RustType::CppConst(inner) = &**pointee else {
+                    return None;
+                };
+                Some(format!("*const {}", Generic(inner, constness)))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The Rust types of the inputs of a C++-implemented function that Rust calls, and the generic
+/// parameters (`<'a, __C1: ::zngur_lib::Constness>`) for its lifetimes and for the constness of
+/// each input that is a `const` C++ object (see [`RustType::generic_const_input`]).
+pub fn cpp_fn_inputs(lifetimes: &[Lifetime], inputs: &[RustType]) -> (String, Vec<String>) {
+    let mut params: Vec<String> = lifetimes.iter().map(|l| l.to_string()).collect();
+    let mut n = 0;
+    let inputs = inputs
+        .iter()
+        .map(|ty| {
+            let constness = format!("__C{}", n + 1);
+            match ty.generic_const_input(&constness) {
+                Some(ty) => {
+                    n += 1;
+                    params.push(format!("{constness}: ::zngur_lib::Constness"));
+                    ty
+                }
+                None => ty.to_string(),
+            }
+        })
+        .collect();
+    let params = if params.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", params.join(", "))
+    };
+    (params, inputs)
 }

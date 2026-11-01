@@ -1670,10 +1670,12 @@ pub type Handle = super::Handle;
         let b = "::rust::cpp::a::B";
         let const_b = format!("::rust::CppConst< {b} >");
 
-        // `extern "C++"` functions: the C++ definition takes and returns C++ references.
+        // `extern "C++"` functions: the C++ definition takes and returns C++ references, and
+        // inputs that are `const` C++ objects are generic over their constness.
         assert!(
             rust_code.contains(
-                "pub fn g<'a>(i0: &'a a::B, i1: &'a a::B::<::zngur_lib::Const>, ) -> &'a a::B::<::zngur_lib::Const>"
+                "pub fn g<'a, __C1: ::zngur_lib::Constness>(i0: &'a a::B, i1: &'a a::B::<__C1>, ) \
+                 -> &'a a::B::<::zngur_lib::Const>"
             ),
             "{rust_code}"
         );
@@ -1697,6 +1699,62 @@ pub type Handle = super::Handle;
         );
         assert!(h.contains(&format!("::rust::CppPtr< {b} > __zngur_i0 = &i0;")));
         assert!(h.contains("return *o;"));
+    }
+
+    #[test]
+    fn extern_cpp_impl_const_inputs_are_generic_for_inherent_and_fixed_for_trait() {
+        let b = cpp(&["a", "B"]);
+        let lt_a = Lifetime("a".to_owned());
+        let const_b_ref = RustType::Ref(
+            Mutability::Not,
+            Some(lt_a.clone()),
+            Box::new(RustType::cpp_object(CppConstness::Const, b.clone())),
+        );
+        let method = |name: &str| ZngurMethod {
+            name: name.to_owned(),
+            lifetimes: vec![lt_a.clone()],
+            receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+            receiver_lifetime: None,
+            generics: vec![],
+            inputs: vec![const_b_ref.clone()],
+            output: RustType::UNIT,
+            is_safe: Some(true),
+        };
+        let spec = ZngurSpec {
+            types: vec![minimal_opaque_cpp_type(b.clone())],
+            extern_cpp_impls: vec![
+                ZngurExternCppImpl {
+                    tr: None,
+                    ty: b.clone(),
+                    lifetimes: vec![],
+                    methods: vec![method("inherent_cmp")],
+                },
+                ZngurExternCppImpl {
+                    tr: Some(RustTrait::Normal(RustPathAndGenerics {
+                        path: vec!["crate".to_owned(), "MyTrait".to_owned()],
+                        ..Default::default()
+                    })),
+                    ty: b,
+                    lifetimes: vec![],
+                    methods: vec![method("trait_cmp")],
+                },
+            ],
+            ..Default::default()
+        };
+        let (rust_code, _, _) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        assert!(
+            rust_code.contains(
+                "impl a::B {pub fn inherent_cmp<'a, __C1: ::zngur_lib::Constness>(&self, i1: &'a a::B::<__C1>, ) -> ()"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "impl crate::MyTrait for a::B {fn trait_cmp<'a>(&self, i1: &'a a::B::<::zngur_lib::Const>, ) -> ()"
+            ),
+            "{rust_code}"
+        );
     }
 
     #[test]
@@ -2050,7 +2108,7 @@ pub type Handle = super::Handle;
 
         assert!(
             rust_code.contains(
-                "pub unsafe fn take_and_return_cpp_refs(i0: *const a::B::<::zngur_lib::Const>, i1: *mut ::zngur_lib::Cpp<i32>, ) -> *const a::B::<::zngur_lib::Const>"
+                "pub unsafe fn take_and_return_cpp_refs<__C1: ::zngur_lib::Constness>(i0: *const a::B::<__C1>, i1: *mut ::zngur_lib::Cpp<i32>, ) -> *const a::B::<::zngur_lib::Const>"
             ),
             "{rust_code}"
         );

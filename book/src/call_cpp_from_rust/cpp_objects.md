@@ -39,7 +39,9 @@ pointer) are always C++ objects, so references to them always say `const` or `va
   `&mut T<Const>`, so C++ must never pass `&unique const` to an object whose storage is defined
   `const` in C++.
 - `const` and `var` are part of the reference: a `var` object can be viewed as `const`, never the
-  other way around (see [`const` is part of the type](./cpp_pointers.md#const-is-part-of-the-type)).
+  other way around. As parameters of C++ functions, `const` references are generic over the
+  constness (`&'a T<C1>`), so non-`const` objects can be passed directly (see
+  [`const` is part of the type](./cpp_pointers.md#const-is-part-of-the-type)).
 - `unique` and `var` are only keywords right after `&` / `&'a`, so they can still be names
   elsewhere.
 
@@ -61,7 +63,8 @@ shared reference, so Rust copies it out instead of handing out a `&T`.
 
 | Method                                   | Available on     | What it does                                 |
 | ---------------------------------------- | ---------------- | -------------------------------------------- |
-| `Cpp::new(v)`, `v.into()`                | both constnesses | makes one (e.g. to construct a copy)         |
+| `Cpp::new(v)`, `v.into()`                | `Cpp<T>`         | makes one (e.g. to construct a copy)         |
+| `Cpp::new_const(v)`                      | `Cpp<T, Const>`  | makes a `const` one                          |
 | `get(&self) -> T`                        | both constnesses | reads the value                              |
 | `into_inner(self) -> T`, `T::from(c)`    | both constnesses | the value, by value                          |
 | `as_ptr(&self) -> *const T`              | both constnesses | a pointer to the value                       |
@@ -75,7 +78,7 @@ through `get`.
 
 ```rust
 let mut sum = 0;
-generated::sum_into(point.as_const(), Cpp::from_mut(&mut sum));
+generated::sum_into(&point, Cpp::from_mut(&mut sum));
 ```
 
 There's no `Cpp::from_ref(&T) -> &Cpp<T, _>`: C++ could change a `Cpp<T>` behind it (`set` is
@@ -93,4 +96,5 @@ whereas `&'a const c++::Node const*` is `const Node* const&`.
 
 C++-style references and pointers (`const T&`, `T*`, ...) point to C++ objects as well, so their
 Rust types are the same: `const T*` is `*const T<Const>` (`*const Cpp<i32, Const>` for a builtin),
-and `T*` is `*mut T` (`*mut Cpp<i32>`). See [C++ references and pointers](./cpp_pointers.md).
+and `T*` is `*mut T` (`*mut Cpp<i32>`). As parameters, `const` ones are generic over the constness
+(`*const T<C1>`), like references. See [C++ references and pointers](./cpp_pointers.md).

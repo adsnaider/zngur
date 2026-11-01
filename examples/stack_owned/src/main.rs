@@ -119,16 +119,20 @@ fn main() {
 
     // C++ functions taking and returning references to C++ objects, which are safe: Rust
     // references in Rust (`Cpp::from_mut` makes a Rust `i32` a C++ object), C++ references in C++.
+    // Like in C++, an argument that is a `const` object takes a non-`const` one too.
     let mut sum = 0;
-    generated::sum_into(c.as_const(), Cpp::from_mut(&mut sum));
+    generated::sum_into(&c, Cpp::from_mut(&mut sum));
     println!("sum = {sum}");
     // A C++-style pointer, which is a raw pointer in Rust (`*mut T`): Rust references coerce to it,
     // but calling the function is `unsafe`.
     unsafe { generated::swap_xy(&mut c) };
     c.print();
     let d = MyCppWrapper::new(1, 2);
-    let larger: &MyCppWrapper<Const> = generated::larger_x(c.as_const(), d.as_const());
+    let larger: &MyCppWrapper<Const> = generated::larger_x(&c, &d);
     assert!(std::ptr::eq(larger, c.as_const()));
+    // Each `const` object input has its own constness type parameter (`__C1`, `__C2`).
+    let larger_mixed: &MyCppWrapper<Const> = generated::larger_x(&c, d.as_const());
+    assert!(std::ptr::eq(larger_mixed, c.as_const()));
     let mut point = MyCppWrapper::new(2, 3);
     let _exclusive: &mut MyCppWrapper<Const> = point.as_const_mut();
     let _frozen: MyCppWrapper<Const> = point.into_const();
