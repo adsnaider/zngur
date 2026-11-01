@@ -632,7 +632,7 @@ extern "C++" {
 import "./bar.zng";
 
 mod crate {
-    fn forward_cpp_types(&c++::ns::RefOnly, &mut c++::ns::RefOnly, c++::ns::Val) -> c++::ns::Val;
+    fn forward_cpp_types(&var c++::ns::RefOnly, &unique var c++::ns::RefOnly, c++::ns::Val) -> c++::ns::Val;
 }
 "#,
         )
@@ -691,18 +691,18 @@ fn main() {
             r#"#include "app.zng.h"
 
 namespace rust {
-int32_t Impl<cpp::ns::RefOnly>::get(Ref<cpp::ns::RefOnly> self) {
-  return self.cpp().value;
+int32_t Impl<cpp::ns::RefOnly>::get(::ns::RefOnly& self) {
+  return self.value;
 }
-Unit Impl<cpp::ns::RefOnly>::add(RefMut<cpp::ns::RefOnly> self, int32_t delta) {
-  self.cpp().value += delta;
+Unit Impl<cpp::ns::RefOnly>::add(::ns::RefOnly& self, int32_t delta) {
+  self.value += delta;
   return {};
 }
 cpp::ns::Val Impl<cpp::ns::Val>::new_(int32_t x, int32_t y) {
   return cpp::ns::Val::build(x, y);
 }
-int32_t Impl<cpp::ns::Val>::sum(Ref<cpp::ns::Val> self) {
-  return self.cpp().x + self.cpp().y;
+int32_t Impl<cpp::ns::Val>::sum(::ns::Val& self) {
+  return self.x + self.y;
 }
 }  // namespace rust
 

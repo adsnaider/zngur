@@ -8,18 +8,19 @@ using crate::RustTask;
 using cpp::task::CppTask;
 using cpp::task::Dispatcher;
 
-Unit Impl<Dispatcher>::constructor(RefMut<Dispatcher> dispatcher) {
-  new (&dispatcher.cpp()) ::task::Dispatcher();
+// The constructors take raw C++ pointers to uninitialized storage and construct the objects in
+// place without forming C++ references before lifetime begins.
+Unit Impl<Dispatcher>::constructor(::task::Dispatcher *dispatcher) {
+  new (dispatcher) ::task::Dispatcher();
   return {};
 }
 
-Unit Impl<CppTask>::constructor(RefMut<CppTask> dispatcher) {
-  new (&dispatcher.cpp()) ::task::CppTaskForRust();
+Unit Impl<CppTask>::constructor(::task::CppTask *task) {
+  new (task) ::task::CppTaskForRust();
   return {};
 }
 
-Unit Impl<Dispatcher>::run_task(Ref<Dispatcher> self, RefMut<RustTask> task) {
-  auto &d = self.cpp();
+Unit Impl<Dispatcher>::run_task(::task::Dispatcher &d, RefMut<RustTask> task) {
   RawMut<RustTask> raw_mut(task);
   RustTask *rust_ptr = from_rust_ptr(raw_mut);
   ::task::CppTaskForRust *task_ref =

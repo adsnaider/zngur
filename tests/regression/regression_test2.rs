@@ -46,13 +46,13 @@ fn main() {
     let fut = RustTask(unsafe { Pin::new_unchecked(&mut fut) });
     let mut cpp_task: MaybeUninit<CppTask> = MaybeUninit::uninit();
     unsafe {
-        cpp_task.assume_init_mut().constructor();
+        CppTask::constructor(cpp_task.as_mut_ptr());
     }
     let mut task: CppInherit<CppTask, RustTask> =
         CppInherit::new(fut, unsafe { cpp_task.assume_init() });
     let mut dispatcher: MaybeUninit<Dispatcher> = MaybeUninit::uninit();
     unsafe {
-        dispatcher.assume_init_mut().constructor();
+        Dispatcher::constructor(dispatcher.as_mut_ptr());
     }
     let dispatcher = unsafe { dispatcher.assume_init() };
     dispatcher.run_task(&mut task.inner);
