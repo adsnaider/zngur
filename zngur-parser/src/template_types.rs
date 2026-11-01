@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use zngur_def::{
     CppConstness, CppMethodReceiver, Lifetime, Merge, RustPathAndGenerics, RustTrait, RustType,
-    TypeVar, ZngurConstructor, ZngurCppMethod, ZngurField, ZngurMethod, ZngurMethodDetails,
-    ZngurMethodReceiver, ZngurType, ZngurVariant,
+    TypeVar, ZngurConstructor, ZngurCppConstructor, ZngurCppMethod, ZngurField, ZngurMethod,
+    ZngurMethodDetails, ZngurMethodReceiver, ZngurType, ZngurVariant,
 };
 
 fn match_lifetime<'a, 'b>(
@@ -556,6 +556,25 @@ fn substitute_cpp_method_vars(
     })
 }
 
+fn substitute_cpp_constructor_vars(
+    c: &ZngurCppConstructor,
+    ctx: SubstCtx<'_>,
+    fresh_avoid: &HashSet<Lifetime>,
+    outer_in_scope: &HashSet<Lifetime>,
+) -> Result<ZngurCppConstructor, SubstitutionError> {
+    let sub = ItemSubst::new(&c.lifetimes, ctx, fresh_avoid, outer_in_scope);
+    Ok(ZngurCppConstructor {
+        rust_name: c.rust_name.clone(),
+        lifetimes: sub.new_lifetimes.clone(),
+        inputs: c
+            .inputs
+            .iter()
+            .map(|ty| sub.sub_ty(ty))
+            .collect::<Result<_, _>>()?,
+        is_safe: c.is_safe,
+    })
+}
+
 pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<TemplateMatch> {
     let mut mapping = HashMap::new();
     let mut lt_mapping = HashMap::new();
@@ -603,6 +622,7 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
         exhaustive,
         methods,
         cpp_methods,
+        cpp_constructors,
         constructor,
         variants,
         fields,
@@ -668,6 +688,18 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
         wellknown_traits: wellknown_traits.clone(),
         exhaustive: *exhaustive,
         cpp_methods: new_cpp_methods,
+        cpp_constructors: cpp_constructors
+            .iter()
+            .map(|ctor| {
+                match substitute_cpp_constructor_vars(ctor, ctx, &fresh_avoid, &outer_in_scope) {
+                    Ok(c) => c,
+                    Err(SubstitutionError::UnboundVar(var)) => unreachable!(
+                        "Unbound type variable {} in C++ constructor {} in template {} for type {}",
+                        var.0, ctor.rust_name, template.ty, ty
+                    ),
+                }
+            })
+            .collect(),
         methods: new_methods,
         constructor: constructor.as_ref().map(|constructor| {
             match constructor

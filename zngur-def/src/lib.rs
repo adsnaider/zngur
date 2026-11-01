@@ -691,6 +691,8 @@ pub struct ZngurType {
     pub methods: Vec<ZngurMethodDetails>,
     /// The C++ member functions of a C++ type, which Rust can call.
     pub cpp_methods: Vec<ZngurCppMethod>,
+    /// The C++ constructors of a C++ type that Rust holds by value.
+    pub cpp_constructors: Vec<ZngurCppConstructor>,
     pub constructor: Option<ZngurConstructor>,
     pub variants: Vec<ZngurVariant>,
     pub fields: Vec<ZngurField>,
@@ -738,6 +740,12 @@ impl ZngurType {
                 out.insert(rl.clone());
             }
             for t in m.inputs.iter().chain([&m.output]) {
+                out.extend(t.all_lifetimes());
+            }
+        }
+        for c in &self.cpp_constructors {
+            out.extend(c.lifetimes.iter().cloned());
+            for t in &c.inputs {
                 out.extend(t.all_lifetimes());
             }
         }
@@ -906,6 +914,19 @@ impl ZngurCppMethod {
             is_safe: self.is_safe,
         }
     }
+}
+
+/// A C++ constructor of a C++ type that Rust holds by value, declared like
+/// `safe constructor(i32) as from_i32;`. zngur generates the associated function `rust_name`,
+/// which returns the constructor call as a `zngur_lib::CppCtor` (to `build()` or `init()`).
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct ZngurCppConstructor {
+    /// The name of the Rust function (from `as`, which is required).
+    pub rust_name: String,
+    /// The lifetime parameters that it declares (`safe constructor<'a>(&'a c++::B) as copy;`).
+    pub lifetimes: Vec<Lifetime>,
+    pub inputs: Vec<RustType>,
+    pub is_safe: bool,
 }
 
 #[derive(Debug, PartialEq)]
