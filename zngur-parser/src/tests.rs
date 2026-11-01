@@ -1,7 +1,7 @@
 use std::panic::catch_unwind;
 
 use expect_test::{Expect, expect};
-use zngur_def::{LayoutPolicy, RustPathAndGenerics, RustType, ZngurSpec};
+use zngur_def::{LayoutPolicy, RustPathAndGenerics, RustType, TriviallyRelocatable, ZngurSpec};
 
 use crate::{
     DefaultImportResolver, EntityPath, ImportResolver, ParsedZngFile, ReportSink,
@@ -1363,6 +1363,12 @@ type c++::a::ByValue {
     #trivially_relocatable;
 }
 
+// Promised, rather than checked in C++.
+type c++::a::Unchecked {
+    #layout(size = 8, align = 8);
+    #unsafe(trivially_relocatable);
+}
+
 // A layout without `#trivially_relocatable` is only checked in C++.
 type c++::a::NotRelocatable {
     #layout(size = 8, align = 4);
@@ -1392,6 +1398,18 @@ type c++::a::Opaque {
     assert_eq!(
         ty("ByValue").cpp_by_value_layout(),
         Some(LayoutPolicy::StackAllocated { size: 8, align: 4 })
+    );
+    assert_eq!(
+        ty("Unchecked").cpp_by_value_layout(),
+        Some(LayoutPolicy::StackAllocated { size: 8, align: 8 })
+    );
+    assert_eq!(
+        ty("Unchecked").trivially_relocatable,
+        TriviallyRelocatable::Unchecked
+    );
+    assert_eq!(
+        ty("ByValue").trivially_relocatable,
+        TriviallyRelocatable::Checked
     );
     assert!(!ty("ByValue").is_cpp_heap_allocated());
     assert_eq!(ty("NotRelocatable").cpp_by_value_layout(), None);
@@ -1430,6 +1448,60 @@ type c++::B {
     );
     let ty = parsed.spec.types.first().expect("no type parsed");
     assert!(ty.cpp_by_value_layout().is_some());
+    assert_eq!(ty.trivially_relocatable, TriviallyRelocatable::Checked);
+}
+
+#[test]
+fn trivially_relocatable_merge_precedence() {
+    // Direction 1: `Unchecked` in root + `Checked` in merged file -> `Unchecked`.
+    let resolver1 = MockFilesystem::new(vec![(
+        "./a.zng",
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+}
+"#,
+    )]);
+    let parsed1 = parse_str_with_resolver(
+        r#"
+merge "./a.zng";
+type c++::B {
+    #unsafe(trivially_relocatable);
+}
+"#,
+        NullCfg,
+        &resolver1,
+        |e| panic!("unexpected diagnostic: {e}"),
+    );
+    let ty1 = parsed1.spec.types.first().expect("no type parsed");
+    assert!(ty1.cpp_by_value_layout().is_some());
+    assert_eq!(ty1.trivially_relocatable, TriviallyRelocatable::Unchecked);
+
+    // Direction 2: `Checked` in root + `Unchecked` in merged file -> `Unchecked`.
+    let resolver2 = MockFilesystem::new(vec![(
+        "./a.zng",
+        r#"
+type c++::B {
+    #layout(size = 8, align = 4);
+    #unsafe(trivially_relocatable);
+}
+"#,
+    )]);
+    let parsed2 = parse_str_with_resolver(
+        r#"
+merge "./a.zng";
+type c++::B {
+    #trivially_relocatable;
+}
+"#,
+        NullCfg,
+        &resolver2,
+        |e| panic!("unexpected diagnostic: {e}"),
+    );
+    let ty2 = parsed2.spec.types.first().expect("no type parsed");
+    assert!(ty2.cpp_by_value_layout().is_some());
+    assert_eq!(ty2.trivially_relocatable, TriviallyRelocatable::Unchecked);
 }
 
 #[test]
@@ -1439,6 +1511,10 @@ fn trivially_relocatable_without_layout_is_rejected() {
 type c++::B {
     #trivially_relocatable;
 }
+
+type c++::C {
+    #unsafe(trivially_relocatable);
+}
 "#,
         expect![[r#"
             Error: `#trivially_relocatable` needs `#layout(size = X, align = Y)`, which Rust needs to hold the C++ type by value
@@ -1447,6 +1523,13 @@ type c++::B {
              3 │     #trivially_relocatable;
                │     ───────────┬───────────  
                │                ╰───────────── `#trivially_relocatable` needs `#layout(size = X, align = Y)`, which Rust needs to hold the C++ type by value
+            ───╯
+            Error: `#unsafe(trivially_relocatable)` needs `#layout(size = X, align = Y)`, which Rust needs to hold the C++ type by value
+               ╭─[ test.zng:7:5 ]
+               │
+             7 │     #unsafe(trivially_relocatable);
+               │     ───────────────┬───────────────  
+               │                    ╰───────────────── `#unsafe(trivially_relocatable)` needs `#layout(size = X, align = Y)`, which Rust needs to hold the C++ type by value
             ───╯
         "#]],
     );
@@ -1460,6 +1543,11 @@ type crate::Foo {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
 }
+
+type crate::Bar {
+    #layout(size = 8, align = 4);
+    #unsafe(trivially_relocatable);
+}
 "#,
         expect![[r#"
             Error: `#trivially_relocatable` is only for `c++::` types (Rust types are always trivially relocatable)
@@ -1468,6 +1556,13 @@ type crate::Foo {
              4 │     #trivially_relocatable;
                │     ───────────┬───────────  
                │                ╰───────────── `#trivially_relocatable` is only for `c++::` types (Rust types are always trivially relocatable)
+            ───╯
+            Error: `#unsafe(trivially_relocatable)` is only for `c++::` types (Rust types are always trivially relocatable)
+               ╭─[ test.zng:9:5 ]
+               │
+             9 │     #unsafe(trivially_relocatable);
+               │     ───────────────┬───────────────  
+               │                    ╰───────────────── `#unsafe(trivially_relocatable)` is only for `c++::` types (Rust types are always trivially relocatable)
             ───╯
         "#]],
     );
@@ -1627,6 +1722,11 @@ type c++::C {
 type c++::D {
     #layout_conservative(size = 16, align = 8);
 }
+
+type c++::E {
+    #heap_allocated;
+    #unsafe(trivially_relocatable);
+}
 "#,
         expect![[r#"
             Error: `#trivially_relocatable` needs `#layout(size = X, align = Y)`, which Rust needs to hold the C++ type by value
@@ -1656,6 +1756,13 @@ type c++::D {
              16 │     #layout_conservative(size = 16, align = 8);
                 │     ─────────────────────┬────────────────────  
                 │                          ╰────────────────────── `#layout_conservative` cannot be used on `c++::` types; use `#layout(size = X, align = Y)` instead
+            ────╯
+            Error: `#unsafe(trivially_relocatable)` needs `#layout(size = X, align = Y)`, which Rust needs to hold the C++ type by value
+                ╭─[ test.zng:21:5 ]
+                │
+             21 │     #unsafe(trivially_relocatable);
+                │     ───────────────┬───────────────  
+                │                    ╰───────────────── `#unsafe(trivially_relocatable)` needs `#layout(size = X, align = Y)`, which Rust needs to hold the C++ type by value
             ────╯
         "#]],
     );

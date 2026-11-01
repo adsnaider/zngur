@@ -224,11 +224,20 @@ type c++::osmium::Way {
     #layout(size = 16, align = 8);
     #trivially_relocatable;
 }
+type c++::osmium::Relation {
+    #layout(size = 8, align = 8);
+    #unsafe(trivially_relocatable);
+}
     "#,
         expect![[r#"
             type c++::osmium::Way {
                 #layout(size = 16, align = 8);
                 #trivially_relocatable;
+            }
+
+            type c++::osmium::Relation {
+                #layout(size = 8, align = 8);
+                #unsafe(trivially_relocatable);
             }
         "#]],
     );

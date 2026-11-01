@@ -426,9 +426,9 @@ impl WriteIDL for crate::ZngurType {
                     p.write_indent()?;
                     p.write_idl(&self.layout)?;
                 }
-                if self.trivially_relocatable {
+                if let Some(directive) = self.trivially_relocatable.directive() {
                     p.write_indent()?;
-                    writeln!(p, "#trivially_relocatable;")?;
+                    writeln!(p, "{directive};")?;
                 }
             }
 
@@ -779,7 +779,7 @@ fn print_spec() {
                 deref: None,
                 cpp_name: Some("fooBar".into()),
             }],
-            trivially_relocatable: false,
+            trivially_relocatable: crate::TriviallyRelocatable::No,
         }],
         traits: indexmap::IndexMap::default(),
         funcs: vec![crate::ZngurFn {
@@ -942,7 +942,7 @@ fn test_write_cpp_type_idl() {
                 variants: vec![],
                 fields: vec![],
                 methods: vec![],
-                trivially_relocatable: false,
+                trivially_relocatable: crate::TriviallyRelocatable::No,
             },
             crate::ZngurType {
                 ty: crate::RustType::Cpp(vec!["a".into(), "b".into(), "Name".into()]),
@@ -965,7 +965,7 @@ fn test_write_cpp_type_idl() {
                     deref: None,
                     cpp_name: None,
                 }],
-                trivially_relocatable: true,
+                trivially_relocatable: crate::TriviallyRelocatable::Checked,
             },
         ],
         ..Default::default()

@@ -569,6 +569,9 @@ pub struct CppTypeDefinition {
     pub cpp_heap_allocated: Option<CppHeapAllocatedData>,
     pub cpp_ref: Option<CppRef>,
     pub cpp_stack_owned: Option<CppStackOwnedData>,
+    /// Whether the C++ code checks that the type that Rust holds by value is trivially
+    /// relocatable (`#trivially_relocatable`, not `#unsafe(trivially_relocatable)`).
+    pub check_trivially_relocatable: bool,
 }
 
 impl CppTypeDefinition {
@@ -691,6 +694,7 @@ impl Default for CppTypeDefinition {
             cpp_heap_allocated: None,
             cpp_ref: None,
             cpp_stack_owned: None,
+            check_trivially_relocatable: false,
         }
     }
 }
