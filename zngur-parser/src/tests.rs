@@ -168,6 +168,38 @@ type (i8, u8) {
     );
 }
 
+#[test]
+fn warning_in_merged_file_renders_child_source_span() {
+    let resolver = MockFilesystem::new(vec![(
+        "./a.zng",
+        r#"
+mod c++::ns {
+    safe fn f(i32*);
+}
+"#,
+    )]);
+
+    let mut warnings = Vec::new();
+    let _ = parse_str_with_resolver(
+        r#"
+merge "./a.zng";
+"#,
+        NullCfg,
+        &resolver,
+        &mut |w: &str| warnings.push(w.to_owned()),
+    );
+    // The `safe fn f(i32*);` declaration that triggered this warning lives in the
+    // merged `a.zng`, not the root file, so the rendered warning must show `a.zng`'s
+    // own filename and source snippet.
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("a.zng"), "got:\n{}", warnings[0]);
+    assert!(
+        warnings[0].contains("safe fn f(i32*);"),
+        "got:\n{}",
+        warnings[0]
+    );
+}
+
 macro_rules! assert_ty_path {
     ($path_expected:expr, $ty:expr) => {{
         let RustType::Adt(RustPathAndGenerics { path: p, .. }) = $ty else {
@@ -1373,6 +1405,39 @@ fn entity_path_rust_reference_formats_rust_paths_and_rejects_empty_or_cpp() {
 }
 
 #[test]
+fn files_with_only_comments_parse() {
+    for text in [
+        "",
+        "   \n\t\n",
+        "// Only a comment.",
+        "// Only a comment, with a final newline.\n",
+        "\n// Two comments,\n// and no items, with an apostrophe: isn't it?\n\n",
+    ] {
+        let parsed = parse_str(text, NullCfg, |e| {
+            panic!("unexpected diagnostic for {text:?}: {e}")
+        });
+        assert_eq!(parsed.errors, 0, "{text:?}");
+        assert_eq!(parsed.warnings, 0, "{text:?}");
+        assert!(parsed.spec.types.is_empty(), "{text:?}");
+    }
+}
+
+#[test]
+fn comments_after_the_last_item_parse() {
+    for text in [
+        "type c++::a::B {\n}\n// A trailing comment.\n",
+        "type c++::a::B {\n}\n// A trailing comment.",
+    ] {
+        let parsed = parse_str(text, NullCfg, |e| {
+            panic!("unexpected diagnostic for {text:?}: {e}")
+        });
+        assert_eq!(parsed.errors, 0, "{text:?}");
+        assert_eq!(parsed.warnings, 0, "{text:?}");
+        assert_eq!(parsed.spec.types.len(), 1, "{text:?}");
+    }
+}
+
+#[test]
 fn cpp_type_capabilities_follow_from_layout_and_trivially_relocatable() {
     let parsed = parse_str(
         r#"
@@ -1390,11 +1455,6 @@ type c++::a::Unchecked {
 // A layout without `#trivially_relocatable` is only checked in C++.
 type c++::a::NotRelocatable {
     #layout(size = 8, align = 4);
-}
-
-// Heap-allocated: Rust owns a C++ heap pointer + destructor.
-type c++::a::Heap {
-    #heap_allocated;
 }
 
 // No layout: Rust only refers to it.
@@ -1429,18 +1489,13 @@ type c++::a::Opaque {
         ty("ByValue").trivially_relocatable,
         TriviallyRelocatable::Checked
     );
-    assert!(!ty("ByValue").is_cpp_heap_allocated());
     assert_eq!(ty("NotRelocatable").cpp_by_value_layout(), None);
     assert_eq!(
         ty("NotRelocatable").layout,
         Some(LayoutPolicy::StackAllocated { size: 8, align: 4 })
     );
-    assert!(!ty("NotRelocatable").is_cpp_heap_allocated());
-    assert!(ty("Heap").is_cpp_heap_allocated());
-    assert_eq!(ty("Heap").cpp_by_value_layout(), None);
     assert_eq!(ty("Opaque").cpp_by_value_layout(), None);
     assert_eq!(ty("Opaque").layout, None);
-    assert!(!ty("Opaque").is_cpp_heap_allocated());
 }
 
 #[test]
@@ -1647,7 +1702,7 @@ type crate::E {
                 │     ─────────────┬────────────  
                 │                  ╰────────────── no longer supported
                 │ 
-                │ Help: declare the type as `type c++::ns::T { #heap_allocated; }`
+                │ Help: declare the type as `type c++::ns::T { ... }` with no layout, and own it through a C++ smart pointer, e.g. `type c++::std::unique_ptr<c++::ns::T> { #layout(size = 8, align = 8); #trivially_relocatable; }`
             ────╯
             Error: `#cpp_value` is no longer supported: C++ types are `c++::` types, whose C++ name is their path
                 ╭─[ test.zng:21:5 ]
@@ -1656,7 +1711,7 @@ type crate::E {
                 │     ──────────┬──────────  
                 │               ╰──────────── no longer supported
                 │ 
-                │ Help: declare the type as `type c++::ns::T { #heap_allocated; }`
+                │ Help: declare the type as `type c++::ns::T { ... }` with no layout, and own it through a C++ smart pointer, e.g. `type c++::std::unique_ptr<c++::ns::T> { #layout(size = 8, align = 8); #trivially_relocatable; }`
             ────╯
         "#]],
     );
@@ -1688,7 +1743,6 @@ type crate::Reopened {
     #cpp_ref "::Reopened";
 }
 
-#unstable(template_types)
 type<T> crate::Templated<T> {
     #layout(size = 8, align = 8);
 }
@@ -1721,12 +1775,11 @@ type crate::Templated<i32> {
 }
 
 #[test]
-fn only_by_ref_and_unsized_on_cpp_type_are_rejected() {
+fn heap_allocated_only_by_ref_and_unsized_on_cpp_type_are_rejected() {
     check_fail(
         r#"
 type c++::A {
     #heap_allocated;
-    #trivially_relocatable;
 }
 
 type c++::B {
@@ -1740,47 +1793,35 @@ type c++::C {
 type c++::D {
     #layout_conservative(size = 16, align = 8);
 }
-
-type c++::E {
-    #heap_allocated;
-    #unsafe(trivially_relocatable);
-}
 "#,
         expect![[r#"
-            Error: `#trivially_relocatable` needs `#layout(size = X, align = Y)`, which Rust needs to hold the C++ type by value
-               ╭─[ test.zng:4:5 ]
+            Error: `#heap_allocated` and `#only_by_ref` are for Rust types; a `c++::` type without a layout is already reference-only
+               ╭─[ test.zng:3:5 ]
                │
-             4 │     #trivially_relocatable;
-               │     ───────────┬───────────  
-               │                ╰───────────── `#trivially_relocatable` needs `#layout(size = X, align = Y)`, which Rust needs to hold the C++ type by value
+             3 │     #heap_allocated;
+               │     ───────┬───────  
+               │            ╰───────── `#heap_allocated` and `#only_by_ref` are for Rust types; a `c++::` type without a layout is already reference-only
             ───╯
-            Error: `#only_by_ref` is for Rust types; a `c++::` type without a layout is already reference-only
-               ╭─[ test.zng:8:5 ]
+            Error: `#heap_allocated` and `#only_by_ref` are for Rust types; a `c++::` type without a layout is already reference-only
+               ╭─[ test.zng:7:5 ]
                │
-             8 │     #only_by_ref;
+             7 │     #only_by_ref;
                │     ──────┬─────  
-               │           ╰─────── `#only_by_ref` is for Rust types; a `c++::` type without a layout is already reference-only
+               │           ╰─────── `#heap_allocated` and `#only_by_ref` are for Rust types; a `c++::` type without a layout is already reference-only
             ───╯
             Error: `?Sized` is not supported on C++ types; a `c++::` type without a layout is already reference-only
-                ╭─[ test.zng:12:22 ]
+                ╭─[ test.zng:11:22 ]
                 │
-             12 │     wellknown_traits(?Sized);
+             11 │     wellknown_traits(?Sized);
                 │                      ───┬──  
                 │                         ╰──── `?Sized` is not supported on C++ types; a `c++::` type without a layout is already reference-only
             ────╯
             Error: `#layout_conservative` cannot be used on `c++::` types; use `#layout(size = X, align = Y)` instead
-                ╭─[ test.zng:16:5 ]
+                ╭─[ test.zng:15:5 ]
                 │
-             16 │     #layout_conservative(size = 16, align = 8);
+             15 │     #layout_conservative(size = 16, align = 8);
                 │     ─────────────────────┬────────────────────  
                 │                          ╰────────────────────── `#layout_conservative` cannot be used on `c++::` types; use `#layout(size = X, align = Y)` instead
-            ────╯
-            Error: `#unsafe(trivially_relocatable)` needs `#layout(size = X, align = Y)`, which Rust needs to hold the C++ type by value
-                ╭─[ test.zng:21:5 ]
-                │
-             21 │     #unsafe(trivially_relocatable);
-                │     ───────────────┬───────────────  
-                │                    ╰───────────────── `#unsafe(trivially_relocatable)` needs `#layout(size = X, align = Y)`, which Rust needs to hold the C++ type by value
             ────╯
         "#]],
     );
@@ -1799,7 +1840,7 @@ type c++::E {
         .expect("expected ErrorText")
         .0;
     assert!(
-        err.contains("`#only_by_ref` is for Rust types"),
+        err.contains("`#heap_allocated` and `#only_by_ref` are for Rust types"),
         "unexpected error:\n{err}"
     );
 }
@@ -2298,38 +2339,6 @@ import "elsewhere.zng";
         |_| {},
     );
     assert_eq!(parsed.spec.imported_modules[0].crate_name, None);
-}
-#[test]
-fn files_with_only_comments_parse() {
-    for text in [
-        "",
-        "   \n\t\n",
-        "// Only a comment.",
-        "// Only a comment, with a final newline.\n",
-        "\n// Two comments,\n// and no items, with an apostrophe: isn't it?\n\n",
-    ] {
-        let parsed = parse_str(text, NullCfg, |e| {
-            panic!("unexpected diagnostic for {text:?}: {e}")
-        });
-        assert_eq!(parsed.errors, 0, "{text:?}");
-        assert_eq!(parsed.warnings, 0, "{text:?}");
-        assert!(parsed.spec.types.is_empty(), "{text:?}");
-    }
-}
-
-#[test]
-fn comments_after_the_last_item_parse() {
-    for text in [
-        "type c++::a::B {\n}\n// A trailing comment.\n",
-        "type c++::a::B {\n}\n// A trailing comment.",
-    ] {
-        let parsed = parse_str(text, NullCfg, |e| {
-            panic!("unexpected diagnostic for {text:?}: {e}")
-        });
-        assert_eq!(parsed.errors, 0, "{text:?}");
-        assert_eq!(parsed.warnings, 0, "{text:?}");
-        assert_eq!(parsed.spec.types.len(), 1, "{text:?}");
-    }
 }
 
 #[test]
@@ -3689,107 +3698,6 @@ type crate::Holder<crate::Foo> {}
 }
 
 #[test]
-fn cpp_heap_allocated_type_uses_rust_value_references_and_rejects_cpp_object_refs() {
-    let resolver = MockFilesystem::new(vec![
-        (
-            "./bar.zng",
-            r#"
-#crate bar_bindings
-type c++::ns::BarHeap {
-    #heap_allocated;
-}
-"#,
-        ),
-        (
-            "./merged_heap.zng",
-            r#"
-type c++::MergedHeap {
-    #heap_allocated;
-}
-"#,
-        ),
-    ]);
-    let parsed = parse_str_with_resolver(
-        r#"
-import "./bar.zng";
-merge "./merged_heap.zng";
-
-extern "C++" {
-    safe fn borrow_local(&c++::LocalHeap, &mut c++::LocalHeap);
-    unsafe fn raw_local(*const c++::LocalHeap, *mut c++::LocalHeap);
-    safe fn borrow_merged(&c++::MergedHeap, &mut c++::MergedHeap);
-    safe fn borrow_imported(&c++::ns::BarHeap, &mut c++::ns::BarHeap);
-    impl c++::ns::BarHeap {
-        safe fn method(&self);
-    }
-}
-
-type c++::LocalHeap {
-    #heap_allocated;
-}
-"#,
-        NullCfg,
-        &resolver,
-        |w| panic!("unexpected warning: {w}"),
-    );
-    assert_eq!(
-        parsed.spec.imported_modules[0].cpp_heap_allocated_types,
-        vec![vec!["ns".to_owned(), "BarHeap".to_owned()]]
-    );
-
-    for (src, expected) in [
-        (
-            r#"
-type c++::HeapFoo { #heap_allocated; }
-extern "C++" { safe fn f(&const c++::HeapFoo); }
-"#,
-            "`c++::HeapFoo` is `#heap_allocated`",
-        ),
-        (
-            r#"
-type c++::HeapFoo { #heap_allocated; }
-extern "C++" { safe fn f(&unique var c++::HeapFoo); }
-"#,
-            "`c++::HeapFoo` is `#heap_allocated`",
-        ),
-        (
-            r#"
-type c++::HeapFoo { #heap_allocated; }
-extern "C++" { unsafe fn f(c++::HeapFoo*); }
-"#,
-            "`c++::HeapFoo` is `#heap_allocated`",
-        ),
-        (
-            r#"
-type c++::HeapFoo { #heap_allocated; }
-extern "C++" { unsafe fn f(const c++::HeapFoo&); }
-"#,
-            "`c++::HeapFoo` is `#heap_allocated`",
-        ),
-        (
-            r#"
-import "./bar.zng";
-extern "C++" { safe fn f(&const c++::ns::BarHeap); }
-"#,
-            "`c++::ns::BarHeap` is `#heap_allocated`",
-        ),
-    ] {
-        let r = catch_unwind(|| {
-            let _ = parse_str_with_resolver(src, NullCfg, &resolver, |_| {});
-        });
-        let err = r
-            .unwrap_err()
-            .downcast::<ErrorText>()
-            .expect("expected ErrorText")
-            .0;
-        assert!(
-            err.contains(expected),
-            "expected `{expected}` for `{src}`, got:\n{err}"
-        );
-    }
-}
-
-#[test]
 fn rust_raw_pointer_to_cpp_class_is_rejected() {
     check_fail(
         r#"
@@ -4432,27 +4340,6 @@ type c++::B {
              7 │     safe fn dr<'a>(&'a const self) deref i32;
                │     ────────────────────┬────────────────────  
                │                         ╰────────────────────── C++ member functions do not support `use` or `deref` (those are for Rust methods; implement Rust traits on `c++::` types via `extern "C++" { impl Trait for c++::T { ... } }`)
-            ───╯
-        "#]],
-    );
-}
-
-#[test]
-fn cpp_method_on_cpp_heap_allocated_type_is_rejected() {
-    check_fail(
-        r#"
-type c++::Foo {
-    #heap_allocated;
-    unsafe fn value<'a>(&'a const self) -> i32;
-}
-"#,
-        expect![[r#"
-            Error: C++ member functions (`safe fn` / `unsafe fn`) cannot be declared on `#heap_allocated` types
-               ╭─[ test.zng:4:5 ]
-               │
-             4 │     unsafe fn value<'a>(&'a const self) -> i32;
-               │     ─────────────────────┬─────────────────────  
-               │                          ╰─────────────────────── C++ member functions (`safe fn` / `unsafe fn`) cannot be declared on `#heap_allocated` types
             ───╯
         "#]],
     );
@@ -5658,8 +5545,6 @@ fn cpp_constructor_on_non_by_value_or_non_cpp_type_is_rejected() {
         "type c++::B { safe constructor(i32) as new; }\n",
         // `c++::` type with `#layout`, but without `#trivially_relocatable`.
         "type c++::B { #layout(size = 8, align = 4); safe constructor(i32) as new; }\n",
-        // `c++::` type with `#heap_allocated`.
-        "type c++::B { #heap_allocated; safe constructor(i32) as new; }\n",
         // Ordinary Rust type.
         "type crate::Foo { #layout(size = 8, align = 4); safe constructor(i32) as new; }\n",
     ] {
@@ -6629,17 +6514,12 @@ fn cpp_field_invalid_types_are_rejected() {
 }
 
 #[test]
-fn cpp_field_on_rust_type_and_heap_allocated_type_are_rejected() {
+fn cpp_field_on_rust_type_is_rejected() {
     check_fail(
         r#"
 type crate::Foo {
     #layout(size = 8, align = 4);
     field const x (type = i32);
-}
-
-type c++::Heap {
-    #heap_allocated;
-    field &const x (type = i32);
 }
 "#,
         expect![[r#"
@@ -6649,13 +6529,6 @@ type c++::Heap {
              4 │     field const x (type = i32);
                │     ─────────────┬─────────────  
                │                  ╰─────────────── C++ field accessors (`field name (type = T)`) can only be declared on `c++::` types
-            ───╯
-            Error: C++ field accessors (`field name (type = T)`) cannot be declared on `#heap_allocated` types
-               ╭─[ test.zng:9:5 ]
-               │
-             9 │     field &const x (type = i32);
-               │     ──────────────┬─────────────  
-               │                   ╰─────────────── C++ field accessors (`field name (type = T)`) cannot be declared on `#heap_allocated` types
             ───╯
         "#]],
     );
@@ -7417,26 +7290,6 @@ type c++::Node {}
             .0;
         assert!(err.contains(expected), "expected `{expected}`, got:\n{err}");
     }
-}
-
-#[test]
-fn cpp_template_heap_allocated_is_rejected() {
-    check_fail(
-        r#"
-type c++::std::unique_ptr<i32> {
-    #heap_allocated;
-}
-"#,
-        expect![[r#"
-            Error: instantiations of C++ class templates can't be `#heap_allocated`
-               ╭─[ test.zng:2:6 ]
-               │
-             2 │ type c++::std::unique_ptr<i32> {
-               │      ────────────┬────────────  
-               │                  ╰────────────── instantiations of C++ class templates can't be `#heap_allocated`
-            ───╯
-        "#]],
-    );
 }
 
 #[test]
@@ -8664,15 +8517,27 @@ type<T> c++::ns::Vec<T> {
     for (src, expected) in [
         (
             "type<T> c++::Foo<T> { #heap_allocated; }\n",
-            "C++ class templates can't be `#heap_allocated`",
+            "`#heap_allocated` and `#only_by_ref` are for Rust types",
         ),
         (
             "type<T> c++::Foo<T> { #only_by_ref; }\n",
-            "`#only_by_ref` is for Rust types",
+            "`#heap_allocated` and `#only_by_ref` are for Rust types",
         ),
         (
             "type<T> c++::Foo<T> { wellknown_traits(?Sized); }\n",
             "`?Sized` is not supported on C++ types",
+        ),
+        (
+            "type<T> c++::Foo<T> { #cpp_heap_allocated \"Foo\"; }\n",
+            "`#cpp_heap_allocated` is no longer supported",
+        ),
+        (
+            "type<T> c++::Foo<T> { #cpp_ref \"Foo\"; }\n",
+            "`#cpp_ref` is no longer supported",
+        ),
+        (
+            "type<T> c++::Foo<T> { #cpp_stack_owned \"Foo\"; }\n",
+            "`#cpp_stack_owned` is no longer supported",
         ),
         (
             "type<T> c++::Foo<T> { constructor(i32); }\n",

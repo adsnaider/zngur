@@ -623,12 +623,7 @@ impl ZngHeaderTemplate {
                     format!("::{}::RefMut<{x}>", &self.cpp_namespace),
                 ]
             });
-        builtins
-            .chain([
-                format!("::{}::ZngurCppOpaqueOwnedObject", &self.cpp_namespace),
-                "::size_t".to_owned(),
-            ])
-            .collect()
+        builtins.chain(["::size_t".to_owned()]).collect()
     }
 }
 

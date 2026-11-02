@@ -23,7 +23,7 @@ Error: `#cpp_heap_allocated` is no longer supported: C++ types are `c++::` types
     │     ─────────────┬────────────  
     │                  ╰────────────── no longer supported
     │ 
-    │ Help: declare the type as `type c++::ns::T { #heap_allocated; }`
+    │ Help: declare the type as `type c++::ns::T { ... }` with no layout, and own it through a C++ smart pointer, e.g. `type c++::std::unique_ptr<c++::ns::T> { #layout(size = 8, align = 8); #trivially_relocatable; }`
 ────╯
 Error: `#cpp_value` is no longer supported: C++ types are `c++::` types, whose C++ name is their path
     ╭─[ removed_cpp_directives.zng:17:5 ]
@@ -32,6 +32,6 @@ Error: `#cpp_value` is no longer supported: C++ types are `c++::` types, whose C
     │     ──────────┬──────────  
     │               ╰──────────── no longer supported
     │ 
-    │ Help: declare the type as `type c++::ns::T { #heap_allocated; }`
+    │ Help: declare the type as `type c++::ns::T { ... }` with no layout, and own it through a C++ smart pointer, e.g. `type c++::std::unique_ptr<c++::ns::T> { #layout(size = 8, align = 8); #trivially_relocatable; }`
 ────╯
 cfg values used:

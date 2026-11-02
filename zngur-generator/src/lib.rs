@@ -5,6 +5,7 @@ use cpp::CppFnDefinition;
 use cpp::CppFnSig;
 use cpp::CppMethod;
 use cpp::CppPath;
+use cpp::CppStackOwnedData;
 use cpp::CppTraitDefinition;
 use cpp::CppTypeDefinition;
 use cpp::CppVariant;
@@ -142,18 +143,6 @@ impl ZngurGenerator {
             namespace: default_ns,
             crate_name: &sanitized_crate_name,
         };
-        let cpp_heap_allocated_types: std::collections::HashSet<RustType> = zng
-            .types
-            .iter()
-            .filter(|ty_def| ty_def.is_cpp_heap_allocated())
-            .map(|ty_def| ty_def.ty.with_anonymous_lifetimes())
-            .chain(
-                zng.imported_modules
-                    .iter()
-                    .flat_map(|m| &m.cpp_heap_allocated_types)
-                    .map(|segs| RustType::Cpp(segs.clone().into())),
-            )
-            .collect();
         let local_cpp_fn_paths: std::collections::HashSet<Vec<String>> = zng
             .cpp_funcs
             .iter()
@@ -181,16 +170,14 @@ impl ZngurGenerator {
             anonymize_lifetimes(&mut ty_def);
             let ty = &ty_def.ty;
             // What Rust can do with a C++ (`c++::`) type: hold it by value if it has a layout and
-            // is trivially relocatable, own a heap-allocated C++ pointer if `#heap_allocated`,
-            // and otherwise only refer to it.
+            // is trivially relocatable, and otherwise only refer to it.
             let cpp_name = ty_def.cpp_name();
             let cpp_by_value_type = if ty_def.cpp_by_value_layout().is_some() {
                 cpp_name.clone()
             } else {
                 None
             };
-            let is_cpp_heap_allocated = ty_def.is_cpp_heap_allocated();
-            let cpp_ref = if cpp_by_value_type.is_none() && !is_cpp_heap_allocated {
+            let cpp_ref = if cpp_by_value_type.is_none() {
                 cpp_name.clone().map(|name| cpp::CppRef {
                     name,
                     layout: ty_def.layout,
@@ -200,7 +187,7 @@ impl ZngurGenerator {
             };
             // C++ member functions that Rust calls: a Rust function, and a C++ function that
             // calls the member function.
-            if !is_cpp_heap_allocated && let Some(owner_cpp_type) = &cpp_name {
+            if let Some(owner_cpp_type) = &cpp_name {
                 for method in &ty_def.cpp_methods {
                     let mangled_name = rust_file.add_cpp_method(
                         ty,
@@ -280,7 +267,7 @@ impl ZngurGenerator {
             let mut cpp_stack_owned_data = None;
             if let RustType::Cpp(path) = ty {
                 let template = cpp_template(ty);
-                let (type_name, module_path): (String, Vec<String>) = if template.is_some() {
+                let (type_name, module_path) = if template.is_some() {
                     (struct_name(path), vec![])
                 } else {
                     let (name, path) = path
@@ -360,24 +347,6 @@ impl ZngurGenerator {
         pub fn into_const(self) -> {type_name}<::zngur_lib::Const> {{
             let this = ::core::mem::ManuallyDrop::new(self);
             unsafe {{ ::core::ptr::read(&*this as *const Self as *const {type_name}<::zngur_lib::Const>) }}
-        }}
-    }}
-"#
-                    );
-                    insert_struct(&mut rust_file, &mut cpp_tree, &struct_def);
-                }
-                if is_cpp_heap_allocated {
-                    let struct_def = format!(
-                        r#"
-    #[repr(C)]
-    pub struct {type_name} {{
-        pub(crate) data: *mut u8,
-        pub(crate) destructor: extern "C" fn(*mut u8),
-    }}
-
-    impl Drop for {type_name} {{
-        fn drop(&mut self) {{
-            (self.destructor)(self.data)
         }}
     }}
 "#
@@ -564,10 +533,6 @@ impl ZngurGenerator {
                 fields,
                 methods: cpp_methods,
                 wellknown_traits,
-                cpp_heap_allocated: is_cpp_heap_allocated.then(|| CppHeapAllocatedData {
-                    bridge_fn: rust_file.add_cpp_heap_allocated_bridge(ty),
-                    cpp_type: cpp_name.expect("is_cpp_heap_allocated implies RustType::Cpp"),
-                }),
                 cpp_ref,
                 cpp_stack_owned: cpp_stack_owned_data,
                 check_trivially_relocatable: ty_def.trivially_relocatable
@@ -627,20 +592,11 @@ impl ZngurGenerator {
                     continue;
                 }
                 let item = if local_cpp_fn_paths.contains(segs) {
-                    let is_heap = module.cpp_heap_allocated_types.contains(segs);
-                    if is_heap {
-                        format!(
-                            "\n#[allow(dead_code, non_camel_case_types)]\npub type {type_name} = \
-                             ::{module_crate}::generated::{};\n",
-                            segs.join("::")
-                        )
-                    } else {
-                        format!(
-                            "\n#[allow(dead_code, non_camel_case_types)]\npub type {type_name}<C = \
-                             ::zngur_lib::NonConst> = ::{module_crate}::generated::{}<C>;\n",
-                            segs.join("::")
-                        )
-                    }
+                    format!(
+                        "\n#[allow(dead_code, non_camel_case_types)]\npub type {type_name}<C = \
+                         ::zngur_lib::NonConst> = ::{module_crate}::generated::{}<C>;\n",
+                        segs.join("::")
+                    )
                 } else {
                     format!(
                         "\n#[allow(unused_imports)]\npub use ::{module_crate}::generated::{};\n",
@@ -735,10 +691,7 @@ impl ZngurGenerator {
                     .iter()
                     .zip(&rust_link_names)
                     .map(|(method, link_name)| {
-                        let receiver_ty = if matches!(impl_block.ty, RustType::Cpp(_))
-                            && !cpp_heap_allocated_types
-                                .contains(&impl_block.ty.with_anonymous_lifetimes())
-                        {
+                        let receiver_ty = if matches!(impl_block.ty, RustType::Cpp(_)) {
                             RustType::CppVar(Box::new(impl_block.ty.clone()))
                         } else {
                             impl_block.ty.clone()
@@ -829,14 +782,6 @@ mod tests {
 
     use crate::{ZngurGenerator, struct_name};
 
-    fn minimal_heap_allocated_type(ty: RustType) -> ZngurType {
-        ZngurType {
-            layout: Some(LayoutPolicy::HeapAllocated),
-            trivially_relocatable: TriviallyRelocatable::No,
-            ..minimal_stack_owned_type(ty, 0, 1)
-        }
-    }
-
     /// A `c++::` type that Rust holds by value via `#layout` + `#trivially_relocatable`.
     fn minimal_stack_owned_type(ty: RustType, size: usize, align: usize) -> ZngurType {
         ZngurType {
@@ -863,14 +808,6 @@ mod tests {
             trivially_relocatable: TriviallyRelocatable::No,
             ..minimal_stack_owned_type(ty, 0, 1)
         }
-    }
-
-    fn minimal_opaque_cpp_type(ty: RustType) -> ZngurType {
-        minimal_ref_type(ty)
-    }
-
-    fn minimal_by_value_cpp_type(ty: RustType, size: usize, align: usize) -> ZngurType {
-        minimal_stack_owned_type(ty, size, align)
     }
 
     fn adt(segments: &[&str]) -> RustType {
@@ -1072,7 +1009,7 @@ mod tests {
         assert!(rust_code.contains("pub mod b {"));
         assert!(
             rust_code
-                .contains("pub struct Name<C: ::zngur_lib::Constness = ::zngur_lib::NonConst>")
+                .contains("pub struct Name<C: ::zngur_lib::Constness = ::zngur_lib::NonConst> {")
         );
         assert!(!rust_code.contains("pub mod cpp {"));
         assert!(!h.contains("sizeof(::a::b::Name)"));
@@ -1080,29 +1017,14 @@ mod tests {
     }
 
     #[test]
-    fn cpp_heap_allocated_bridge_references_correct_wrapper_path_for_cpp_type() {
-        let spec = ZngurSpec {
-            types: vec![minimal_heap_allocated_type(cpp(&["a", "Name"]))],
-            ..Default::default()
-        };
-        let (rust_code, h, _cpp) =
-            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
-        assert!(rust_code.contains("*mut a::Name"));
-        assert!(!rust_code.contains("*mut cpp::Name"));
-        assert!(!rust_code.contains("*mut cpp::a::Name"));
-        assert!(h.contains("inline ::a::Name& cpp()"));
-        let (_, after_ctor) = h
-            .split_once("inline Name(::rust::ZngurCppOpaqueOwnedObject&& o) noexcept {")
-            .expect("missing ZngurCppOpaqueOwnedObject constructor");
-        let (ctor_body, _) = after_ctor.split_once('}').unwrap();
-        assert!(ctor_body.contains("__zngur_data ="));
-    }
-
-    #[test]
     fn cpp_stack_owned_destructor_names_match_and_are_unique() {
+        let b_point_i32 = RustType::Cpp(CppTypePath {
+            path: vec!["b".to_owned(), "Point".to_owned()],
+            generics: vec![RustType::Primitive(PrimitiveRustType::Int(32))],
+        });
         let cases = [
             (cpp(&["a", "Point"]), "::a::Point"),
-            (cpp(&["b", "Point"]), "::b::Point"),
+            (b_point_i32, "::b::Point< ::int32_t >"),
             (cpp(&["a", "b", "Point"]), "::a::b::Point"),
             (cpp(&["a__b", "Point"]), "::a__b::Point"),
             (cpp(&["crate", "Point"]), "::crate::Point"),
@@ -1484,7 +1406,7 @@ mod tests {
             })
         };
         let spec = ZngurSpec {
-            types: vec![minimal_opaque_cpp_type(b.clone())],
+            types: vec![minimal_ref_type(b.clone())],
             // C++ functions that Rust calls.
             cpp_funcs: vec![ZngurCppFn {
                 lifetimes: vec![Lifetime("a".to_owned())],
@@ -1729,7 +1651,7 @@ mod tests {
         )));
         let spec = ZngurSpec {
             types: vec![
-                minimal_by_value_cpp_type(b_cpp_fn, 8, 4),
+                minimal_stack_owned_type(b_cpp_fn, 8, 4),
                 ZngurType {
                     ty: dyn_fn_ty,
                     lifetimes: vec![],
@@ -1794,7 +1716,7 @@ mod tests {
         };
         let imported_baz = RustType::Cpp(imported_baz_path.clone());
         let spec = ZngurSpec {
-            types: vec![minimal_opaque_cpp_type(local_foo.clone())],
+            types: vec![minimal_ref_type(local_foo.clone())],
             imported_modules: vec![ModuleImport {
                 path: "./base.zng".into(),
                 crate_name: Some("base".to_owned()),
@@ -1931,7 +1853,7 @@ mod tests {
             is_safe: Some(true),
         };
         let spec = ZngurSpec {
-            types: vec![minimal_opaque_cpp_type(b.clone())],
+            types: vec![minimal_ref_type(b.clone())],
             extern_cpp_impls: vec![
                 ZngurExternCppImpl {
                     tr: None,
@@ -2291,7 +2213,7 @@ mod tests {
             RustType::Primitive(PrimitiveRustType::Int(32)),
         );
         let spec = ZngurSpec {
-            types: vec![minimal_opaque_cpp_type(b)],
+            types: vec![minimal_ref_type(b)],
             extern_cpp_funcs: vec![ZngurExternCppFn {
                 name: "take_and_return_cpp_refs".to_owned(),
                 lifetimes: vec![],
@@ -2343,47 +2265,6 @@ mod tests {
     }
 
     #[test]
-    fn imported_cpp_heap_allocated_type_uses_rust_value_ref() {
-        let heap_foo = cpp(&["ns", "HeapFoo"]);
-        let spec = ZngurSpec {
-            imported_modules: vec![ModuleImport {
-                path: "./bar.zng".into(),
-                crate_name: Some("bar_bindings".to_owned()),
-                cpp_types: vec![vec!["ns".to_owned(), "HeapFoo".to_owned()]],
-                cpp_heap_allocated_types: vec![vec!["ns".to_owned(), "HeapFoo".to_owned()]],
-                ..Default::default()
-            }],
-            extern_cpp_impls: vec![ZngurExternCppImpl {
-                lifetimes: vec![],
-                tr: None,
-                ty: heap_foo,
-                methods: vec![ZngurMethod {
-                    name: "inspect".to_owned(),
-                    lifetimes: vec![],
-                    generics: vec![],
-                    receiver: ZngurMethodReceiver::Ref(Mutability::Not),
-                    receiver_lifetime: None,
-                    inputs: vec![],
-                    output: RustType::UNIT,
-                    is_safe: Some(true),
-                }],
-            }],
-            ..Default::default()
-        };
-        let (rust_code, h, _cpp) =
-            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
-        assert!(
-            rust_code.contains("impl ns::HeapFoo {pub fn inspect(&self, ) -> ()"),
-            "{rust_code}"
-        );
-        assert!(
-            h.contains("static ::rust::Unit inspect(\n        ::rust::Ref< ::rust::cpp::ns::HeapFoo >\n    );"),
-            "{h}"
-        );
-        assert!(!h.contains("CppRef< ::rust::cpp::ns::HeapFoo >"), "{h}");
-    }
-
-    #[test]
     fn rust_value_references_to_cpp_pointers_emit_ref_to_ptr() {
         let b = cpp(&["a", "B"]);
         let lt_a = Some(Lifetime("a".to_owned()));
@@ -2406,7 +2287,7 @@ mod tests {
             )),
         );
         let spec = ZngurSpec {
-            types: vec![minimal_opaque_cpp_type(b)],
+            types: vec![minimal_ref_type(b)],
             extern_cpp_funcs: vec![ZngurExternCppFn {
                 name: "copy_ptr".to_owned(),
                 lifetimes: vec![Lifetime("a".to_owned())],
@@ -2440,7 +2321,7 @@ mod tests {
         let spec = ZngurSpec {
             cpp_namespace: Some("foo::bar".to_owned()),
             mangling_base: "foo::bar".to_owned(),
-            types: vec![minimal_opaque_cpp_type(b)],
+            types: vec![minimal_ref_type(b)],
             funcs: vec![ZngurFn {
                 path: RustPathAndGenerics {
                     path: vec!["crate".to_owned(), "roundtrip_ref".to_owned()],
@@ -2492,7 +2373,7 @@ mod tests {
     fn user_type_named_cpp_ref_is_not_treated_as_zngur_cpp_ref_alias() {
         let rust_cpp_ref_ty = adt(&["crate", "CppRef"]);
         let cpp_cpp_ref_ty = cpp(&["CppRef"]);
-        let mut rust_cpp_ref = minimal_opaque_cpp_type(rust_cpp_ref_ty.clone());
+        let mut rust_cpp_ref = minimal_ref_type(rust_cpp_ref_ty.clone());
         rust_cpp_ref.layout = Some(LayoutPolicy::StackAllocated { size: 8, align: 4 });
         rust_cpp_ref.constructor = Some(ZngurConstructor {
             inputs: vec![("0".to_owned(), cpp_cpp_ref_ty.clone())],
@@ -2512,7 +2393,7 @@ mod tests {
             deref: None,
             cpp_name: None,
         }];
-        let cpp_cpp_ref = minimal_by_value_cpp_type(cpp_cpp_ref_ty.clone(), 8, 4);
+        let cpp_cpp_ref = minimal_stack_owned_type(cpp_cpp_ref_ty.clone(), 8, 4);
         let spec = ZngurSpec {
             types: vec![rust_cpp_ref, cpp_cpp_ref],
             funcs: vec![ZngurFn {
@@ -2563,7 +2444,7 @@ mod tests {
         let const_bool_ptr =
             RustType::cpp_ptr(Mutability::Not, CppIndirection::Pointer, bool_ty.clone());
         let b_ptr = RustType::cpp_ptr(Mutability::Mut, CppIndirection::Pointer, b.clone());
-        let mut ty = minimal_by_value_cpp_type(b.clone(), 8, 4);
+        let mut ty = minimal_stack_owned_type(b.clone(), 8, 4);
         let field = |rust_name: &str, ty: &RustType, access, is_safe| ZngurCppField {
             name: "x".to_owned(),
             rust_name: Some(rust_name.to_owned()),
@@ -2774,7 +2655,7 @@ mod tests {
     fn cpp_methods_get_rust_functions_and_cpp_bridges() {
         let b = cpp(&["a", "B"]);
         let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
-        let mut ty = minimal_by_value_cpp_type(b.clone(), 8, 4);
+        let mut ty = minimal_stack_owned_type(b.clone(), 8, 4);
         ty.cpp_methods = vec![
             ZngurCppMethod {
                 cpp_name: "value".to_owned(),
@@ -2999,7 +2880,7 @@ mod tests {
             named_generics: vec![],
         });
         let str_ty = RustType::Primitive(PrimitiveRustType::Str);
-        let mut ty = minimal_opaque_cpp_type(b);
+        let mut ty = minimal_ref_type(b);
         ty.cpp_methods = vec![
             ZngurCppMethod {
                 cpp_name: "check".to_owned(),
@@ -3134,7 +3015,7 @@ mod tests {
     #[test]
     fn cpp_methods_move_imported_by_value_types_like_local_ones() {
         let imported_bar = cpp(&["ns", "Bar"]);
-        let mut local_ty = minimal_opaque_cpp_type(cpp(&["ns", "Local"]));
+        let mut local_ty = minimal_ref_type(cpp(&["ns", "Local"]));
         local_ty.cpp_methods = vec![ZngurCppMethod {
             cpp_name: "round_trip".to_owned(),
             lifetimes: vec![],
@@ -3173,7 +3054,7 @@ mod tests {
 
     #[test]
     fn cpp_method_bridge_symbols_do_not_collide_across_underscore_boundaries_or_extern_cpp() {
-        let mut foo_cpp_method = minimal_opaque_cpp_type(cpp(&["Foo_cpp_method"]));
+        let mut foo_cpp_method = minimal_ref_type(cpp(&["Foo_cpp_method"]));
         foo_cpp_method.cpp_methods = vec![ZngurCppMethod {
             cpp_name: "bar".to_owned(),
             lifetimes: vec![],
@@ -3188,7 +3069,7 @@ mod tests {
             output: RustType::UNIT,
             is_safe: true,
         }];
-        let mut foo = minimal_opaque_cpp_type(cpp(&["Foo"]));
+        let mut foo = minimal_ref_type(cpp(&["Foo"]));
         foo.cpp_methods = vec![
             ZngurCppMethod {
                 cpp_name: "cpp_method_bar".to_owned(),
@@ -3254,8 +3135,8 @@ mod tests {
 
     #[test]
     fn const_cpp_method_does_not_shadow_cpp_type_or_namespace_named_c() {
-        let mut top_c = minimal_opaque_cpp_type(cpp(&["C"]));
-        let mut nested_c_foo = minimal_opaque_cpp_type(cpp(&["ns", "C", "Foo"]));
+        let mut top_c = minimal_ref_type(cpp(&["C"]));
+        let mut nested_c_foo = minimal_ref_type(cpp(&["ns", "C", "Foo"]));
         let lt_a = Lifetime("a".to_owned());
         top_c.cpp_methods = vec![ZngurCppMethod {
             cpp_name: "id".to_owned(),
@@ -3348,7 +3229,7 @@ mod tests {
             },
             vec![],
         )));
-        let mut ty = minimal_by_value_cpp_type(b.clone(), 8, 4);
+        let mut ty = minimal_stack_owned_type(b.clone(), 8, 4);
         ty.cpp_constructors = vec![
             ZngurCppConstructor {
                 rust_name: "new".to_owned(),
@@ -3532,9 +3413,9 @@ mod tests {
         let up_i32_struct = struct_name(up_i32_path);
         let spec = ZngurSpec {
             types: vec![
-                minimal_opaque_cpp_type(b.clone()),
-                minimal_by_value_cpp_type(up_b.clone(), 8, 8),
-                minimal_opaque_cpp_type(up_i32.clone()),
+                minimal_ref_type(b.clone()),
+                minimal_stack_owned_type(up_b.clone(), 8, 8),
+                minimal_ref_type(up_i32.clone()),
             ],
             ..Default::default()
         };
@@ -3653,10 +3534,10 @@ mod tests {
         };
         let spec = ZngurSpec {
             types: vec![
-                minimal_opaque_cpp_type(b),
-                minimal_by_value_cpp_type(RustType::Cpp(up_b_path), 8, 8),
-                minimal_opaque_cpp_type(RustType::Cpp(map_i32_b_path)),
-                minimal_by_value_cpp_type(RustType::Cpp(span_const_b_path), 16, 8),
+                minimal_ref_type(b),
+                minimal_stack_owned_type(RustType::Cpp(up_b_path), 8, 8),
+                minimal_ref_type(RustType::Cpp(map_i32_b_path)),
+                minimal_stack_owned_type(RustType::Cpp(span_const_b_path), 16, 8),
             ],
             // Duplicate `bar_import` also verifies `pub use` deduplication.
             imported_modules: vec![bar_import.clone(), bar_import, mid_import],
@@ -3801,7 +3682,7 @@ mod tests {
     fn const_cpp_fields_and_template_arguments() {
         let b = cpp(&["a", "B"]);
         let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
-        let mut ty = minimal_by_value_cpp_type(b, 8, 4);
+        let mut ty = minimal_stack_owned_type(b, 8, 4);
         ty.cpp_fields = vec![ZngurCppField {
             name: "x".to_owned(),
             rust_name: None,
@@ -3817,7 +3698,7 @@ mod tests {
             generics: vec![RustType::CppConst(Box::new(i32))],
         });
         let spec = ZngurSpec {
-            types: vec![ty, minimal_by_value_cpp_type(span, 16, 8)],
+            types: vec![ty, minimal_stack_owned_type(span, 16, 8)],
             ..Default::default()
         };
         let (rust_code, h, cpp_code) =
@@ -3887,7 +3768,7 @@ mod tests {
                 RustType::cpp_ptr(Mutability::Not, CppIndirection::Pointer, b.clone()),
             ],
         });
-        let mut map_def = minimal_by_value_cpp_type(map_ty, 48, 8);
+        let mut map_def = minimal_stack_owned_type(map_ty, 48, 8);
         map_def.cpp_methods = vec![ZngurCppMethod {
             cpp_name: "size".to_owned(),
             lifetimes: vec![],
@@ -3903,7 +3784,7 @@ mod tests {
             is_safe: true,
         }];
         let spec = ZngurSpec {
-            types: vec![map_def, minimal_opaque_cpp_type(b)],
+            types: vec![map_def, minimal_ref_type(b)],
             ..Default::default()
         };
         let (rust_code, h, cpp_code) =
@@ -3980,11 +3861,7 @@ mod tests {
         };
         let (_, unsized_h, _) = ZngurGenerator::build_from_zng(
             ZngurSpec {
-                types: vec![
-                    slice_def,
-                    minimal_opaque_cpp_type(view_ty),
-                    minimal_opaque_cpp_type(node),
-                ],
+                types: vec![slice_def, minimal_ref_type(view_ty), minimal_ref_type(node)],
                 ..Default::default()
             },
             "test_crate".to_owned(),
@@ -4013,7 +3890,7 @@ mod tests {
             generics: vec![point.clone()],
         });
         let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
-        let mut point_ty = minimal_by_value_cpp_type(point.clone(), 8, 4);
+        let mut point_ty = minimal_stack_owned_type(point.clone(), 8, 4);
         point_ty.cpp_methods = vec![
             ZngurCppMethod {
                 cpp_name: "cast".to_owned(),
@@ -4041,10 +3918,7 @@ mod tests {
             },
         ];
         let spec = ZngurSpec {
-            types: vec![
-                point_ty,
-                minimal_by_value_cpp_type(unique_ptr.clone(), 8, 8),
-            ],
+            types: vec![point_ty, minimal_stack_owned_type(unique_ptr.clone(), 8, 8)],
             cpp_funcs: vec![ZngurCppFn {
                 lifetimes: vec![],
                 namespace: vec!["std".to_owned()],
@@ -4091,6 +3965,49 @@ mod tests {
                  ::int32_t >(::rust::__zngur_internal_move_from_rust< ::int32_t >(i0), "
             ),
             "{cpp_code}"
+        );
+    }
+
+    #[test]
+    fn rust_methods_on_cpp_type_use_ref_wrappers_not_cpp_ref() {
+        let i32_ty = RustType::Primitive(PrimitiveRustType::Int(32));
+        let method = |name: &str, m: Mutability| ZngurMethodDetails {
+            data: ZngurMethod {
+                name: name.to_owned(),
+                lifetimes: vec![],
+                generics: vec![],
+                receiver: ZngurMethodReceiver::Ref(m),
+                receiver_lifetime: None,
+                inputs: vec![],
+                output: i32_ty.clone(),
+                is_safe: Some(true),
+            },
+            use_path: None,
+            deref: None,
+            cpp_name: None,
+        };
+        let mut foo = minimal_ref_type(cpp(&["a", "Foo"]));
+        foo.methods = vec![
+            method("borrow", Mutability::Not),
+            method("borrow_mut", Mutability::Mut),
+        ];
+        let spec = ZngurSpec {
+            types: vec![foo],
+            ..Default::default()
+        };
+        let (_rust_code, h, _cpp) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        assert!(
+            h.contains("::rust::Ref< ::rust::cpp::a::Foo >"),
+            "missing `::rust::Ref< ::rust::cpp::a::Foo >` in:\n{h}"
+        );
+        assert!(
+            h.contains("::rust::RefMut< ::rust::cpp::a::Foo >"),
+            "missing `::rust::RefMut< ::rust::cpp::a::Foo >` in:\n{h}"
+        );
+        assert!(
+            !h.contains("::rust::CppRef< ::rust::cpp::a::Foo >"),
+            "unexpected `::rust::CppRef` in:\n{h}"
         );
     }
 }
