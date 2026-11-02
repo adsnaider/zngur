@@ -16,45 +16,59 @@ Zngur also makes safety guarantees but also tries to be powerful enough to handl
 including generics, `impl` and `dyn` traits, and owned objects. So with Zngur you can use almost any Rust library in C++,
 but with CXX you need to write some manual glue code (potentially with runtime costs) to avoid inaccessible types and signatures.
 
-For using C++ in Rust, CXX and Zngur both provide opaque C++ types behind indirection,
-but in CXX that indirection is explicit in the Rust side, usually involving `Pin` and `cxx::UniquePtr`,
-while Zngur forces you to hide C++ types behind some idiomatic and safe Rust api,
-which is a glue code you need to write in C++.
-For example, instead of defining a C++ opaque type and using it in Rust via a `UniquePtr`,
-you can define the behavior of that type in a normal Rust trait,
-implement that trait for your C++ type,
-and then convert that type into a `Box<dyn Trait>` and use it in Rust,
-or define some Rust struct which holds this C++ object using `ZngurCppOpaqueOwned` and write methods
-and implement traits for that struct in C++ (which has access to the underlying C++ object).
-So Zngur and CXX have almost equivalent expressing power in this side, but with different styles.
+For using C++ in Rust, Zngur lets you declare `c++::` types directly — holding
+[trivially relocatable](./call_cpp_from_rust/opaque.md#trivially-relocatable-c-types) ones by value
+on the Rust stack, referring to non-relocatable ones through references or C++ smart pointers like
+`c++::std::unique_ptr<T>` (without `Pin` ceremonies), and calling their member functions,
+constructors, field accessors, and free functions directly. When a C++ library's raw API doesn't fit
+Rust's ownership or lifetime model, you can wrap those direct calls in Rust, or shape a Rusty API on
+the C++ side: define the behavior in a Rust trait and convert C++ classes into `Box<dyn Trait>`, or
+write `impl` blocks and free functions in C++ for Rust or `c++::` types.
 
 Zngur's benefits over CXX are:
 
-- Zngur supports owning Rust variables on the C++ stack, saving some unnecessary allocations.
+- Zngur supports owning Rust variables on the C++ stack, and trivially relocatable C++ objects on
+  the Rust stack, saving unnecessary allocations.
 - CXX has limited support for some types in the standard library,
   but Zngur supports almost everything (`Vec<T>`, `Vec<Vec<T>>`, `HashMap<T, T>`, `Box<[T]>`, `Arc<dyn T>`, ...)
   with almost full API.
-- Zngur keeps the Rust side clean and normal, moving all glue code to the C++ side.
-  But using CXX you will see the foreign types and glue code in both languages.
+- Zngur keeps the Rust side clean and normal: direct `c++::` calls avoid `Pin` ceremonies, and any
+  richer adaptation glue can live either in Rust or on the C++ side.
+  Using CXX, foreign wrapper ceremonies and glue code tend to leak into both languages.
 
 ### Migrating from CXX to Zngur
 
 - Create a `main.zng` file.
 - Add everything in the `extern "Rust"` block into the `main.zng`.
   Zngur should support everything supported by CXX.
-- For every opaque type in the `extern "C++"` and its methods, write an equivalent trait or opaque type.
+- Declare types from CXX's `extern "C++"` block as `type c++::...` in `main.zng`, along with the
+  member functions, constructors, and fields you call from Rust, and declare free C++ functions as
+  `c++::...` or in `mod c++::...` blocks. Add `#layout(size = ..., align = ...)` and
+  `#trivially_relocatable` to C++ types that can be moved with `memcpy` so Rust can hold them by
+  value; leave non-relocatable C++ types without them to refer to them through references or smart
+  pointers. (When you want to shape a higher-level Rust API on the C++ side, you can also write
+  `extern "C++"` `impl` blocks or functions, or convert C++ classes into `Box<dyn Trait>`.)
 - For builtin C++ types that CXX supports:
+  - `UniquePtr<T>`:
+    - Declare `type<T> c++::std::unique_ptr<T>` with `#layout(size = 8, align = 8);` and
+      `#trivially_relocatable;`, and instantiate `type c++::std::unique_ptr<c++::Foo> {}` (see
+      [C++ class templates](./call_cpp_from_rust/cpp_templates.md)).
   - `CxxString`:
-    - Convert it to a Rust `&CStr`, `&[u8]`, or `&str` if ownership is not required.
-    - Copy it into a Rust `CString`, `Vec<u8>`, or `String` if the performance cost is acceptable.
-    - Write a trait for functionalities you need from it and convert the string to `Box<dyn Trait>`.
-    - Write an opaque type `CxxString` and implement the functionalities you need in `impl`.
-  - `CxxVector<uintX_t>`:
-    - Similar to `CxxString`
-  - `CxxVector<opaque_type>`:
-    - Copy it into a Rust `Vec<Box<dyn Trait>>` if the performance cost is acceptable.
-    - Write two opaque types `VectorFoo` and `Foo`,
-      where `VecFoo` has a `get(usize) -> &Foo` method.
+    - Declare `type c++::std::string {}` to pass or inspect C++ strings by reference (or hold them via
+      `c++::std::unique_ptr<c++::std::string>`, since `std::string` may not be trivially relocatable
+      under small-string optimization).
+    - Convert it to a Rust `&CStr`, `&[u8]`, or `&str` when borrowing as a Rust string slice, or
+      copy it into a `CString`, `Vec<u8>`, or `String` when an owned Rust string is desired.
+  - `CxxVector<T>`:
+    - Declare `type<T> c++::std::vector<T>` and instantiate `type c++::std::vector<i32> {}` or
+      `type c++::std::vector<c++::Foo> {}` to pass or mutate C++ vectors by reference without `Pin` (or
+      own them via `c++::std::unique_ptr<c++::std::vector<...>>`, since `std::vector` is not
+      specialized as trivially relocatable out of the box and is not trivially relocatable in debug
+      iterator builds such as MSVC debug builds; holding `std::vector` by value on the Rust stack
+      requires `#layout` or `#layout_conservative` plus `#unsafe(trivially_relocatable)` and is only
+      sound on standard-library configurations where `std::vector` can be moved with `memcpy`).
+    - Or borrow its elements as `&[T]` (for layout-compatible elements) or copy them into a Rust
+      `Vec` when an idiomatic Rust container is desired.
 
 ## AutoCXX
 
@@ -79,19 +93,20 @@ This is even recommended in the AutoCXX docs:
 > Wrap the bindings in a new type wrapper which enforces compile-time variants in its APIs;
 > for example, taking a mutable reference to enforce exclusive access.
 
-Using Zngur, you can write that wrapper in C++!
-Zngur supports implementing Rust traits for C++ types and casting them to the `Box<dyn Trait>`,
-implementing inherent methods on Rust types,
-implementing Rust traits for Rust types,
-and calling bare functions in C++ that operate on Rust types.
-Using those, you should be able to create idiomatic Rust wrappers for your C++ library.
+Using Zngur, you can write that wrapper either in Rust — on top of direct `c++::` declarations,
+without `Pin` or forced `UniquePtr` returns on trivially relocatable types — or in C++!
+Zngur supports implementing Rust traits for C++ types and casting them to `Box<dyn Trait>`,
+implementing inherent and trait methods on Rust or `c++::` types in C++,
+and calling free functions written in C++ that operate on Rust or `c++::` types.
+Using those, you can create idiomatic Rust wrappers for your C++ library on whichever side is most
+natural.
 
-Idiomatic C++ and idiomatic Rust are like night and day, so a glue code between them must exist.
-The difference between Zngur and AutoCXX is that using AutoCXX that glue code will live in Rust
-and using Zngur it will live in C++.
-By writing the glue code in C++, you will become able to construct C++ objects in the stack without a macro,
-calling their move and copy constructors using `=` operator,
-and ... without hitting any major problems in using Rust types.
+Idiomatic C++ and idiomatic Rust are like night and day, so glue code between them often helps.
+Whereas AutoCXX forces all of that adaptation to live in Rust (working around `Pin` and `UniquePtr`),
+Zngur lets you put glue code in Rust or in C++.
+Writing glue code in C++ when needed lets you construct C++ objects on the stack without macros and
+call their move and copy constructors naturally, without hitting major problems when using Rust
+types.
 
 ### Safety of AutoCXX
 

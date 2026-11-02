@@ -1,11 +1,11 @@
 # Creating trait objects from C++ types
 
-In addition to opaque C++ objects, you can convert your C++ types into `&dyn Trait` or `Box<dyn Trait>`.
-You could do that with opaque types, but you needed to:
+In addition to declaring `c++::` types directly, you can convert C++ objects into `&dyn Trait` or `Box<dyn Trait>`.
+You could do something similar with `c++::` types, by:
 
-- Create an opaque borrowed (or owned for `Box<dyn Trait>`) type for the C++ type.
-- Implement the `Trait` for that type inside C++.
-- Cast `&Opaque` to `&dyn Trait` when needed.
+- Declaring a `type c++::MyType` in `.zng` (held by value if trivially relocatable, or behind a reference or `c++::std::unique_ptr` otherwise).
+- Implementing `Trait` for `c++::MyType` (or a wrapper around it) in an `extern "C++"` block or in Rust.
+- Coercing `&MyType` to `&dyn Trait` (or `Box::new(...)` to `Box<dyn Trait>`) when needed.
 
 This feature is a shortcut for that use case.
 You can define the trait in your `main.zng`:

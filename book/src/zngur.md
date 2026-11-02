@@ -4,7 +4,8 @@ Zngur (/zængɑr/) is a C++/Rust interop tool.
 It tries to expose arbitrary Rust types, methods, and functions
 while preserving their semantics and ergonomics as much as possible.
 Using Zngur, you can use arbitrary Rust crates in your C++ code as easily as using them in normal Rust code,
-and you can write idiomatic Rusty APIs for your C++ library inside C++.
+call C++ code directly from Rust,
+and write idiomatic Rusty APIs for your C++ library inside C++.
 
 ## Idea
 
@@ -29,19 +30,21 @@ In all of these differences, C++ has more freedom relative to Rust:
 - C++ can simulate Rust moves very easily
   (by doing an actual `memcpy` of data and tracking the state of destruction in a boolean flag)
   but Rust has difficulty with C++ moves.
-  Specifically, since Rust assumes that every type is Rust-moveable,
-  it can never store C++ objects by value, only through some indirection and `Pin`.
+  Specifically, since Rust assumes that every type can be moved with `memcpy`,
+  it cannot store non-trivially-relocatable C++ objects by value, referring to them instead through
+  references or smart pointers.
 
 So, Zngur allows you to use arbitrary Rust types in C++,
 store them by value on the C++ stack,
 and call arbitrary Rust methods and functions on them.
-But it doesn't bridge any C++ types into Rust,
-since it is not possible with the same ergonomics.
-Instead, Zngur allows you to write a rusty wrapper for your C++ library.
+In the other direction, Rust can call C++ functions and member functions directly,
+but it holds C++ objects by value only if they can be moved with `memcpy`,
+and refers to the others through references and smart pointers.
+For more idiomatic APIs, Zngur also allows you to write a rusty wrapper for your C++ library,
+in Rust or in C++.
 It allows you to implement Rust traits for C++ types and cast them to `Box<dyn Trait>`,
-implement inherent methods on Rust types,
-implement Rust traits for Rust types,
-and expose bare functions from C++ that operate on Rust types.
+implement inherent methods and Rust traits on Rust or `c++::` types,
+and expose bare functions from C++ that operate on Rust or `c++::` types.
 
 ## Demo
 

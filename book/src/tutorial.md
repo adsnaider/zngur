@@ -481,8 +481,13 @@ zngur-lib = "0.10.0" # The same version as `zngur`
 ```
 
 Now we have a `c++::cpp_inventory::Inventory` and a `c++::cpp_inventory::Item` that Rust can own
-through `std::unique_ptr`s. But there is no way to use them in Rust yet.
-So to make these types useful in Rust, we can add `impl` blocks for these types in C++.
+through `std::unique_ptr`s. We could declare existing C++ methods and fields (such as
+`Inventory::add_banana` and `remaining_space`) directly inside `type c++::cpp_inventory::Inventory`,
+just as we declared `unique_ptr::get` above, and heap-construct `Inventory` via
+`c++::std::make_unique<c++::cpp_inventory::Inventory>` (reserving direct `constructor` declarations
+for trivially relocatable types held by value). Here, we also want to shape a higher-level Rusty API
+in C++ (accepting `&str` and returning `unique_ptr`), so we add `extern "C++"` `impl` blocks for
+these types.
 Add this to the `main.zng`:
 
 ```
@@ -563,9 +568,10 @@ These functions look like some unnecessary boilerplate, but writing them has som
   or put the functionality in the proper trait
   (for example implementing the `Iterator` trait instead of exposing the `.begin` and `.end` functions)
 
-Even in the tools that support calling C++ functions directly,
-people often end up writing Rust wrappers around C++ types for these reasons.
-In Zngur, that code is the wrapper, which lives in the C++ so it can do whatever C++ does.
+When calling C++ APIs directly, people often still write wrappers around C++ types for these reasons.
+In Zngur, you can either write that wrapper in Rust on top of direct `c++::` calls, or write it in
+C++ (as we did here) where it has direct access to C++ constructors, overloads, templates, and
+exceptions.
 
 In the Rust to C++ side, we used `zngur_dbg` macro to see the result.
 We will do the same here with the `dbg!` macro.

@@ -1,4 +1,4 @@
-# Writing `impl` blocks for Rust types in C++
+# Writing `impl` blocks for Rust or C++ types in C++
 
 ## Inherent `impl`
 
@@ -6,10 +6,10 @@ You can write inherent `impl` blocks for types defined in your crate
 (this is not a Zngur restriction, it's the orphan rule) in C++.
 First, you need to declare the functions of that block in the `main.zng` file:
 
-```Rust
+```zng
 extern "C++" {
     impl crate::TagList {
-        fn get_value_by_key(&self, &str) -> ::std::option::Option<&str>;
+        safe fn get_value_by_key(&self, &str) -> ::std::option::Option<&str>;
     }
 }
 ```
@@ -43,10 +43,10 @@ You can write `impl Trait for Type` blocks for types defined in your crate
 or traits defined in your crate (this is not a Zngur restriction, it's the orphan rule) in C++.
 First, you need to declare the functions of that block in the `main.zng` file:
 
-```Rust
+```zng
 extern "C++" {
     impl ::std::ops::Index<usize, Output = crate::Node> for crate::WayNodeList {
-        fn index(&self, usize) -> &crate::Node;
+        safe fn index(&self, usize) -> &crate::Node;
     }
 }
 ```
@@ -79,7 +79,7 @@ rust::Impl<WayNodeList, rust::std::ops::Index<size_t, Node>>::index(
 
 `extern "C++"` blocks can also have `impl` blocks for `c++::` types, and functions:
 
-```Rust
+```zng
 extern "C++" {
     impl c++::geo::Point {
         safe fn print(&self);
