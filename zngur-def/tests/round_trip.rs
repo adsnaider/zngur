@@ -611,6 +611,8 @@ fn reparse_all_examples() {
             let before_len = failures.len();
             check_fields!(
                 types,
+                cpp_templates,
+                cpp_template_homes,
                 traits,
                 funcs,
                 cpp_funcs,
@@ -886,6 +888,36 @@ type c++::View<i32* const> {
             }
 
             type c++::View<i32* const> {
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn reparse_cpp_template_home() {
+    let _ = check_round_trip(
+        r#"
+type<T> c++::std::unique_ptr<T> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+    unsafe fn get(&const self) -> T*;
+}
+type c++::std::unique_ptr<i32> {
+}
+        "#,
+        expect![[r#"
+            type<T> c++::std::unique_ptr<T> {
+                #layout(size = 8, align = 8);
+                #trivially_relocatable;
+
+                unsafe fn get(&const self) -> T*;
+            }
+
+            type c++::std::unique_ptr<i32> {
+                #layout(size = 8, align = 8);
+                #trivially_relocatable;
+
+                unsafe fn get(&const self) -> i32*;
             }
         "#]],
     );

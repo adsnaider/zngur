@@ -88,6 +88,27 @@ lifetime, and uniqueness for `unique`), and so does implicit `const` for argumen
 `Option<&'a const T>` argument takes `Some(&x)` whether `x` is `const` or not, which also means
 that a bare `None` needs a type (`None::<&T>`).
 
+For example, `std::unique_ptr::get()` returns a pointer that's null if the `unique_ptr` is empty,
+and otherwise valid while the `unique_ptr` is borrowed:
+
+```zng
+type<T> c++::std::unique_ptr<T> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+
+    safe fn get<'a>(&'a const self) -> ::std::option::Option<&'a var T>;
+    safe fn get<'a>(&'a unique var self) -> ::std::option::Option<&'a unique var T> as get_mut;
+}
+```
+
+```rust
+let mut canvas = make_canvas(640, 480);
+if let Some(canvas) = canvas.get_mut() {
+    canvas.Draw(&point);
+}
+let points = canvas.get().map_or(0, |c| c.Points());
+```
+
 Nullable references only describe C++ pointers, so they can't be declared as types
 (`type ::std::option::Option<&var c++::T>` is an error); they're used in signatures directly.
 

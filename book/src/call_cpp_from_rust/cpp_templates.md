@@ -45,12 +45,78 @@ template <typename T>
 struct rust::is_trivially_relocatable<Pair<T>> : std::true_type {};
 ```
 
+## Shared members: `type<T>`
+
+A `type<T>` declaration gives members to every instantiation of a template, so they aren't repeated
+for each one:
+
+```zng
+type<T> c++::std::unique_ptr<T> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+
+    safe fn get<'a>(&'a const self) -> ::std::option::Option<&'a var T>;
+}
+
+// Both get the layout, `#trivially_relocatable` and `get()`.
+type c++::std::unique_ptr<c++::geo::Point> {}
+type c++::std::unique_ptr<c++::geo::Line> {}
+```
+
+The module with the `type<T>` declaration is the template's *home*: it defines the template's Rust
+alias.
+
+## Across modules
+
+To use a template in several zngur [modules](../import.md#import) (crates), declare its `type<T>`
+in one module, and import that module from the others, which then share its alias, and get its
+members for their own instantiations. Like Rust's orphan rule, an instantiation can be declared in
+the home, or in a module that declares one of its template arguments. So `unique_ptr<Point>` goes
+next to `Point`, and instantiations whose arguments are all builtins (`vector<i32>`) go in the
+home.
+
+```zng
+// aggregation.zng
+#crate aggregation
+
+type<T> c++::std::unique_ptr<T> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+    safe fn get<'a>(&'a const self) -> ::std::option::Option<&'a var T>;
+}
+```
+
+```zng
+// processor.zng
+import "../aggregation/aggregation.zng";
+
+type c++::cpp_processor::RunConfig {}
+
+// Has the layout and `get()` from aggregation.zng.
+type c++::std::unique_ptr<c++::cpp_processor::RunConfig> {}
+```
+
+A module can also use the instantiations declared in the modules it imports, like their other
+`c++::` types.
+
+A module that instantiates a template without a `type<T>` in sight is its home, so a single module
+needs no `type<T>` declaration. But such templates can't be shared: if two modules instantiate the
+same template, one of them has to declare its `type<T>`, and the other one has to import it directly
+(the homes of an imported module's own imports aren't visible).
+
+See `examples/multiple_modules` for a complete example.
+
 ## Limitations
 
 - Every instantiation of a template must have the same number of template arguments (write out
   default C++ template arguments explicitly; `c++::Foo<>` is not supported).
 - Two instantiations can't be the same Rust type (`const T&` and `const T*` arguments are both
   `*const ...` in Rust).
+- Outside a template's home, an instantiation must have at least one non-template `c++::` type
+  declared in that module (`Point` or `const Point`) as a direct argument; instantiations whose
+  arguments are all builtins (`vector<i32>`, `span<const i32>`), C++ pointers or references
+  (`Point*`, `const Point&`), types from other modules, or nested template instantiations can only
+  be declared in the template's home.
 - Non-type template arguments (`std::array<T, 4>`),
   function types (`std::function<int(int)>`) and nested types (`std::vector<int>::iterator`) aren't
   supported. Give them a name with a C++ alias instead, and use that. An alias template keeps the
@@ -67,9 +133,6 @@ struct rust::is_trivially_relocatable<Pair<T>> : std::true_type {};
   type c++::my::Fn<i32, i32> { ... }
   type c++::my::IntFn { ... }
   ```
-
-- All instantiations of a template must be declared in the same zngur module (crate). A module
-  that imports another one can use the instantiations declared there, but not add its own.
 
 > **Note:** In C++, the wrappers of `c++::std::...` types are in the namespace `rust::cpp::std`, like
 > those of other `c++::` types (e.g. `rust::cpp::std::unique_ptr< rust::cpp::geo::Point >`).

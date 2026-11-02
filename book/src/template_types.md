@@ -2,6 +2,10 @@
 
 Template type definitions provide a shorthand syntax to avoid repeating the definition of methods on common generic types. All of the items within a template type definition are copied into each matching concrete type definition. At the moment, template types are considered unstable and ust be activated with the `#unstable(template_types)` directive.
 
+(Templates of C++ class templates, `type<T> c++::...`, don't need `#unstable(template_types)`, and
+also apply to the instantiations in modules that import them: see
+[C++ class templates](./call_cpp_from_rust/cpp_templates.md#shared-members-typet).)
+
 For example:
 
 ```
