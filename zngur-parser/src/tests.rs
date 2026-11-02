@@ -1477,6 +1477,8 @@ fn comments_after_the_last_item_parse() {
 fn cpp_type_capabilities_follow_from_layout_and_trivially_relocatable() {
     let parsed = parse_str(
         r#"
+#allow(layout_without_relocatable)
+
 type c++::a::ByValue {
     #layout(size = 8, align = 4);
     #trivially_relocatable;
@@ -4837,12 +4839,12 @@ fn unknown_allow_is_rejected() {
 #allow(everything)
 "#,
         expect![[r#"
-            Error: unknown warning `everything` (known ones: elided_lifetimes, safe_raw_pointer)
+            Error: unknown warning `everything` (known ones: elided_lifetimes, safe_raw_pointer, layout_without_relocatable)
                ╭─[ test.zng:2:1 ]
                │
              2 │ #allow(everything)
                │ ─────────┬────────  
-               │          ╰────────── unknown warning `everything` (known ones: elided_lifetimes, safe_raw_pointer)
+               │          ╰────────── unknown warning `everything` (known ones: elided_lifetimes, safe_raw_pointer, layout_without_relocatable)
             ───╯
         "#]],
     );
@@ -8643,11 +8645,13 @@ fn conflicting_cpp_template_blocks_in_home_module_are_rejected() {
 
 type<T> c++::ns::Pair<T, i32> {
     #layout(size = 8, align = 4);
+    #trivially_relocatable;
     safe fn second<'a>(&'a const self) -> i32;
 }
 
 type<T> c++::ns::Pair<T, i64> {
     #layout(size = 16, align = 8);
+    #trivially_relocatable;
     safe fn second<'a>(&'a const self) -> i64;
 }
 "#,
@@ -9038,4 +9042,399 @@ mod c++::ns {
             "expected `{expected}` for `{src}`, got:\n{err}"
         );
     }
+}
+
+#[test]
+fn layout_without_relocatable_warns() {
+    check_warnings(
+        r#"
+type c++::A {
+    #layout(size = 8, align = 4);
+}
+type c++::Conservative {
+    #layout_conservative(size = 16, align = 8);
+}
+// Relocatable (`#trivially_relocatable` or `#unsafe(trivially_relocatable)`), or without a layout:
+// no warning.
+type c++::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+}
+type c++::UnsafeB {
+    #layout_conservative(size = 16, align = 8);
+    #unsafe(trivially_relocatable);
+}
+type c++::C {}
+"#,
+        expect![[r#"
+            Warning: this layout is only checked in C++: Rust holds `c++::A` by value only if it's also `#trivially_relocatable`, so it only refers to it (a zero-sized type); silence this with `#allow(layout_without_relocatable)`
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     #layout(size = 8, align = 4);
+               │     ──────────────┬─────────────  
+               │                   ╰─────────────── this layout is only checked in C++: Rust holds `c++::A` by value only if it's also `#trivially_relocatable`, so it only refers to it (a zero-sized type); silence this with `#allow(layout_without_relocatable)`
+            ───╯
+            Warning: this layout is only checked in C++: Rust holds `c++::Conservative` by value only if it's also `#trivially_relocatable`, so it only refers to it (a zero-sized type); silence this with `#allow(layout_without_relocatable)`
+               ╭─[ test.zng:6:5 ]
+               │
+             6 │     #layout_conservative(size = 16, align = 8);
+               │     ─────────────────────┬────────────────────  
+               │                          ╰────────────────────── this layout is only checked in C++: Rust holds `c++::Conservative` by value only if it's also `#trivially_relocatable`, so it only refers to it (a zero-sized type); silence this with `#allow(layout_without_relocatable)`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn layout_without_relocatable_can_be_allowed() {
+    check_warnings(
+        r#"
+#allow(layout_without_relocatable)
+type c++::A {
+    #layout(size = 8, align = 4);
+}
+type c++::B {
+    #layout_conservative(size = 16, align = 8);
+}
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn layout_without_relocatable_is_checked_after_merging_and_scoped_per_file() {
+    // `#trivially_relocatable` in another file suppresses the warning after merging.
+    let relocatable_resolver = MockFilesystem::new(vec![(
+        "./a.zng",
+        r#"
+type c++::A {
+    #trivially_relocatable;
+}
+"#,
+    )]);
+    let mut warnings = String::new();
+    let _ = parse_str_with_resolver(
+        r#"
+merge "./a.zng";
+type c++::A {
+    #layout(size = 8, align = 4);
+}
+"#,
+        NullCfg,
+        &relocatable_resolver,
+        |w| warnings.push_str(w),
+    );
+    assert_eq!(warnings, "");
+
+    // `#allow(layout_without_relocatable)` in `test.zng` does not silence a `#layout` in `./b.zng`.
+    let child_layout_resolver = MockFilesystem::new(vec![(
+        "./b.zng",
+        r#"
+type c++::A {
+    #layout(size = 8, align = 4);
+}
+"#,
+    )]);
+    let mut warnings = String::new();
+    let _ = parse_str_with_resolver(
+        r#"
+#allow(layout_without_relocatable)
+merge "./b.zng";
+type c++::A {}
+"#,
+        NullCfg,
+        &child_layout_resolver,
+        |w| warnings.push_str(w),
+    );
+    assert!(
+        warnings.contains("./b.zng:3:5") && !warnings.contains("test.zng"),
+        "expected warning only in ./b.zng, got:\n{warnings}"
+    );
+
+    // `#allow(layout_without_relocatable)` in `./b.zng` keeps its `#layout` silent even when
+    // `test.zng` (without `#allow`) reopens the type after `merge "./b.zng";`.
+    let child_allowed_resolver = MockFilesystem::new(vec![(
+        "./b.zng",
+        r#"
+#allow(layout_without_relocatable)
+type c++::A {
+    #layout(size = 8, align = 4);
+}
+"#,
+    )]);
+    let mut warnings = String::new();
+    let _ = parse_str_with_resolver(
+        r#"
+merge "./b.zng";
+type c++::A {
+    safe fn ping(&'static const self);
+}
+"#,
+        NullCfg,
+        &child_allowed_resolver,
+        |w| warnings.push_str(w),
+    );
+    assert_eq!(warnings, "");
+}
+
+#[test]
+fn layout_without_relocatable_for_templates_and_imports() {
+    // Template with multiple non-relocatable instantiations warns once at the template's `#layout`,
+    // naming the first non-relocatable instantiation.
+    check_warnings(
+        r#"
+type<T> c++::Box<T> {
+    #layout(size = 8, align = 8);
+}
+type c++::Box<i32> {}
+type c++::Box<i64> {}
+"#,
+        expect![[r#"
+            Warning: for instantiation `c++::Box<i32>`, this layout is only checked in C++: Rust holds `c++::Box<T>` by value only when `#trivially_relocatable`, so `c++::Box<i32>` is only referred to (a zero-sized type); silence this with `#allow(layout_without_relocatable)`
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     #layout(size = 8, align = 8);
+               │     ──────────────┬─────────────  
+               │                   ╰─────────────── for instantiation `c++::Box<i32>`, this layout is only checked in C++: Rust holds `c++::Box<T>` by value only when `#trivially_relocatable`, so `c++::Box<i32>` is only referred to (a zero-sized type); silence this with `#allow(layout_without_relocatable)`
+            ───╯
+        "#]],
+    );
+
+    // Template whose instantiation supplies `#trivially_relocatable` does not warn.
+    check_warnings(
+        r#"
+type<T> c++::Box<T> {
+    #layout_conservative(size = 16, align = 8);
+}
+type c++::Box<i32> {
+    #trivially_relocatable;
+}
+"#,
+        expect![[r#""#]],
+    );
+
+    // Template with both a relocatable and a non-relocatable instantiation warns naming the
+    // non-relocatable instantiation.
+    check_warnings(
+        r#"
+type c++::Pinned {}
+type<T> c++::Box<T> {
+    #layout_conservative(size = 16, align = 8);
+}
+type c++::Box<i32> {
+    #trivially_relocatable;
+}
+type c++::Box<c++::Pinned> {}
+"#,
+        expect![[r#"
+            Warning: for instantiation `c++::Box<c++::Pinned>`, this layout is only checked in C++: Rust holds `c++::Box<T>` by value only when `#trivially_relocatable`, so `c++::Box<c++::Pinned>` is only referred to (a zero-sized type); silence this with `#allow(layout_without_relocatable)`
+               ╭─[ test.zng:4:5 ]
+               │
+             4 │     #layout_conservative(size = 16, align = 8);
+               │     ─────────────────────┬────────────────────  
+               │                          ╰────────────────────── for instantiation `c++::Box<c++::Pinned>`, this layout is only checked in C++: Rust holds `c++::Box<T>` by value only when `#trivially_relocatable`, so `c++::Box<c++::Pinned>` is only referred to (a zero-sized type); silence this with `#allow(layout_without_relocatable)`
+            ───╯
+        "#]],
+    );
+
+    // A local `type<T> c++::...` template with `#layout` and zero local instantiations warns in
+    // its own module unless `#trivially_relocatable` is also present.
+    check_warnings(
+        r#"
+type<T> c++::std::unique_ptr<T> {
+    #layout(size = 8, align = 8);
+}
+type<T> c++::std::shared_ptr<T> {
+    #layout(size = 16, align = 8);
+    #trivially_relocatable;
+}
+"#,
+        expect![[r#"
+            Warning: this layout is only checked in C++: Rust holds `c++::std::unique_ptr<T>` by value only if it's also `#trivially_relocatable`, so it only refers to it (a zero-sized type); silence this with `#allow(layout_without_relocatable)`
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     #layout(size = 8, align = 8);
+               │     ──────────────┬─────────────  
+               │                   ╰─────────────── this layout is only checked in C++: Rust holds `c++::std::unique_ptr<T>` by value only if it's also `#trivially_relocatable`, so it only refers to it (a zero-sized type); silence this with `#allow(layout_without_relocatable)`
+            ───╯
+        "#]],
+    );
+
+    // Cross-module `import`:
+    // 1. Warnings inside `./bar.zng` are not re-emitted in downstream crates, nor do spans from
+    //    `./bar.zng` leak into `test.zng`.
+    // 2. Instantiating an imported template with `#layout` and without `#trivially_relocatable`
+    //    warns at the local instantiation site in `test.zng` and respects `#allow` in `test.zng`.
+    let import_resolver = MockFilesystem::new(vec![
+        (
+            "./bar.zng",
+            r#"
+#crate bar_bindings
+merge "./bar_relocatable.zng";
+
+type c++::bar::WarnInBarOnly {
+    #layout(size = 8, align = 4);
+}
+
+type c++::bar::SplitRelocatable {
+    #layout(size = 8, align = 4);
+}
+
+type<T> c++::Opt<T> {
+    #layout_conservative(size = 32, align = 8);
+}
+
+type c++::bar::Item {}
+type c++::Opt<c++::bar::Item> {
+    #trivially_relocatable;
+}
+"#,
+        ),
+        (
+            "./bar_relocatable.zng",
+            r#"
+type c++::bar::SplitRelocatable {
+    #trivially_relocatable;
+}
+"#,
+        ),
+    ]);
+
+    let mut warnings = String::new();
+    let _ = parse_str_with_resolver(
+        r#"
+import "./bar.zng";
+
+type c++::Main {}
+type c++::Opt<c++::Main> {}
+"#,
+        NullCfg,
+        &import_resolver,
+        |w| warnings.push_str(w),
+    );
+    assert!(
+        warnings.contains("test.zng:5:6")
+            && warnings.contains("the layout of `c++::Opt<c++::Main>` (from `c++::Opt<T>`)")
+            && !warnings.contains("bar.zng"),
+        "expected warning only at test.zng instantiation, got:\n{warnings}"
+    );
+
+    let mut silenced_warnings = String::new();
+    let _ = parse_str_with_resolver(
+        r#"
+#allow(layout_without_relocatable)
+import "./bar.zng";
+
+type c++::Main {}
+type c++::Opt<c++::Main> {}
+"#,
+        NullCfg,
+        &import_resolver,
+        |w| silenced_warnings.push_str(w),
+    );
+    assert_eq!(silenced_warnings, "");
+
+    // Reopening an imported template instantiation across multiple `type` blocks emits only one
+    // warning for the inherited layout.
+    let mut reopened_warnings = Vec::new();
+    let _ = parse_str_with_resolver(
+        r#"
+import "./bar.zng";
+
+type c++::Main {}
+type c++::Opt<c++::Main> {}
+type c++::Opt<c++::Main> {
+    safe fn ping(&'static const self);
+}
+"#,
+        NullCfg,
+        &import_resolver,
+        |w| reopened_warnings.push(w.to_owned()),
+    );
+    assert_eq!(
+        reopened_warnings.len(),
+        1,
+        "expected a single warning on reopened imported-template instantiation, got: {reopened_warnings:?}"
+    );
+
+    // Overriding an imported template's `#layout` on a non-relocatable instantiation warns only
+    // once (on the instantiation's own `#layout`), without a duplicate `(from c++::Opt<T>)` warning.
+    let mut override_imported_warnings = Vec::new();
+    let _ = parse_str_with_resolver(
+        r#"
+import "./bar.zng";
+
+type c++::Main {}
+type c++::Opt<c++::Main> {
+    #layout(size = 16, align = 8);
+}
+"#,
+        NullCfg,
+        &import_resolver,
+        |w| override_imported_warnings.push(w.to_owned()),
+    );
+    assert_eq!(
+        override_imported_warnings.len(),
+        1,
+        "expected a single warning on overridden imported-template layout, got: {override_imported_warnings:?}"
+    );
+    assert!(
+        override_imported_warnings[0].contains("this layout is only checked in C++")
+            && !override_imported_warnings[0].contains("(from `c++::Opt<T>`)"),
+        "unexpected warning text: {}",
+        override_imported_warnings[0]
+    );
+
+    // Overriding a local template's `#layout` in an `#allow`-ed file does not falsely blame the
+    // template's `#layout` when another instantiation inherits it with `#trivially_relocatable`.
+    let override_local_resolver = MockFilesystem::new(vec![(
+        "./override.zng",
+        r#"
+#allow(layout_without_relocatable)
+type c++::Big {}
+type c++::Box<c++::Big> {
+    #layout(size = 32, align = 8);
+}
+"#,
+    )]);
+    let mut override_local_warnings = String::new();
+    let _ = parse_str_with_resolver(
+        r#"
+merge "./override.zng";
+
+type<T> c++::Box<T> {
+    #layout(size = 8, align = 8);
+}
+type c++::Box<i32> {
+    #trivially_relocatable;
+}
+"#,
+        NullCfg,
+        &override_local_resolver,
+        |w| override_local_warnings.push_str(w),
+    );
+    assert_eq!(override_local_warnings, "");
+
+    // When all local instantiations override a template's `#layout`, the template's own
+    // non-relocatable `#layout` is never inherited locally and still warns.
+    check_warnings(
+        r#"
+type<T> c++::Box<T> {
+    #layout(size = 8, align = 8);
+}
+type c++::Box<i32> {
+    #layout(size = 16, align = 8);
+    #trivially_relocatable;
+}
+"#,
+        expect![[r#"
+            Warning: this layout is only checked in C++: Rust holds `c++::Box<T>` by value only if it's also `#trivially_relocatable`, so it only refers to it (a zero-sized type); silence this with `#allow(layout_without_relocatable)`
+               ╭─[ test.zng:3:5 ]
+               │
+             3 │     #layout(size = 8, align = 8);
+               │     ──────────────┬─────────────  
+               │                   ╰─────────────── this layout is only checked in C++: Rust holds `c++::Box<T>` by value only if it's also `#trivially_relocatable`, so it only refers to it (a zero-sized type); silence this with `#allow(layout_without_relocatable)`
+            ───╯
+        "#]],
+    );
 }
