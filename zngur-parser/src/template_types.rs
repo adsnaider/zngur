@@ -810,6 +810,11 @@ fn substitute_cpp_method_vars(
     Ok(ZngurCppMethod {
         cpp_name: m.cpp_name.clone(),
         lifetimes: new_method_lts,
+        template_args: m
+            .template_args
+            .iter()
+            .map(&sub_ty)
+            .collect::<Result<_, _>>()?,
         rust_name: m.rust_name.clone(),
         receiver: m.receiver,
         receiver_constness: m.receiver_constness,
@@ -936,7 +941,7 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
         {
             fresh_avoid.insert(rl.clone());
         }
-        for t in m.inputs.iter().chain([&m.output]) {
+        for t in m.inputs.iter().chain([&m.output]).chain(&m.template_args) {
             fresh_avoid.extend(t.all_lifetimes());
         }
     }
@@ -1036,7 +1041,6 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
         if matches!(ty, RustType::Cpp(_))
             && let Some(is_safe) = m.data.is_safe
             && m.data.receiver == ZngurMethodReceiver::Static
-            && m.data.generics.is_empty()
             && m.use_path.is_none()
             && m.deref.is_none()
         {
@@ -1045,6 +1049,7 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
             new_cpp_methods.push(ZngurCppMethod {
                 cpp_name,
                 lifetimes: m.data.lifetimes,
+                template_args: m.data.generics,
                 rust_name,
                 receiver: ZngurMethodReceiver::Static,
                 receiver_constness: CppConstness::Var,

@@ -588,7 +588,7 @@ fn write_cpp_fn_decl<W: Write>(
     let safety = if func.is_safe { "safe" } else { "unsafe" };
     let name = &func.cpp_name;
     write!(p, "{safety} fn {name}")?;
-    write_lifetimes_and_generics(p, &func.lifetimes, &[])?;
+    write_lifetimes_and_generics(p, &func.lifetimes, &func.template_args)?;
     write!(p, "(")?;
     p.write_idl(&func.inputs)?;
     write!(p, ")")?;
@@ -1070,7 +1070,7 @@ impl WriteIDL for crate::ZngurCppMethod {
             // Static member functions are the ones without a receiver.
             let name = &self.cpp_name;
             write!(p, "{safety} fn {name}")?;
-            write_lifetimes_and_generics(p, &self.lifetimes, &[])?;
+            write_lifetimes_and_generics(p, &self.lifetimes, &self.template_args)?;
             write!(p, "(")?;
             let receiver = match (self.receiver, self.raw_receiver) {
                 (crate::ZngurMethodReceiver::Ref(_), Some(indirection)) => {
@@ -1491,6 +1491,40 @@ type<T> Box<dyn Fn(T) -> T> {
 
 type<'a, T> ::std::slice::Iter<'a, T> {
     #layout(size = 16, align = 8);
+}
+",
+        idl
+    );
+}
+
+#[test]
+fn print_cpp_function_template_args() {
+    let point = crate::RustType::Cpp(vec!["geo".to_owned(), "Point".to_owned()].into());
+    let spec = crate::ZngurSpec {
+        cpp_funcs: vec![crate::ZngurCppFn {
+            lifetimes: vec![],
+            namespace: vec!["std".to_owned()],
+            cpp_name: "make_unique".to_owned(),
+            template_args: vec![point.clone()],
+            rust_name: Some("make_point".to_owned()),
+            inputs: vec![crate::RustType::Primitive(crate::PrimitiveRustType::Int(
+                32,
+            ))],
+            output: crate::RustType::UNIT,
+            is_safe: true,
+        }],
+        ..Default::default()
+    };
+
+    let mut buf = Vec::new();
+    crate::printing::IDLPrinter::new(&mut buf)
+        .write_idl(&spec)
+        .expect("write error");
+    let idl = String::from_utf8(buf).expect("utf8 error");
+
+    assert_eq!(
+        "mod c++::std {
+    safe fn make_unique<c++::geo::Point>(i32) as make_point;
 }
 ",
         idl

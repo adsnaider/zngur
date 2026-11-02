@@ -4933,7 +4933,6 @@ type c++::B {
     safe async fn fut<'a>(&'a const self);
     safe fn tr<'a>(&'a const self) use crate::MyTrait;
     safe fn dr<'a>(&'a const self) deref i32;
-    safe fn gen<T>(T);
 }
 "#,
         expect![[r#"
@@ -4971,13 +4970,6 @@ type c++::B {
              7 │     safe fn dr<'a>(&'a const self) deref i32;
                │     ────────────────────┬────────────────────  
                │                         ╰────────────────────── C++ member functions do not support `use` or `deref` (those are for Rust methods; implement Rust traits on `c++::` types via `extern "C++" { impl Trait for c++::T { ... } }`)
-            ───╯
-            Error: C++ member functions do not support generic type arguments
-               ╭─[ test.zng:8:5 ]
-               │
-             8 │     safe fn gen<T>(T);
-               │     ─────────┬────────  
-               │              ╰────────── C++ member functions do not support generic type arguments
             ───╯
         "#]],
     );
@@ -6637,7 +6629,6 @@ mod c++ {
 safe fn c++::global_fn2(i32);
 fn c++::a::bare_fn(i32);
 safe async fn c++::a::async_fn();
-safe fn c++::a::gen_fn<T>(T);
 fn crate::a::f(i32) as g;
 "#,
         expect![[r#"
@@ -6669,17 +6660,10 @@ fn crate::a::f(i32) as g;
                │ ────────────────┬───────────────  
                │                 ╰───────────────── C++ functions cannot be `async`
             ───╯
-            Error: C++ functions do not support generic type arguments
+            Error: Rust free functions cannot be renamed with `as`
                ╭─[ test.zng:8:1 ]
                │
-             8 │ safe fn c++::a::gen_fn<T>(T);
-               │ ──────────────┬─────────────  
-               │               ╰─────────────── C++ functions do not support generic type arguments
-            ───╯
-            Error: Rust free functions cannot be renamed with `as`
-               ╭─[ test.zng:9:1 ]
-               │
-             9 │ fn crate::a::f(i32) as g;
+             8 │ fn crate::a::f(i32) as g;
                │ ────────────┬───────────  
                │             ╰───────────── Rust free functions cannot be renamed with `as`
             ───╯
@@ -9433,6 +9417,314 @@ type<U> c++::ns::Pair<i64, U> {
     ] {
         let r = catch_unwind(|| {
             let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(expected),
+            "expected `{expected}` for `{src}`, got:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn cpp_function_template_args_parse() {
+    let parsed = parse_str(
+        r#"
+#allow(elided_lifetimes)
+
+type c++::geo::Point {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe fn get<i32>(&const self) -> i32 as get_i32;
+    safe fn cast<'a, const c++::geo::Point,>(&'a const self,) -> &'a const c++::geo::Point;
+}
+
+type<T> c++::Box<T> {
+    safe fn rebind<'a, const T, c++::geo::Point,>(&'a const self) -> &'a const T;
+}
+
+type c++::Box<i32> {}
+
+type c++::std::unique_ptr<c++::geo::Point> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+}
+
+mod c++::std {
+    safe fn make_unique<c++::geo::Point,>(i32, i32) -> c++::std::unique_ptr<c++::geo::Point> as make_point;
+    safe fn forward<'a, const i32>(&'a const i32) -> &'a const i32;
+    safe fn id<'a,>(&'a const i32) -> &'a const i32;
+    safe fn detail::helper<i32>();
+}
+
+safe fn c++::ns::foo<i32>();
+"#,
+        NullCfg,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    let point = RustType::Cpp(vec!["geo".to_owned(), "Point".to_owned()].into());
+    let i32_ty = RustType::Primitive(PrimitiveRustType::Int(32));
+    let [func, forward, id, helper, top_foo] = parsed.spec.cpp_funcs.as_slice() else {
+        panic!("expected five C++ functions");
+    };
+    assert_eq!(func.cpp_name, "make_unique");
+    assert_eq!(func.template_args, vec![point.clone()]);
+    assert_eq!(func.cpp_path(), "::std::make_unique< ::geo::Point >");
+    assert_eq!(
+        forward.template_args,
+        vec![RustType::CppConst(Box::new(i32_ty.clone()))]
+    );
+    assert_eq!(forward.cpp_path(), "::std::forward< const ::int32_t >");
+    assert!(id.template_args.is_empty());
+    assert_eq!(
+        helper.namespace,
+        vec!["std".to_owned(), "detail".to_owned()]
+    );
+    assert_eq!(helper.cpp_name, "helper");
+    assert_eq!(helper.template_args, vec![i32_ty.clone()]);
+    assert_eq!(helper.cpp_path(), "::std::detail::helper< ::int32_t >");
+    assert_eq!(top_foo.namespace, vec!["ns".to_owned()]);
+    assert_eq!(top_foo.cpp_name, "foo");
+    assert_eq!(top_foo.template_args, vec![i32_ty.clone()]);
+    assert_eq!(top_foo.cpp_path(), "::ns::foo< ::int32_t >");
+
+    let point_ty = &parsed.spec.types[0];
+    assert_eq!(point_ty.cpp_methods[0].template_args, vec![i32_ty.clone()]);
+    assert_eq!(
+        point_ty.cpp_methods[1].template_args,
+        vec![RustType::CppConst(Box::new(point.clone()))]
+    );
+    assert_eq!(
+        point_ty.cpp_methods[1].lifetimes,
+        vec![Lifetime("a".to_owned())]
+    );
+
+    // `type<T> c++::Box<T>` substitutes `T = i32` into `ZngurCppMethod::template_args`.
+    let box_i32 = &parsed.spec.types[1];
+    assert_eq!(
+        box_i32.cpp_methods[0].template_args,
+        vec![RustType::CppConst(Box::new(i32_ty)), point]
+    );
+}
+
+#[test]
+fn cpp_function_template_args_ordering_and_validation_errors() {
+    for (src, expected) in [
+        (
+            "mod c++::ns { safe fn f<i32, 'a>(&'a const i32); }\n",
+            "lifetime parameters must come before template arguments",
+        ),
+        (
+            "safe fn c++::ns::f<i32, 'a>(&'a const i32);\n",
+            "lifetime parameters must come before template arguments",
+        ),
+        (
+            "type c++::A { safe fn f<i32, 'a>(&'a const self); }\n",
+            "lifetime parameters must come before template arguments",
+        ),
+        (
+            "fn crate::f<i32, 'a>(&'a i32);\n",
+            "lifetime parameters must come before type arguments",
+        ),
+        (
+            "type crate::Foo { #layout(size = 8, align = 8); fn f<i32, 'a>(&'a i32); }\n",
+            "lifetime parameters must come before type arguments",
+        ),
+        (
+            "trait crate::Tr { fn f<i32, 'a>(&'a i32); }\n",
+            "lifetime parameters must come before type arguments",
+        ),
+        (
+            "extern \"C++\" { unsafe fn f<i32, 'a>(&'a i32); }\n",
+            "lifetime parameters must come before type arguments",
+        ),
+        (
+            "mod c++::ns { safe fn f<::std::string::String>(); }\n",
+            "can't be a C++ template argument",
+        ),
+        (
+            "mod c++::ns { safe fn f<'a, &'a const i32>(&'a const i32); }\n",
+            "can't be a C++ template argument",
+        ),
+        (
+            "mod c++::ns { safe fn f<str>(); }\n",
+            "`str` has no C++ equivalent",
+        ),
+        (
+            "mod c++::ns { safe fn f<char>(); }\n",
+            "`char` has no C++ equivalent",
+        ),
+        (
+            "type c++::A { safe fn f<(i32, i32)>(&'static const self); }\n",
+            "can't be a C++ template argument",
+        ),
+        (
+            // Even a `type<T>` with no instantiations validates non-variable parts of `template_args`.
+            "type<T> c++::Box<T> { safe fn f<::std::vec::Vec<T>>(&'static const self); }\n",
+            "can't be a C++ template argument",
+        ),
+        (
+            // Post-substitution validation catches `const T` when `T` is instantiated with a C++ reference.
+            "type<T> c++::Box<T> { safe fn f<const T>(); }\ntype c++::Box<i32&> {}\n",
+            "only C++ objects (`c++::` types, builtins and C++ pointers) can be `const` or `var`, not `i32&`",
+        ),
+        (
+            // Post-substitution validation catches `T&` when `T` is instantiated with a C++ reference.
+            "type<T> c++::Box<T> { safe fn f<T&>(); }\ntype c++::Box<i32&> {}\n",
+            "references to C++ references (`T&&`) aren't valid",
+        ),
+        (
+            // Rust functions still reject C++ `const T` in generic arguments.
+            "fn crate::f<const i32>();\n",
+            "`const T` can only be the type of a C++ pointer or reference",
+        ),
+        (
+            // Rust methods still reject C++ `const T` in generic arguments.
+            "type crate::Foo { #layout(size = 8, align = 8); fn f<const i32>(); }\n",
+            "`const T` can only be the type of a C++ pointer or reference",
+        ),
+        (
+            // Plain C++ type passed template arguments inside function/method `template_args`.
+            "type c++::Plain {}\nsafe fn c++::ns::f<c++::Plain<i32>>();\n",
+            "`c++::Plain` is declared as a plain C++ type, so it cannot take template arguments",
+        ),
+        (
+            "type c++::Plain {}\ntype c++::A { safe fn f<c++::Plain<i32>>(); }\n",
+            "`c++::Plain` is declared as a plain C++ type, so it cannot take template arguments",
+        ),
+        (
+            // Declared C++ class template missing or having wrong-arity template arguments in `template_args`.
+            "type<T> c++::Box<T> {}\nsafe fn c++::ns::f<c++::Box>();\n",
+            "`c++::Box` is a C++ class template and needs 1 template argument",
+        ),
+        (
+            "type<T> c++::Box<T> {}\nsafe fn c++::ns::f<c++::Box<i32, i32>>();\n",
+            "`c++::Box` takes 1 template argument, not 2",
+        ),
+        (
+            "type<T> c++::Box<T> {}\ntype<U> c++::Holder<U> { safe fn f<c++::Box<U, i32>>(); }\n",
+            "`c++::Box` takes 1 template argument, not 2",
+        ),
+        (
+            // Undeclared C++ class template or type inside `template_args`.
+            "safe fn c++::ns::f<c++::UnknownTpl<i32>>();\n",
+            "instantiation `c++::UnknownTpl<i32>` of C++ class template `c++::UnknownTpl` is not declared",
+        ),
+        (
+            "safe fn c++::ns::f<c++::Undeclared>();\n",
+            "`c++::Undeclared` is not declared or imported",
+        ),
+        (
+            // Forgotten `c++::` prefix inside `mod c++::...` resolves relative to the namespace and is caught.
+            "type c++::geo::Point {}\nmod c++::std { safe fn make_unique<geo::Point>(); }\n",
+            "`c++::std::geo::Point` is not declared or imported",
+        ),
+        (
+            // Rust-style `<T>` misuse on C++ functions/methods (both top-level and inside `mod c++::...`).
+            "type c++::A { safe fn gen<T>(i32); }\n",
+            "`::T` can't be a C++ template argument",
+        ),
+        (
+            "safe fn c++::a::gen_fn<T>(i32);\n",
+            "`::T` can't be a C++ template argument",
+        ),
+        (
+            "mod c++::a { safe fn gen_fn<T>(i32); }\n",
+            "`c++::a::T` is not declared or imported",
+        ),
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(expected),
+            "expected `{expected}` for `{src}`, got:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn cpp_function_and_method_template_args_merge_and_collision() {
+    // Identical instantiations deduplicate cleanly across `merge`d files (even with renamed
+    // function/method lifetimes).
+    let dedup_resolver = MockFilesystem::new(vec![(
+        "./extra.zng",
+        r#"
+type c++::ns::Foo {
+    safe fn cast<'b, const i32>(&'b const self) -> &'b const i32 as cast_i32;
+}
+
+mod c++::ns {
+    safe fn forward<'b, const i32>(&'b const i32) -> &'b const i32 as fwd_i32;
+}
+"#,
+    )]);
+    let parsed = parse_str_with_resolver(
+        r#"
+merge "./extra.zng";
+
+type c++::ns::Foo {
+    safe fn cast<'a, const i32>(&'a const self) -> &'a const i32 as cast_i32;
+}
+
+mod c++::ns {
+    safe fn forward<'a, const i32>(&'a const i32) -> &'a const i32 as fwd_i32;
+}
+"#,
+        NullCfg,
+        &dedup_resolver,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    assert_eq!(parsed.spec.types[0].cpp_methods.len(), 1);
+    assert_eq!(parsed.spec.cpp_funcs.len(), 1);
+
+    // Same-file collisions without `as` and cross-file `merge` conflicts on `template_args` fail.
+    let conflict_fn_resolver = MockFilesystem::new(vec![(
+        "./extra.zng",
+        "mod c++::ns { safe fn foo<i64>(); }\n",
+    )]);
+    let conflict_method_resolver = MockFilesystem::new(vec![(
+        "./extra.zng",
+        "type c++::ns::Foo { safe fn get<i64>(&'static const self) -> i64 as get_val; }\n",
+    )]);
+
+    for (src, resolver_opt, expected) in [
+        (
+            "mod c++::ns {\n    safe fn foo<i32>();\n    safe fn foo<i64>();\n}\n",
+            None,
+            "is already the Rust name of another C++ function in `c++::ns`",
+        ),
+        (
+            "type c++::ns::Foo {\n    safe fn get<i32>(&'static const self) -> i32;\n    safe fn get<i64>(&'static const self) -> i64;\n}\n",
+            None,
+            "is already the Rust name of another member of this type",
+        ),
+        (
+            "merge \"./extra.zng\";\nmod c++::ns { safe fn foo<i32>(); }\n",
+            Some(&conflict_fn_resolver),
+            "C++ function mismatch",
+        ),
+        (
+            "merge \"./extra.zng\";\ntype c++::ns::Foo { safe fn get<i32>(&'static const self) -> i32 as get_val; }\n",
+            Some(&conflict_method_resolver),
+            "C++ method mismatch",
+        ),
+    ] {
+        let r = catch_unwind(|| {
+            if let Some(resolver) = resolver_opt {
+                let _ = parse_str_with_resolver(src, NullCfg, resolver, |_| {});
+            } else {
+                let _ = parse_str(src, NullCfg, |_| {});
+            }
         });
         let err = r
             .unwrap_err()

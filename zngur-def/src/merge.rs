@@ -437,7 +437,7 @@ fn align_type_lifetimes(src: &mut ZngurType, dst_lifetimes: &[Lifetime], dst_ty:
             {
                 avoid.insert(rl.clone());
             }
-            for t in m.inputs.iter().chain([&m.output]) {
+            for t in m.inputs.iter().chain([&m.output]).chain(&m.template_args) {
                 avoid.extend(t.all_lifetimes());
             }
         }
@@ -474,7 +474,7 @@ fn align_type_lifetimes(src: &mut ZngurType, dst_lifetimes: &[Lifetime], dst_ty:
             let mut tmp = ZngurMethod {
                 name: m.rust_name().to_owned(),
                 lifetimes: m.lifetimes.clone(),
-                generics: vec![],
+                generics: std::mem::take(&mut m.template_args),
                 receiver: m.receiver,
                 receiver_lifetime: m.receiver_lifetime.clone(),
                 inputs: m.inputs.clone(),
@@ -483,6 +483,7 @@ fn align_type_lifetimes(src: &mut ZngurType, dst_lifetimes: &[Lifetime], dst_ty:
             };
             align_method_lifetimes(&mut tmp, None, &src.lifetimes, dst_lifetimes, &mut avoid);
             m.lifetimes = tmp.lifetimes;
+            m.template_args = tmp.generics;
             m.receiver_lifetime = tmp.receiver_lifetime;
             m.inputs = tmp.inputs;
             m.output = tmp.output;
@@ -595,6 +596,7 @@ fn canonicalize_cpp_method(m: &crate::ZngurCppMethod) -> crate::ZngurCppMethod {
         lifetimes: (0..outer.len())
             .map(|i| Lifetime(format!("__outer_{i}")))
             .collect(),
+        template_args: m.template_args.iter().map(canon_ty).collect(),
         rust_name: m.rust_name.clone(),
         receiver: m.receiver,
         receiver_constness: m.receiver_constness,
@@ -838,6 +840,11 @@ fn canonicalize_cpp_fn(f: &crate::ZngurCppFn) -> crate::ZngurCppFn {
     crate::ZngurCppFn {
         namespace: f.namespace.clone(),
         cpp_name: f.cpp_name.clone(),
+        template_args: f
+            .template_args
+            .iter()
+            .map(|t| t.canonicalize_lifetimes(outer))
+            .collect(),
         rust_name: f.rust_name.clone(),
         lifetimes: (0..outer.len())
             .map(|i| Lifetime(format!("__outer_{i}")))

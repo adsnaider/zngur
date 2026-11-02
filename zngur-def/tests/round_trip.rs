@@ -1303,3 +1303,63 @@ extern "C++" {
         "#]],
     );
 }
+
+#[test]
+fn reparse_cpp_function_templates() {
+    let _ = check_round_trip(
+        r#"
+type<T> c++::Box<T> {
+    safe fn rebind<'a, const T>(&'a const self) -> &'a const T;
+}
+
+type c++::Box<i32> {}
+
+type c++::a::B {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    safe fn get<i32>(&'static const self) -> i32 as get_i32;
+    safe fn cast<'a, const c++::a::B>(&'a const self) -> &'a const c++::a::B;
+    safe fn make<const i32>(i32) -> c++::a::B as make_b;
+}
+
+mod c++::a {
+    safe fn make_b<c++::a::B>(i32) -> c++::a::B as create_b;
+    safe fn pass<'a, const i32>(&'a const c++::a::B) -> &'a const c++::a::B;
+    safe fn b::foo<i32>();
+}
+
+safe fn c++::ns::foo<i32>();
+"#,
+        expect![[r#"
+            type<T> c++::Box<T> {
+
+                safe fn rebind<'a, const T>(&'a const self) -> &'a const T;
+            }
+
+            type c++::Box<i32> {
+
+                safe fn rebind<'a, const i32>(&'a const self) -> &'a const i32;
+            }
+
+            type c++::a::B {
+                #layout(size = 8, align = 4);
+                #trivially_relocatable;
+
+                safe fn get<i32>(&'static const self) -> i32 as get_i32;
+                safe fn cast<'a, const c++::a::B>(&'a const self) -> &'a const c++::a::B;
+                safe fn make<const i32>(i32) -> c++::a::B as make_b;
+            }
+
+            mod c++::a {
+                safe fn make_b<c++::a::B>(i32) -> c++::a::B as create_b;
+                safe fn pass<'a, const i32>(&'a const c++::a::B) -> &'a const c++::a::B;
+            }
+            mod c++::a::b {
+                safe fn foo<i32>();
+            }
+            mod c++::ns {
+                safe fn foo<i32>();
+            }
+        "#]],
+    );
+}

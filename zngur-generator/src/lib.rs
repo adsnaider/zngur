@@ -1836,6 +1836,7 @@ pub type Handle = super::Handle;
                 lifetimes: vec![Lifetime("a".to_owned())],
                 namespace: vec!["a".to_owned()],
                 cpp_name: "f".to_owned(),
+                template_args: vec![],
                 rust_name: None,
                 inputs: vec![option(r(Mutability::Not, CppConstness::Const, &a))],
                 output: option(r(Mutability::Not, CppConstness::Var, &a)),
@@ -1980,6 +1981,7 @@ pub type Handle = super::Handle;
                     lifetimes: vec![],
                     namespace: vec!["a".to_owned(), "b".to_owned()],
                     cpp_name: "f".to_owned(),
+                    template_args: vec![],
                     rust_name: Some("g".to_owned()),
                     inputs: vec![i32.clone()],
                     output: i32.clone(),
@@ -1989,6 +1991,7 @@ pub type Handle = super::Handle;
                     lifetimes: vec![],
                     namespace: vec!["a".to_owned(), "b".to_owned()],
                     cpp_name: "raw_step".to_owned(),
+                    template_args: vec![],
                     rust_name: None,
                     inputs: vec![RustType::cpp_ptr(
                         Mutability::Not,
@@ -2054,6 +2057,7 @@ pub type Handle = super::Handle;
             lifetimes: vec![],
             namespace: ns.iter().map(|s| (*s).to_owned()).collect(),
             cpp_name: cpp_name.to_owned(),
+            template_args: vec![],
             rust_name: rust_name.map(str::to_owned),
             inputs: vec![],
             output: RustType::UNIT,
@@ -2153,6 +2157,7 @@ pub type Handle = super::Handle;
                     lifetimes: vec![Lifetime("a".to_owned())],
                     namespace: vec!["ns".to_owned()],
                     cpp_name: "Foo".to_owned(),
+                    template_args: vec![],
                     rust_name: None,
                     inputs: vec![RustType::Ref(
                         Mutability::Not,
@@ -2166,6 +2171,7 @@ pub type Handle = super::Handle;
                     lifetimes: vec![Lifetime("a".to_owned())],
                     namespace: vec!["ns".to_owned()],
                     cpp_name: "Bar".to_owned(),
+                    template_args: vec![],
                     rust_name: None,
                     inputs: vec![RustType::Ref(
                         Mutability::Not,
@@ -2179,6 +2185,7 @@ pub type Handle = super::Handle;
                     lifetimes: vec![Lifetime("a".to_owned())],
                     namespace: vec!["ns".to_owned()],
                     cpp_name: "Baz".to_owned(),
+                    template_args: vec![],
                     rust_name: None,
                     inputs: vec![RustType::Ref(
                         Mutability::Not,
@@ -2230,6 +2237,7 @@ pub type Handle = super::Handle;
                 lifetimes: vec![],
                 namespace: vec!["shapes".to_owned()],
                 cpp_name: "Mirror".to_owned(),
+                template_args: vec![],
                 rust_name: None,
                 inputs: vec![point.clone()],
                 output: point,
@@ -3132,6 +3140,7 @@ pub type Handle = super::Handle;
             ZngurCppMethod {
                 cpp_name: "value".to_owned(),
                 lifetimes: vec![],
+                template_args: vec![],
                 rust_name: None,
                 receiver: ZngurMethodReceiver::Ref(Mutability::Not),
                 receiver_constness: CppConstness::Const,
@@ -3144,6 +3153,7 @@ pub type Handle = super::Handle;
             ZngurCppMethod {
                 cpp_name: "set".to_owned(),
                 lifetimes: vec![],
+                template_args: vec![],
                 rust_name: Some("set_from".to_owned()),
                 receiver: ZngurMethodReceiver::Ref(Mutability::Mut),
                 receiver_constness: CppConstness::Var,
@@ -3161,6 +3171,7 @@ pub type Handle = super::Handle;
             ZngurCppMethod {
                 cpp_name: "bump".to_owned(),
                 lifetimes: vec![],
+                template_args: vec![],
                 rust_name: None,
                 receiver: ZngurMethodReceiver::Ref(Mutability::Not),
                 receiver_constness: CppConstness::Var,
@@ -3174,6 +3185,7 @@ pub type Handle = super::Handle;
             ZngurCppMethod {
                 cpp_name: "peek".to_owned(),
                 lifetimes: vec![],
+                template_args: vec![],
                 rust_name: None,
                 receiver: ZngurMethodReceiver::Ref(Mutability::Mut),
                 receiver_constness: CppConstness::Const,
@@ -3188,6 +3200,7 @@ pub type Handle = super::Handle;
             ZngurCppMethod {
                 cpp_name: "raw_value".to_owned(),
                 lifetimes: vec![],
+                template_args: vec![],
                 rust_name: None,
                 receiver: ZngurMethodReceiver::Ref(Mutability::Not),
                 receiver_constness: CppConstness::Const,
@@ -3200,6 +3213,7 @@ pub type Handle = super::Handle;
             ZngurCppMethod {
                 cpp_name: "raw_bump".to_owned(),
                 lifetimes: vec![],
+                template_args: vec![],
                 rust_name: None,
                 receiver: ZngurMethodReceiver::Ref(Mutability::Mut),
                 receiver_constness: CppConstness::Var,
@@ -3212,6 +3226,7 @@ pub type Handle = super::Handle;
             ZngurCppMethod {
                 cpp_name: "make".to_owned(),
                 lifetimes: vec![],
+                template_args: vec![],
                 rust_name: None,
                 receiver: ZngurMethodReceiver::Static,
                 receiver_constness: CppConstness::Var,
@@ -3349,6 +3364,7 @@ pub type Handle = super::Handle;
             ZngurCppMethod {
                 cpp_name: "check".to_owned(),
                 lifetimes: vec![lt_a.clone()],
+                template_args: vec![],
                 rust_name: None,
                 receiver: ZngurMethodReceiver::Ref(Mutability::Not),
                 receiver_constness: CppConstness::Const,
@@ -3365,6 +3381,7 @@ pub type Handle = super::Handle;
             ZngurCppMethod {
                 cpp_name: "borrow_foo".to_owned(),
                 lifetimes: vec![lt_a.clone()],
+                template_args: vec![],
                 rust_name: None,
                 receiver: ZngurMethodReceiver::Ref(Mutability::Not),
                 receiver_constness: CppConstness::Const,
@@ -3377,6 +3394,7 @@ pub type Handle = super::Handle;
             ZngurCppMethod {
                 cpp_name: "nullable_and_builtin_refs".to_owned(),
                 lifetimes: vec![lt_a.clone()],
+                template_args: vec![],
                 rust_name: None,
                 receiver: ZngurMethodReceiver::Ref(Mutability::Not),
                 receiver_constness: CppConstness::Const,
@@ -3389,6 +3407,7 @@ pub type Handle = super::Handle;
             ZngurCppMethod {
                 cpp_name: "mut_int".to_owned(),
                 lifetimes: vec![Lifetime("a".to_owned())],
+                template_args: vec![],
                 rust_name: None,
                 receiver: ZngurMethodReceiver::Ref(Mutability::Mut),
                 receiver_constness: CppConstness::Var,
@@ -3475,6 +3494,7 @@ pub type Handle = super::Handle;
         local_ty.cpp_methods = vec![ZngurCppMethod {
             cpp_name: "round_trip".to_owned(),
             lifetimes: vec![],
+            template_args: vec![],
             rust_name: None,
             receiver: ZngurMethodReceiver::Static,
             receiver_constness: CppConstness::Var,
@@ -3516,6 +3536,7 @@ pub type Handle = super::Handle;
         foo_cpp_method.cpp_methods = vec![ZngurCppMethod {
             cpp_name: "bar".to_owned(),
             lifetimes: vec![],
+            template_args: vec![],
             rust_name: None,
             receiver: ZngurMethodReceiver::Ref(Mutability::Not),
             receiver_constness: CppConstness::Const,
@@ -3530,6 +3551,7 @@ pub type Handle = super::Handle;
             ZngurCppMethod {
                 cpp_name: "cpp_method_bar".to_owned(),
                 lifetimes: vec![],
+                template_args: vec![],
                 rust_name: None,
                 receiver: ZngurMethodReceiver::Ref(Mutability::Not),
                 receiver_constness: CppConstness::Const,
@@ -3542,6 +3564,7 @@ pub type Handle = super::Handle;
             ZngurCppMethod {
                 cpp_name: "bar".to_owned(),
                 lifetimes: vec![],
+                template_args: vec![],
                 rust_name: None,
                 receiver: ZngurMethodReceiver::Ref(Mutability::Not),
                 receiver_constness: CppConstness::Const,
@@ -3593,6 +3616,7 @@ pub type Handle = super::Handle;
         top_c.cpp_methods = vec![ZngurCppMethod {
             cpp_name: "id".to_owned(),
             lifetimes: vec![lt_a.clone()],
+            template_args: vec![],
             rust_name: None,
             receiver: ZngurMethodReceiver::Ref(Mutability::Not),
             receiver_constness: CppConstness::Const,
@@ -3613,6 +3637,7 @@ pub type Handle = super::Handle;
         nested_c_foo.cpp_methods = vec![ZngurCppMethod {
             cpp_name: "get".to_owned(),
             lifetimes: vec![lt_a.clone()],
+            template_args: vec![],
             rust_name: None,
             receiver: ZngurMethodReceiver::Ref(Mutability::Not),
             receiver_constness: CppConstness::Const,
@@ -4084,6 +4109,7 @@ pub type Handle = super::Handle;
                     cpp_name: "Box".to_owned(),
                     rust_name: None,
                     lifetimes: vec![],
+                    template_args: vec![],
                     inputs: vec![],
                     output: RustType::Tuple(vec![]),
                     is_safe: true,
@@ -4093,6 +4119,7 @@ pub type Handle = super::Handle;
                     cpp_name: "Pair".to_owned(),
                     rust_name: None,
                     lifetimes: vec![],
+                    template_args: vec![],
                     inputs: vec![],
                     output: RustType::Tuple(vec![]),
                     is_safe: true,
@@ -4218,6 +4245,7 @@ pub type Handle = super::Handle;
         map_def.cpp_methods = vec![ZngurCppMethod {
             cpp_name: "size".to_owned(),
             lifetimes: vec![],
+            template_args: vec![],
             rust_name: None,
             receiver: ZngurMethodReceiver::Ref(Mutability::Not),
             receiver_lifetime: None,
@@ -4330,6 +4358,97 @@ pub type Handle = super::Handle;
         assert!(
             pos_node_cpp_type < pos_view_cpp_type && pos_view_cpp_type < pos_unsized,
             "CppTypeOf specializations must precede zngur_is_unsized:\n{unsized_h}"
+        );
+    }
+
+    #[test]
+    fn cpp_function_templates_are_called_with_their_template_arguments() {
+        let point = cpp(&["geo", "Point"]);
+        let unique_ptr = RustType::Cpp(CppTypePath {
+            path: vec!["std".to_owned(), "unique_ptr".to_owned()],
+            generics: vec![point.clone()],
+        });
+        let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+        let mut point_ty = minimal_by_value_cpp_type(point.clone(), 8, 4);
+        point_ty.cpp_methods = vec![
+            ZngurCppMethod {
+                cpp_name: "cast".to_owned(),
+                lifetimes: vec![],
+                template_args: vec![RustType::CppConst(Box::new(i32.clone()))],
+                rust_name: Some("cast_i32".to_owned()),
+                receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+                receiver_constness: CppConstness::Const,
+                receiver_lifetime: None,
+                raw_receiver: None,
+                inputs: vec![],
+                output: i32.clone(),
+                is_safe: true,
+            },
+            ZngurCppMethod {
+                cpp_name: "from".to_owned(),
+                lifetimes: vec![],
+                template_args: vec![i32.clone(), i32.clone()],
+                rust_name: Some("from_i32_pair".to_owned()),
+                receiver: ZngurMethodReceiver::Static,
+                receiver_constness: CppConstness::Var,
+                receiver_lifetime: None,
+                raw_receiver: None,
+                inputs: vec![i32.clone(), i32.clone()],
+                output: point.clone(),
+                is_safe: true,
+            },
+        ];
+        let spec = ZngurSpec {
+            types: vec![
+                point_ty,
+                minimal_by_value_cpp_type(unique_ptr.clone(), 8, 8),
+            ],
+            cpp_funcs: vec![ZngurCppFn {
+                lifetimes: vec![],
+                namespace: vec!["std".to_owned()],
+                cpp_name: "make_unique".to_owned(),
+                template_args: vec![point],
+                rust_name: Some("make_point".to_owned()),
+                inputs: vec![i32.clone(), i32],
+                output: unique_ptr,
+                is_safe: true,
+            }],
+            ..Default::default()
+        };
+        let (rust_code, _h, cpp_code) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let cpp_code = cpp_code.expect("C++ functions need a C++ file");
+
+        assert!(rust_code.contains("as make_point;"), "{rust_code}");
+        assert!(
+            rust_code.contains("pub fn cast_i32(&self, ) -> i32"),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains("pub fn from_i32_pair(i0: i32, i1: i32, ) -> geo::Point"),
+            "{rust_code}"
+        );
+        assert!(
+            cpp_code.contains(
+                "::new (static_cast<void*>(o)) ::std::unique_ptr< ::geo::Point \
+                 >(::std::make_unique< ::geo::Point \
+                 >(::rust::__zngur_internal_move_from_rust< ::int32_t >(i0), "
+            ),
+            "{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains(
+                "(::rust::__zngur_internal_move_from_rust< ::rust::CppPtr< ::rust::CppConst< \
+                 ::rust::cpp::geo::Point > > >(i0))->cast< const ::int32_t >()"
+            ),
+            "{cpp_code}"
+        );
+        assert!(
+            cpp_code.contains(
+                "::new (static_cast<void*>(o)) ::geo::Point(::geo::Point::from< ::int32_t, \
+                 ::int32_t >(::rust::__zngur_internal_move_from_rust< ::int32_t >(i0), "
+            ),
+            "{cpp_code}"
         );
     }
 }

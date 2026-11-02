@@ -95,7 +95,12 @@ impl BridgeRenderer<'_> {
         let args = self.args(&method.inputs, &mut params);
         params.push("uint8_t* o".to_owned());
 
-        let name = &method.cpp_name;
+        // The bridge isn't a template, so explicit template arguments need no `template` keyword.
+        let name = format!(
+            "{}{}",
+            method.cpp_name,
+            zngur_def::cpp_template_args(&method.template_args)
+        );
         let call = match this {
             Some(this) => format!("({this})->{name}({args})"),
             None => format!("{owner_cpp_type}::{name}({args})"),
