@@ -498,6 +498,16 @@ name = "example-conditional"
 version = "0.11.0"
 
 [[package]]
+name = "example-cpp-make-unique"
+version = "0.11.0"
+dependencies = [
+ "build-rs 0.1.2",
+ "cc",
+ "zngur",
+ "zngur-lib",
+]
+
+[[package]]
 name = "example-cpp-objects"
 version = "0.11.0"
 dependencies = [

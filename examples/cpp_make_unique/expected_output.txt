@@ -1,0 +1,7 @@
+point = (3, 4)
+Created a 640x480 canvas
+Drawing (3, 4)
+Drawing (5, 6)
+points drawn = 2
+Destroyed the canvas
+done

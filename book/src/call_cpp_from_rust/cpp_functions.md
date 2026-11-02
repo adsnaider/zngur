@@ -44,3 +44,26 @@ declare them exactly.
 
 Unlike functions in `extern "C++"` blocks, which you implement in C++ for Rust, these are existing
 C++ functions.
+
+## Function templates
+
+Instantiations of C++ function templates are declared with explicit template arguments, which are
+zngur types like those of [class templates](./cpp_templates.md). Give each instantiation its own
+Rust name with `as`:
+
+```zng
+mod c++::std {
+    safe fn make_unique<c++::geo::Point>(i32, i32) -> c++::std::unique_ptr<c++::geo::Point> as make_point;
+    safe fn make_unique<c++::geo::Canvas>() -> c++::std::unique_ptr<c++::geo::Canvas> as make_canvas;
+}
+```
+
+zngur generates a non-generic Rust function for each declared instantiation that calls
+`::std::make_unique< ::geo::Point >(...)`, so the parameter and return types in `.zng` must be
+written out concretely for that call (here, the constructor's arguments), while C++ still deduces
+any remaining trailing template parameters (such as `Args...` in `std::make_unique`) from the call
+arguments as usual.
+
+`std::make_unique` is especially useful for C++ types that Rust can only refer to (with no
+`#layout`), like `Canvas` above: Rust can't construct them in place, but it can own one on the heap
+through a `std::unique_ptr`. See `examples/cpp_make_unique`.

@@ -44,11 +44,14 @@ type c++::geo::Point {
   C++ types that Rust holds by value, and [C++ references and pointers](./cpp_pointers.md)
   (`&'a const T` for `const T&`, `&'a unique var T` for a `T&` that Rust uses uniquely, ..., or
   C++-style raw pointers).
-- Lifetimes are declared like in Rust (`fn x<'a>(...)`). Name them: zngur can't check them against
-  C++, and warns about elided ones (`#allow(elided_lifetimes)` silences it; see
-  [Lifetimes](../lifetimes.md)).
+- Lifetimes are declared like in Rust (`fn x<'a>(...)`), before any template arguments. Name them:
+  zngur can't check them against C++, and warns about elided ones (`#allow(elided_lifetimes)`
+  silences it; see [Lifetimes](../lifetimes.md)).
 - `as` gives the Rust function a different name, e.g. for C++ overloads, which Rust doesn't have,
   or when the C++ name is a Rust keyword (`safe fn type<'a>(&'a const self) -> i32 as kind;`).
+- Member function templates take explicit template arguments, like
+  [function templates](./cpp_functions.md#function-templates):
+  `safe fn get<'a, i32>(&'a const self) -> i32 as get_i32;`.
 - Each member function is `safe` or `unsafe`, like the functions in `extern "C++"` blocks. That's up
   to the `.zng` file, but zngur warns about `safe` ones that take raw pointers
   (`#allow(safe_raw_pointer)` silences it).

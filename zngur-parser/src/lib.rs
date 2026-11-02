@@ -672,6 +672,7 @@ enum ParsedTypeItem<'a> {
         name_is_ident: bool,
         lifetimes: Vec<&'a str>,
         generics: Vec<ParsedRustType<'a>>,
+        misplaced_lifetime: Option<Span>,
         inputs: Vec<ParsedRustType<'a>>,
         is_const: bool,
         output: ParsedRustType<'a>,
@@ -739,6 +740,7 @@ struct ParsedFunction<'a> {
     name_is_ident: bool,
     lifetimes: Vec<&'a str>,
     generics: Vec<ParsedRustType<'a>>,
+    misplaced_lifetime: Option<Span>,
     inputs: Vec<ParsedRustType<'a>>,
     output: ParsedRustType<'a>,
     alias: Option<(&'a str, bool)>,
@@ -1912,15 +1914,10 @@ fn check_cpp_objects_ctx(
                 .iter()
                 .try_for_each(|(_, t)| check_cpp_objects_ctx(t, false, false, false, heap_info))
         }
-        RustType::Cpp(path) => {
-            for g in &path.generics {
-                check_cpp_objects_ctx(g, true, false, true, heap_info)?;
-                if g.type_vars().is_empty() {
-                    g.cpp_spelling()?;
-                }
-            }
-            Ok(())
-        }
+        RustType::Cpp(path) => path
+            .generics
+            .iter()
+            .try_for_each(|g| check_cpp_template_arg(g, heap_info)),
         RustType::Dyn(tr, _) | RustType::Impl(tr, _) => match tr {
             RustTrait::Normal(pg) => {
                 check_cpp_objects_ctx(&RustType::Adt(pg.clone()), false, false, false, heap_info)
@@ -1932,6 +1929,27 @@ fn check_cpp_objects_ctx(
         },
         RustType::Primitive(_) | RustType::TypeVar(_) => Ok(()),
     }
+}
+
+/// Checks a C++ class, function, or member function template argument, allowing unbound template
+/// type variables inside `type<T>` declarations while still rejecting Rust types, references to
+/// C++ objects (`&'a const T`), `str`, `char`, and tuples.
+fn check_cpp_template_arg(
+    arg: &RustType,
+    heap_info: Option<&CppHeapAllocatedInfo<'_>>,
+) -> Result<(), String> {
+    check_cpp_objects_ctx(arg, true, true, true, heap_info)?;
+    fn check_spelling(ty: &RustType) -> Result<(), String> {
+        match ty {
+            RustType::TypeVar(_) => Ok(()),
+            RustType::Cpp(path) => path.generics.iter().try_for_each(check_spelling),
+            RustType::CppPtr(_, t) | RustType::CppConst(t) | RustType::CppVar(t) => {
+                check_spelling(t)
+            }
+            _ => ty.cpp_spelling().map(|_| ()),
+        }
+    }
+    check_spelling(arg)
 }
 
 /// Reports the first immediate error of [`check_cpp_objects_inner`] in `types` (recording any
@@ -2753,6 +2771,7 @@ impl ProcessedItem<'_> {
                             name_is_ident,
                             lifetimes: method_lifetimes,
                             generics: method_generics,
+                            misplaced_lifetime,
                             mut inputs,
                             is_const,
                             output,
@@ -2768,6 +2787,9 @@ impl ProcessedItem<'_> {
                                         || is_const
                                         || !name_is_ident
                                         || matches!(alias, Some((_, false)))
+                                        || method_generics
+                                            .iter()
+                                            .any(|g| check_cpp_const(g, false).is_err())
                                         || matches!(
                                             inputs.first().and_then(as_receiver),
                                             Some(
@@ -2779,6 +2801,13 @@ impl ProcessedItem<'_> {
                                 _ => false,
                             };
                             if is_cpp_method_target {
+                                if let Some(lt_span) = misplaced_lifetime {
+                                    ctx.add_error_str(
+                                        "lifetime parameters must come before template arguments",
+                                        lt_span,
+                                    );
+                                    continue;
+                                }
                                 let Some(is_safe) = is_safe else {
                                     ctx.add_error_str(
                                         "C++ member functions must be marked `safe` or `unsafe`",
@@ -2799,14 +2828,6 @@ impl ProcessedItem<'_> {
                                          (those are for Rust methods; implement Rust traits on \
                                          `c++::` types via \
                                          `extern \"C++\" { impl Trait for c++::T { ... } }`)",
-                                        item_span,
-                                    );
-                                    continue;
-                                }
-                                if !method_generics.is_empty() {
-                                    ctx.add_error_str(
-                                        "C++ member functions do not support generic type \
-                                         arguments",
                                         item_span,
                                     );
                                     continue;
@@ -2833,7 +2854,12 @@ impl ProcessedItem<'_> {
                                 if parsed_receiver.is_some() {
                                     inputs.remove(0);
                                 }
-                                if inputs.iter().chain([&output]).any(contains_relative_self) {
+                                if inputs
+                                    .iter()
+                                    .chain([&output])
+                                    .chain(&method_generics)
+                                    .any(contains_relative_self)
+                                {
                                     ctx.add_error_str(
                                         "invalid C++ member function receiver: expected \
                                          `&'a const self`, `&'a unique var self`, `&'a var self`, \
@@ -2889,12 +2915,17 @@ impl ProcessedItem<'_> {
                                     }
                                 };
                                 let rust_name = alias.map(|(s, _)| s);
+                                let template_args: Vec<RustType> = method_generics
+                                    .into_iter()
+                                    .map(|x| x.to_zngur(scope, ctx))
+                                    .collect();
                                 let inputs: Vec<RustType> =
                                     inputs.into_iter().map(|x| x.to_zngur(scope, ctx)).collect();
                                 let output = output.to_zngur(scope, ctx);
                                 let method = ZngurCppMethod {
                                     cpp_name: name.to_owned(),
                                     lifetimes: lifetimes(&method_lifetimes),
+                                    template_args,
                                     rust_name: rust_name.filter(|&n| n != name).map(str::to_owned),
                                     receiver,
                                     inputs,
@@ -2911,6 +2942,14 @@ impl ProcessedItem<'_> {
                                     true,
                                     true,
                                 ) {
+                                    continue;
+                                }
+                                if let Err(err) = method
+                                    .template_args
+                                    .iter()
+                                    .try_for_each(|t| check_cpp_template_arg(t, None))
+                                {
+                                    ctx.add_error_str(&err, item_span);
                                     continue;
                                 }
                                 if !check_rust_fn_name(
@@ -2957,6 +2996,13 @@ impl ProcessedItem<'_> {
                                 );
                                 cpp_methods.push(method);
                             } else {
+                                if let Some(lt_span) = misplaced_lifetime {
+                                    ctx.add_error_str(
+                                        "lifetime parameters must come before type arguments",
+                                        lt_span,
+                                    );
+                                    continue;
+                                }
                                 if is_static {
                                     ctx.add_error_str(
                                         "Rust static methods are declared without a `self` \
@@ -3002,6 +3048,13 @@ impl ProcessedItem<'_> {
                                          `&self` or `&mut self`, not `const self*` / `self&`",
                                         sig_span,
                                     );
+                                    continue;
+                                }
+                                if let Err(msg) = method_generics
+                                    .iter()
+                                    .try_for_each(|g| check_cpp_const(g, false))
+                                {
+                                    ctx.add_error_str(&msg, sig_span);
                                     continue;
                                 }
                                 let mut data = match parsed_method_from_signature(
@@ -3415,6 +3468,13 @@ impl ProcessedItem<'_> {
                     };
                 match target {
                     EntityPath::Rust(path) => {
+                        if let Some(lt_span) = f.misplaced_lifetime {
+                            ctx.add_error_str(
+                                "lifetime parameters must come before type arguments",
+                                lt_span,
+                            );
+                            return;
+                        }
                         let sig_span = f.sig_span;
                         if !f.name_is_ident {
                             let name = f.path.segments.last().expect("at_least(1)");
@@ -3434,6 +3494,14 @@ impl ProcessedItem<'_> {
                             return;
                         }
                         let name = *f.path.segments.last().expect("at_least(1)");
+                        if let Err(msg) = f
+                            .generics
+                            .iter()
+                            .try_for_each(|g| check_cpp_const(g, false))
+                        {
+                            ctx.add_error_str(&msg, sig_span);
+                            return;
+                        }
                         let parsed_method = match parsed_method_from_signature(
                             name,
                             f.async_span,
@@ -3467,6 +3535,13 @@ impl ProcessedItem<'_> {
                         checked_merge(func, &mut r.spec, sig_span, ctx, None);
                     }
                     EntityPath::Cpp(mut segments) => {
+                        if let Some(lt_span) = f.misplaced_lifetime {
+                            ctx.add_error_str(
+                                "lifetime parameters must come before template arguments",
+                                lt_span,
+                            );
+                            return;
+                        }
                         let cpp_name = segments.pop().expect("at_least(1)");
                         let namespace = segments;
                         let Some(is_safe) = f.is_safe else {
@@ -3493,13 +3568,6 @@ impl ProcessedItem<'_> {
                             ctx.add_error_str("C++ functions cannot be `async`", item_span);
                             return;
                         }
-                        if !f.generics.is_empty() {
-                            ctx.add_error_str(
-                                "C++ functions do not support generic type arguments",
-                                item_span,
-                            );
-                            return;
-                        }
                         if namespace.is_empty() {
                             ctx.add_error_str(
                                 "C++ functions in the global namespace aren't supported",
@@ -3510,6 +3578,7 @@ impl ProcessedItem<'_> {
                         if f.inputs
                             .iter()
                             .chain([&f.output])
+                            .chain(&f.generics)
                             .any(contains_relative_self)
                         {
                             ctx.add_error_str(
@@ -3519,6 +3588,11 @@ impl ProcessedItem<'_> {
                             );
                             return;
                         }
+                        let template_args: Vec<RustType> = f
+                            .generics
+                            .into_iter()
+                            .map(|x| x.to_zngur(scope, ctx))
+                            .collect();
                         let inputs: Vec<RustType> = f
                             .inputs
                             .into_iter()
@@ -3538,11 +3612,19 @@ impl ProcessedItem<'_> {
                         ) {
                             return;
                         }
+                        if let Err(err) = template_args
+                            .iter()
+                            .try_for_each(|t| check_cpp_template_arg(t, None))
+                        {
+                            ctx.add_error_str(&err, item_span);
+                            return;
+                        }
                         let rust_name = f.alias.map(|(s, _)| s);
                         let has_rename = rust_name.is_some();
                         let func = ZngurCppFn {
                             namespace,
                             cpp_name: cpp_name.clone(),
+                            template_args,
                             rust_name: rust_name.filter(|&n| n != cpp_name).map(str::to_owned),
                             lifetimes: fn_lifetimes,
                             inputs,
@@ -4527,6 +4609,9 @@ fn rewrite_crate_paths_in_zngur_type(ty: &mut ZngurType, home_crate: &str) {
         }
     }
     for method in &mut ty.cpp_methods {
+        for arg in &mut method.template_args {
+            rewrite_crate_in_rust_type(arg, home_crate);
+        }
         for input in &mut method.inputs {
             rewrite_crate_in_rust_type(input, home_crate);
         }
@@ -5915,7 +6000,6 @@ impl ZngurSpecBuilder {
                                     matches!(ty.ty, RustType::Cpp(_))
                                         && m.data.is_safe.is_some()
                                         && m.data.receiver == ZngurMethodReceiver::Static
-                                        && m.data.generics.is_empty()
                                         && m.use_path.is_none()
                                         && m.deref.is_none()
                                 })
@@ -6426,8 +6510,6 @@ impl ZngurSpecBuilder {
                         "C++ member functions do not support `use` or `deref` (those are for \
                          Rust methods; implement Rust traits on `c++::` types via \
                          `extern \"C++\" { impl Trait for c++::T { ... } }`)"
-                    } else if !rust_method.data.generics.is_empty() {
-                        "C++ member functions do not support generic type arguments"
                     } else {
                         "the receiver of a C++ member function is a reference to a C++ object, \
                          which says whether it's `const`: `&'a const self` or `&'a unique var self`"
@@ -6554,16 +6636,35 @@ impl ZngurSpecBuilder {
                 ctx.add_fatal_error_at_span(f_span, &msg);
                 continue;
             }
-            if let Err(msg) = func.inputs.iter().chain([&func.output]).try_for_each(|t| {
-                check_cpp_signature_type(
-                    t,
-                    false,
-                    &known_cpp_types,
-                    &known_cpp_paths,
-                    &by_value_cpp_types,
-                    !had_incomplete_imports,
-                )
-            }) {
+            let func_check = func
+                .template_args
+                .iter()
+                .try_for_each(|t| check_cpp_template_arg(t, Some(&heap_info)))
+                .and_then(|()| {
+                    func.template_args.iter().try_for_each(|t| {
+                        check_cpp_signature_type(
+                            t,
+                            true,
+                            &known_cpp_types,
+                            &known_cpp_paths,
+                            &by_value_cpp_types,
+                            !had_incomplete_imports,
+                        )
+                    })
+                })
+                .and_then(|()| {
+                    func.inputs.iter().chain([&func.output]).try_for_each(|t| {
+                        check_cpp_signature_type(
+                            t,
+                            false,
+                            &known_cpp_types,
+                            &known_cpp_paths,
+                            &by_value_cpp_types,
+                            !had_incomplete_imports,
+                        )
+                    })
+                });
+            if let Err(msg) = func_check {
                 ctx.add_fatal_error_at_span(f_span, &msg);
             }
         }
@@ -6810,6 +6911,12 @@ fn check_zngur_type_cpp_objects(
                 .try_for_each(|t| check_cpp_objects_inner(t, false, false, Some(heap_info)))
         })
         .and_then(|()| {
+            ty.cpp_methods
+                .iter()
+                .flat_map(|m| &m.template_args)
+                .try_for_each(|t| check_cpp_template_arg(t, Some(heap_info)))
+        })
+        .and_then(|()| {
             ty.cpp_fields
                 .iter()
                 .try_for_each(|f| check_cpp_field(f, Some(heap_info)))
@@ -6909,21 +7016,43 @@ fn check_cpp_members(
                     );
                 }
             }
-            if let Err(msg) = method
-                .inputs
-                .iter()
-                .chain([&method.output])
-                .try_for_each(|t| {
+            let method_check = if let Some(heap_info) = env.heap_info {
+                method
+                    .template_args
+                    .iter()
+                    .try_for_each(|t| check_cpp_template_arg(t, Some(heap_info)))
+            } else {
+                Ok(())
+            }
+            .and_then(|()| {
+                method.template_args.iter().try_for_each(|t| {
                     check_cpp_signature_type(
                         t,
-                        false,
+                        true,
                         env.known_cpp_types,
                         env.known_cpp_paths,
                         env.by_value_cpp_types,
                         env.check_undeclared_templates,
                     )
                 })
-            {
+            })
+            .and_then(|()| {
+                method
+                    .inputs
+                    .iter()
+                    .chain([&method.output])
+                    .try_for_each(|t| {
+                        check_cpp_signature_type(
+                            t,
+                            false,
+                            env.known_cpp_types,
+                            env.known_cpp_paths,
+                            env.by_value_cpp_types,
+                            env.check_undeclared_templates,
+                        )
+                    })
+            });
+            if let Err(msg) = method_check {
                 ctx.add_fatal_error_at_span(m_span, &msg);
             }
         }
@@ -7891,7 +8020,12 @@ fn check_cpp_template_uses(
                 .copied()
                 .cloned()
                 .unwrap_or_else(|| ty_span.clone());
-            let tys: Vec<&RustType> = method.inputs.iter().chain([&method.output]).collect();
+            let tys: Vec<&RustType> = method
+                .inputs
+                .iter()
+                .chain([&method.output])
+                .chain(&method.template_args)
+                .collect();
             check_at(ctx, span, &tys);
         }
         for ctor in &ty_def.cpp_constructors {
@@ -8066,7 +8200,12 @@ fn check_cpp_template_uses(
             .copied()
             .cloned()
             .unwrap_or((0, 0usize..0));
-        let tys: Vec<&RustType> = func.inputs.iter().chain([&func.output]).collect();
+        let tys: Vec<&RustType> = func
+            .inputs
+            .iter()
+            .chain([&func.output])
+            .chain(&func.template_args)
+            .collect();
         check_at(ctx, span, &tys);
     }
 
@@ -8425,6 +8564,12 @@ fn file_parser<'a>()
 }
 
 fn rust_type<'a>() -> Boxed<'a, 'a, ParserInput<'a>, ParsedRustType<'a>, ZngParserExtra<'a>> {
+    rust_type_with_cpp_const(false)
+}
+
+fn rust_type_with_cpp_const<'a>(
+    allow_cpp_const: bool,
+) -> Boxed<'a, 'a, ParserInput<'a>, ParsedRustType<'a>, ZngParserExtra<'a>> {
     let as_scalar = |s: &str, head: char| -> Option<u32> {
         let s = s.strip_prefix(head)?;
         s.parse().ok()
@@ -8603,10 +8748,12 @@ fn rust_type<'a>() -> Boxed<'a, 'a, ParserInput<'a>, ParsedRustType<'a>, ZngPars
             })
             .boxed()
     })
-    .try_map(|ty, span| match check_cpp_const(&ty, false) {
-        Ok(()) => Ok(ty),
-        Err(message) => Err(Rich::custom(span, message)),
-    })
+    .try_map(
+        move |ty, span| match check_cpp_const(&ty, allow_cpp_const) {
+            Ok(()) => Ok(ty),
+            Err(message) => Err(Rich::custom(span, message)),
+        },
+    )
     .boxed()
 }
 
@@ -8865,11 +9012,17 @@ fn rust_trait<'a>(
     rust_trait.boxed()
 }
 
-fn fn_generic_params<'a>()
--> impl Parser<'a, ParserInput<'a>, (Vec<&'a str>, Vec<ParsedRustType<'a>>), ZngParserExtra<'a>> + Clone
-{
-    select! { Token::Lifetime(l) => Either::Left(l) }
-        .or(rust_type().map(Either::Right))
+fn fn_generic_params<'a>(
+    allow_cpp_const: bool,
+) -> impl Parser<
+    'a,
+    ParserInput<'a>,
+    (Vec<&'a str>, Vec<ParsedRustType<'a>>, Option<Span>),
+    ZngParserExtra<'a>,
+> + Clone {
+    select! { Token::Lifetime(l) => l }
+        .map_with(|l, e| Either::Left((l, e.span())))
+        .or(rust_type_with_cpp_const(allow_cpp_const).map(Either::Right))
         .separated_by(just(Token::Comma))
         .at_least(1)
         .allow_trailing()
@@ -8877,21 +9030,30 @@ fn fn_generic_params<'a>()
         .delimited_by(just(Token::AngleOpen), just(Token::AngleClose))
         .or_not()
         .map(Option::unwrap_or_default)
-        .try_map(|params, span| {
+        .try_map(move |params, _span| {
             let lifetimes: Vec<&str> = params
                 .iter()
-                .map_while(|p| p.as_ref().left().copied())
+                .map_while(|p| p.as_ref().left().map(|(l, _)| *l))
                 .collect();
-            let generics: Vec<ParsedRustType<'_>> = params
-                .into_iter()
-                .skip(lifetimes.len())
-                .map(|p| {
-                    p.right().ok_or_else(|| {
-                        Rich::custom(span, "lifetime parameters must come before type arguments")
-                    })
-                })
-                .collect::<Result<_, _>>()?;
-            Ok((lifetimes, generics))
+            let mut misplaced_lifetime = None;
+            let mut generics = Vec::new();
+            for p in params.into_iter().skip(lifetimes.len()) {
+                match p {
+                    Either::Right(ty) => generics.push(ty),
+                    Either::Left((_, lt_span)) => {
+                        if !allow_cpp_const {
+                            return Err(Rich::custom(
+                                lt_span,
+                                "lifetime parameters must come before type arguments",
+                            ));
+                        }
+                        if misplaced_lifetime.is_none() {
+                            misplaced_lifetime = Some(lt_span);
+                        }
+                    }
+                }
+            }
+            Ok((lifetimes, generics, misplaced_lifetime))
         })
         .boxed()
 }
@@ -8918,18 +9080,20 @@ fn method_signature<'a>()
         .then(select! {
             Token::Ident(c) => c,
         })
-        .then(fn_generic_params())
+        .then(fn_generic_params(false))
         .then(fn_args(rust_type()))
-        .try_map(|(((opt_async, name), (lifetimes, generics)), args), span| {
-            parsed_method_from_signature(
-                name,
-                opt_async.map(|x| x.span),
-                lifetimes,
-                generics,
-                args,
-                span,
-            )
-        })
+        .try_map(
+            |(((opt_async, name), (lifetimes, generics, _)), args), span| {
+                parsed_method_from_signature(
+                    name,
+                    opt_async.map(|x| x.span),
+                    lifetimes,
+                    generics,
+                    args,
+                    span,
+                )
+            },
+        )
         .boxed()
 }
 
@@ -9220,7 +9384,7 @@ fn inner_type_item<'a>()
             .then(spanned(just(Token::KwAsync)).or_not())
             .then_ignore(just(Token::KwFn))
             .then(cpp_name_with_ident_flag())
-            .then(fn_generic_params())
+            .then(fn_generic_params(true))
             .then(fn_params)
             .then(just(Token::KwConst).or_not().map(|c| c.is_some()))
             .then(just(Token::Arrow).ignore_then(rust_type()).or_not())
@@ -9252,7 +9416,7 @@ fn inner_type_item<'a>()
                         (
                             (
                                 (((is_safe, is_static), opt_async), (name, name_is_ident)),
-                                (lifetimes, generics),
+                                (lifetimes, generics, misplaced_lifetime),
                             ),
                             inputs,
                         ),
@@ -9268,6 +9432,7 @@ fn inner_type_item<'a>()
                     name_is_ident,
                     lifetimes,
                     generics,
+                    misplaced_lifetime,
                     inputs,
                     is_const,
                     output: output.unwrap_or(ParsedRustType::Tuple(vec![])),
@@ -9429,7 +9594,7 @@ fn fn_item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngParserEx
             .or_not()
             .then_ignore(just(Token::KwFn))
             .then(fn_path)
-            .then(fn_generic_params())
+            .then(fn_generic_params(true))
             .then(fn_args(rust_type()))
             .then(
                 just(Token::KwAs)
@@ -9443,7 +9608,10 @@ fn fn_item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngParserEx
             let (is_safe, sig) = outer.inner;
             let sig_span = sig.span;
             let (
-                (((opt_async, (path, name_is_ident)), (lifetimes, generics)), (inputs, output)),
+                (
+                    ((opt_async, (path, name_is_ident)), (lifetimes, generics, misplaced_lifetime)),
+                    (inputs, output),
+                ),
                 alias,
             ) = sig.inner;
             ParsedItem::Fn(Spanned {
@@ -9454,6 +9622,7 @@ fn fn_item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngParserEx
                     name_is_ident,
                     lifetimes,
                     generics,
+                    misplaced_lifetime,
                     inputs,
                     output,
                     alias,

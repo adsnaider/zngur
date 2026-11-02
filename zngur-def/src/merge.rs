@@ -344,7 +344,7 @@ fn align_type_lifetimes(src: &mut ZngurType, dst_lifetimes: &[Lifetime], dst_ty:
             let mut tmp = ZngurMethod {
                 name: m.rust_name().to_owned(),
                 lifetimes: m.lifetimes.clone(),
-                generics: vec![],
+                generics: std::mem::take(&mut m.template_args),
                 receiver: match &m.receiver {
                     crate::CppMethodReceiver::Static | crate::CppMethodReceiver::Raw { .. } => {
                         ZngurMethodReceiver::Static
@@ -360,6 +360,7 @@ fn align_type_lifetimes(src: &mut ZngurType, dst_lifetimes: &[Lifetime], dst_ty:
             };
             align_method_lifetimes(&mut tmp, None, &src.lifetimes, dst_lifetimes, &mut avoid);
             m.lifetimes = tmp.lifetimes;
+            m.template_args = tmp.generics;
             if let crate::CppMethodReceiver::Ref { lifetime, .. } = &mut m.receiver {
                 *lifetime = tmp.receiver_lifetime;
             }
@@ -493,6 +494,7 @@ fn canonicalize_cpp_method(m: &crate::ZngurCppMethod) -> crate::ZngurCppMethod {
         lifetimes: (0..outer.len())
             .map(|i| Lifetime(format!("__outer_{i}")))
             .collect(),
+        template_args: m.template_args.iter().map(canon_ty).collect(),
         rust_name: m.rust_name.clone(),
         receiver,
         inputs: m.inputs.iter().map(canon_ty).collect(),
@@ -733,6 +735,11 @@ fn canonicalize_cpp_fn(f: &crate::ZngurCppFn) -> crate::ZngurCppFn {
     crate::ZngurCppFn {
         namespace: f.namespace.clone(),
         cpp_name: f.cpp_name.clone(),
+        template_args: f
+            .template_args
+            .iter()
+            .map(|t| t.canonicalize_lifetimes(outer))
+            .collect(),
         rust_name: f.rust_name.clone(),
         lifetimes: (0..outer.len())
             .map(|i| Lifetime(format!("__outer_{i}")))

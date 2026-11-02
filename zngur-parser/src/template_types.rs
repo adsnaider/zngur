@@ -557,6 +557,11 @@ fn substitute_cpp_method_vars(
     Ok(ZngurCppMethod {
         cpp_name: m.cpp_name.clone(),
         lifetimes: sub.new_lifetimes.clone(),
+        template_args: m
+            .template_args
+            .iter()
+            .map(|ty| sub.sub_ty(ty))
+            .collect::<Result<_, _>>()?,
         rust_name: m.rust_name.clone(),
         receiver,
         inputs: m
@@ -675,7 +680,6 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
         if matches!(ty, RustType::Cpp(_))
             && let Some(is_safe) = m.data.is_safe
             && m.data.receiver == ZngurMethodReceiver::Static
-            && m.data.generics.is_empty()
             && m.use_path.is_none()
             && m.deref.is_none()
         {
@@ -684,6 +688,7 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
             new_cpp_methods.push(ZngurCppMethod {
                 cpp_name,
                 lifetimes: m.data.lifetimes,
+                template_args: m.data.generics,
                 rust_name,
                 receiver: CppMethodReceiver::Static,
                 inputs: m.data.inputs,

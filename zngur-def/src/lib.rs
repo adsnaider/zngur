@@ -855,7 +855,7 @@ impl ZngurType {
             {
                 out.insert(rl.clone());
             }
-            for t in m.inputs.iter().chain([&m.output]) {
+            for t in m.inputs.iter().chain([&m.output]).chain(&m.template_args) {
                 out.extend(t.all_lifetimes());
             }
         }
@@ -1003,6 +1003,8 @@ pub struct ZngurCppMethod {
     pub cpp_name: String,
     /// The lifetime parameters that it declares (`fn get<'a>(&'a const self) -> &'a const i32;`).
     pub lifetimes: Vec<Lifetime>,
+    /// Explicit template arguments of a member function template (`fn get<i32>() -> i32;`).
+    pub template_args: Vec<RustType>,
     /// The name of the Rust function (from `as`), if it isn't `cpp_name`.
     pub rust_name: Option<String>,
     pub receiver: CppMethodReceiver,
@@ -1022,6 +1024,11 @@ impl ZngurCppMethod {
         Self {
             cpp_name: self.cpp_name.clone(),
             lifetimes: vec![],
+            template_args: self
+                .template_args
+                .iter()
+                .map(RustType::with_erased_lifetimes)
+                .collect(),
             rust_name: self.rust_name.clone(),
             receiver: self.receiver.with_erased_lifetimes(),
             inputs: self
@@ -1150,6 +1157,9 @@ pub struct ZngurCppFn {
     pub namespace: Vec<String>,
     /// The name of the C++ function.
     pub cpp_name: String,
+    /// Explicit template arguments of a function template, e.g. `c++::geo::Point` for
+    /// `std::make_unique<c++::geo::Point>(i32, i32)`.
+    pub template_args: Vec<RustType>,
     /// The name of the Rust function (from `as`), if it isn't `cpp_name`.
     pub rust_name: Option<String>,
     /// The lifetime parameters that it declares.
@@ -1165,14 +1175,33 @@ impl ZngurCppFn {
         self.rust_name.as_deref().unwrap_or(&self.cpp_name)
     }
 
-    /// The qualified C++ name, e.g. `::ns::f`.
+    /// The qualified C++ name, with the template arguments, e.g. `::ns::f` or
+    /// `::std::make_unique< ::geo::Point >`.
     pub fn cpp_path(&self) -> String {
-        self.namespace
+        let path: String = self
+            .namespace
             .iter()
             .chain([&self.cpp_name])
             .map(|s| format!("::{s}"))
-            .collect()
+            .collect();
+        path + &cpp_template_args(&self.template_args)
     }
+}
+
+/// The C++ spelling of explicit template arguments (`< ::a::B, ::int32_t >`), or `""` if there are
+/// none.
+pub fn cpp_template_args(args: &[RustType]) -> String {
+    if args.is_empty() {
+        return String::new();
+    }
+    let args: Vec<String> = args
+        .iter()
+        .map(|arg| {
+            arg.cpp_spelling()
+                .unwrap_or_else(|_| format!("/* unsupported template argument: {arg} */"))
+        })
+        .collect();
+    format!("< {} >", args.join(", "))
 }
 
 #[derive(Debug, PartialEq)]
