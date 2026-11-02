@@ -1,17 +1,32 @@
 import "packet.zng";
 
+// Other modules refer to `c++::cpp_stats::StatsAccumulator`, and find its Rust wrapper at
+// `::aggregation::generated::cpp_stats::StatsAccumulator`.
+#crate aggregation
+
 #cpp_additional_includes "
 #include <stats.h>
 "
 
-type crate::StatsAccumulator {
-    #layout(size = 16, align = 8);
-    #cpp_heap_allocated "::cpp_stats::StatsAccumulator";
+// This module is the home of `std::unique_ptr`: modules that import it share its Rust alias
+// (`generated::std::unique_ptr<T>`), and these members are the defaults for every instantiation,
+// including theirs (see processor.zng).
+type<T> c++::std::unique_ptr<T> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+    // The owned object, if any, borrowed from the `unique_ptr` (a C++ pointer, null if it's empty).
+    safe fn get<'a>(&'a const self) -> ::std::option::Option<&'a var T>;
+    safe fn get<'a>(&'a unique var self) -> ::std::option::Option<&'a unique var T> as get_mut;
 }
 
+// Rust only refers to the C++ object, which is owned through a `std::unique_ptr`.
+type c++::cpp_stats::StatsAccumulator {}
+
+type c++::std::unique_ptr<c++::cpp_stats::StatsAccumulator> {}
+
 extern "C++" {
-    impl crate::StatsAccumulator {
-        safe fn create() -> crate::StatsAccumulator;
+    impl c++::cpp_stats::StatsAccumulator {
+        safe fn create() -> c++::std::unique_ptr<c++::cpp_stats::StatsAccumulator>;
         safe fn add_packet(&mut self, packet::Packet);
         safe fn print_report(&self);
     }

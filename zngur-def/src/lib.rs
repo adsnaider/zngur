@@ -1083,25 +1083,59 @@ pub struct ModuleImport {
     pub path: std::path::PathBuf,
     /// The `#crate` of the imported module, if it has one.
     pub crate_name: Option<String>,
-    /// The `c++::` types that the imported module declares (their paths, without `c++::`). Their
-    /// Rust wrappers live at `::<crate_name>::generated::<path>`.
+    /// The `c++::` types that the imported module declares (their paths, without `c++::`), other
+    /// than instantiations of C++ class templates. Their Rust wrappers live at
+    /// `::<crate_name>::generated::<path>`.
     pub cpp_types: Vec<Vec<String>>,
     /// Concrete instantiations of C++ class templates declared in the imported module (with erased
-    /// lifetimes). Each entry has non-empty `generics`, and its `path` is also in `cpp_types`.
+    /// lifetimes). Each entry has non-empty `generics`, and its `path` is also in `cpp_templates`.
     pub cpp_template_instantiations: Vec<CppTypePath>,
     /// Subset of `cpp_types` declared with `#cpp_heap_allocated`.
     pub cpp_heap_allocated_types: Vec<Vec<String>>,
-    /// The `c++::` types from this module that Rust holds by value, paired with their C++
-    /// spelling.
+    /// The `c++::` types of the imported module that Rust holds by value (including template
+    /// instantiations), with their C++ types: C++ functions of this module that take or return
+    /// them by value move them like this module's own.
     pub cpp_by_value_types: Vec<(RustType, String)>,
+    /// The C++ class templates whose home is the imported module (see
+    /// [`ZngurSpec::cpp_template_homes`]).
+    pub cpp_template_homes: Vec<CppTemplateHome>,
+    /// All C++ class templates instantiated or homed in the imported module (their paths, without
+    /// `c++::`). Re-exporting their Rust aliases from `::<crate_name>::generated::<path>` lets this
+    /// module name the imported module's instantiations without directly importing the template's
+    /// home.
+    pub cpp_templates: Vec<Vec<String>>,
+}
+
+/// A C++ class template whose home is a module: the module that defines the Rust alias for its
+/// instantiations (`pub type unique_ptr<T> = <T as __ZngurCppTemplate_unique_ptr>::Type;`), and
+/// the trait through which each instantiation names its Rust struct.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CppTemplateHome {
+    /// The path of the template, without `c++::` (e.g. `["std", "unique_ptr"]`).
+    pub path: Vec<String>,
+    /// The number of template arguments.
+    pub arity: usize,
+    /// Whether the home declares a template (`type<T> c++::...`) for it, rather than just being
+    /// the only module that instantiates it. Only explicit homes can be shared: other modules that
+    /// import them can declare instantiations of the template too.
+    pub explicit: bool,
 }
 
 #[derive(Debug, Default, PartialEq)]
 pub struct ZngurSpec {
     pub imported_modules: Vec<ModuleImport>,
     pub types: Vec<ZngurType>,
+    /// Templates of C++ class templates (`type<T> c++::std::unique_ptr<T> { ... }`) declared in
+    /// this module. Their members are defaults for every instantiation, including those in modules
+    /// that import this one, and this module is the template's home.
+    pub cpp_templates: Vec<ZngurType>,
+    /// The C++ class templates whose home is this module: those it declares a template for, and
+    /// those it instantiates without a template being declared in it or a module it imports.
+    /// Computed by the parser.
+    pub cpp_template_homes: Vec<CppTemplateHome>,
     pub traits: IndexMap<RustTrait, ZngurTrait>,
     pub funcs: Vec<ZngurFn>,
+    /// Free C++ functions that Rust can call, declared in `c++::` scopes.
     pub cpp_funcs: Vec<ZngurCppFn>,
     pub extern_cpp_funcs: Vec<ZngurExternCppFn>,
     pub extern_cpp_impls: Vec<ZngurExternCppImpl>,

@@ -387,9 +387,9 @@ impl WriteIDL for crate::ZngurSpec {
                 "#cpp_additional_includes r{hashes}\"{includes}\"{hashes}"
             )?;
         }
-        if !self.types.is_empty() && p.enabled(&IDLItem::Type) {
+        if (!self.types.is_empty() || !self.cpp_templates.is_empty()) && p.enabled(&IDLItem::Type) {
             separate(p)?;
-            for (i, ty) in self.types.iter().enumerate() {
+            for (i, ty) in self.cpp_templates.iter().chain(&self.types).enumerate() {
                 if i > 0 {
                     writeln!(p)?;
                 }
@@ -621,7 +621,7 @@ impl WriteIDL for crate::ZngurCppFn {
 impl WriteIDL for crate::ZngurType {
     fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
         if p.enabled(&IDLItem::Type) {
-            // Templates (`type<T> crate::Foo<T>`) list their type variables, after the
+            // Templates (`type<T> c++::std::unique_ptr<T>`) list their type variables, after the
             // type's lifetime parameters (`type<'a> crate::Parser<'a>`).
             let type_vars = self.ty.type_vars();
             let params: Vec<String> = self

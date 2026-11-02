@@ -1,13 +1,13 @@
-//! The Rust side of C++ class templates. Each C++ class template defines a Rust alias for its
-//! instantiations, and a trait through which each instantiation names its Rust struct (generic
-//! over its constness, like every C++ type's struct):
+//! The Rust side of C++ class templates. Each C++ class template has a home module, which defines
+//! a Rust alias for its instantiations, and a trait through which each instantiation names its
+//! Rust struct (generic over its constness, like every C++ type's struct):
 //!
 //! ```ignore
-//! // In the template's module (e.g. `generated::std`):
+//! // In the home (e.g. `generated::std`):
 //! pub trait __ZngurCppTemplate_unique_ptr<C: Constness = NonConst> { type Type; }
 //! pub type unique_ptr<T0, C = NonConst> = <T0 as __ZngurCppTemplate_unique_ptr<C>>::Type;
 //!
-//! // At the root, for `c++::std::unique_ptr<c++::a::B>`:
+//! // In the module that declares `c++::std::unique_ptr<c++::a::B>`:
 //! pub struct __zngur_std_unique_ptr_a_B_cpp_template_m22e30s10s22<C: Constness = NonConst> { ... }
 //! impl<C: Constness> std::__ZngurCppTemplate_unique_ptr<C> for a::B {
 //!     type Type = __zngur_std_unique_ptr_a_B_cpp_template_m22e30s10s22<C>;
@@ -15,14 +15,16 @@
 //! ```
 //!
 //! So Rust code names instantiations the way C++ code does (`unique_ptr<a::B>`), while each
-//! instantiation is a plain struct, with ordinary inherent and trait impls. Templates with more
-//! arguments pass the others to the trait:
+//! instantiation is a plain struct in the crate that declares it, with ordinary inherent and trait
+//! impls. The orphan rule allows implementing the home's trait for the template arguments when
+//! one of them is declared in that crate, which is where the parser allows instantiations outside
+//! the home. Templates with more arguments pass the others to the trait:
 //! `pub type map<T0, T1, C = NonConst> = <T0 as __ZngurCppTemplate_map<T1, C>>::Type;`. The last
 //! parameter is the constness: `unique_ptr<a::B, Const>` is a `const std::unique_ptr<a::B>`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use zngur_def::{CppTypePath, RustType, ZngurType};
+use zngur_def::{CppTemplateHome, CppTypePath, ModuleImport, RustType, ZngurType};
 
 use crate::CppModuleTree;
 use crate::rust::RustFile;
@@ -49,30 +51,45 @@ fn trait_name(path: &[String]) -> String {
 }
 
 impl CppTemplates {
-    /// Emits the alias and trait of each C++ class template instantiated in `types`, and registers
-    /// the Rust structs of the instantiations as the targets of their inherent `impl` blocks.
+    /// Emits the alias and trait of each template in `homes`, re-exports the aliases of templates
+    /// whose home or instantiations come from an imported module, and registers the Rust structs
+    /// of the instantiations in `types` as the targets of their inherent `impl` blocks.
     pub fn new(
+        homes: &[CppTemplateHome],
+        imported_modules: &[ModuleImport],
         types: &[ZngurType],
+        local_cpp_fn_paths: &HashSet<Vec<String>>,
         rust_file: &mut RustFile,
         cpp_tree: &mut CppModuleTree,
     ) -> Self {
         let mut trait_paths = HashMap::new();
+        let mut emitted_aliases: HashSet<Vec<String>> = HashSet::new();
+        // Templates instantiated in `types` without a known home (e.g. in a spec that wasn't
+        // parsed) are homed here too, like the parser does.
+        let mut homes = homes.to_vec();
         for ty_def in types {
             let erased = ty_def.ty.with_anonymous_lifetimes();
-            let Some(template) = cpp_template(&erased) else {
-                continue;
-            };
-            rust_file
-                .impl_targets
-                .insert(erased.to_string(), struct_name(template));
-            if trait_paths.contains_key(&template.path) {
+            if let Some(template) = cpp_template(&erased)
+                && !homes.iter().any(|h| h.path == template.path)
+                && !imported_modules
+                    .iter()
+                    .flat_map(|m| &m.cpp_template_homes)
+                    .any(|h| h.path == template.path)
+            {
+                homes.push(CppTemplateHome {
+                    path: template.path.clone(),
+                    arity: template.generics.len(),
+                    explicit: false,
+                });
+            }
+        }
+        for CppTemplateHome { path, arity, .. } in &homes {
+            if !emitted_aliases.insert(path.clone()) {
                 continue;
             }
-            let path = &template.path;
-            let arity = template.generics.len();
             let (name, module_path) = path.split_last().expect("C++ template paths aren't empty");
             let trait_name = trait_name(path);
-            let params = (0..arity).map(|n| format!("T{n}")).collect::<Vec<_>>();
+            let params = (0..*arity).map(|n| format!("T{n}")).collect::<Vec<_>>();
             let other_params: String = params[1..].iter().map(|p| format!("{p}, ")).collect();
             cpp_tree.insert(
                 module_path,
@@ -104,9 +121,108 @@ impl CppTemplates {
                     .join("::"),
             );
         }
+        let reexport_alias_item = |crate_name: &str, path: &[String], arity: Option<usize>| {
+            let (name, _) = path.split_last().expect("C++ template paths aren't empty");
+            if local_cpp_fn_paths.contains(path)
+                && let Some(arity) = arity
+            {
+                let params = (0..arity)
+                    .map(|n| format!("T{n}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "\n#[allow(dead_code, non_camel_case_types)]\npub type {name}<{params}, C = \
+                     ::zngur_lib::NonConst> = ::{crate_name}::generated::{}<{params}, C>;\n",
+                    path.join("::")
+                )
+            } else {
+                format!(
+                    "\n#[allow(unused_imports)]\npub use ::{crate_name}::generated::{};\n",
+                    path.join("::")
+                )
+            }
+        };
+        for module in imported_modules {
+            let Some(crate_name) = &module.crate_name else {
+                continue;
+            };
+            let crate_name = crate_name.replace('-', "_");
+            for CppTemplateHome { path, arity, .. } in &module.cpp_template_homes {
+                let (_, module_path) = path.split_last().expect("C++ template paths aren't empty");
+                if emitted_aliases.insert(path.clone()) {
+                    cpp_tree.insert(
+                        module_path,
+                        &reexport_alias_item(&crate_name, path, Some(*arity)),
+                    );
+                }
+                trait_paths.entry(path.clone()).or_insert_with(|| {
+                    format!(
+                        "::{crate_name}::generated::{}",
+                        module_path
+                            .iter()
+                            .chain([&trait_name(path)])
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join("::")
+                    )
+                });
+            }
+        }
+        // Also re-export template aliases from imported modules that instantiate (or re-export) a
+        // C++ template whose home isn't directly imported here, so signatures using those
+        // imported instantiations resolve in Rust.
+        for module in imported_modules {
+            let Some(crate_name) = &module.crate_name else {
+                continue;
+            };
+            let crate_name = crate_name.replace('-', "_");
+            for path in &module.cpp_templates {
+                let Some((_, module_path)) = path.split_last() else {
+                    continue;
+                };
+                if emitted_aliases.insert(path.clone()) {
+                    let arity = module
+                        .cpp_template_homes
+                        .iter()
+                        .find(|h| &h.path == path)
+                        .map(|h| h.arity)
+                        .or_else(|| {
+                            module
+                                .cpp_template_instantiations
+                                .iter()
+                                .find(|i| &i.path == path)
+                                .map(|i| i.generics.len())
+                        })
+                        .or_else(|| {
+                            imported_modules.iter().find_map(|m| {
+                                m.cpp_template_homes
+                                    .iter()
+                                    .find(|h| &h.path == path)
+                                    .map(|h| h.arity)
+                                    .or_else(|| {
+                                        m.cpp_template_instantiations
+                                            .iter()
+                                            .find(|i| &i.path == path)
+                                            .map(|i| i.generics.len())
+                                    })
+                            })
+                        });
+                    cpp_tree.insert(module_path, &reexport_alias_item(&crate_name, path, arity));
+                }
+            }
+        }
+        for ty_def in types {
+            let erased = ty_def.ty.with_anonymous_lifetimes();
+            if let Some(template) = cpp_template(&erased) {
+                rust_file
+                    .impl_targets
+                    .insert(erased.to_string(), struct_name(template));
+            }
+        }
         CppTemplates { trait_paths }
     }
 
+    /// Implements the template's trait for `ty`, mapping its parameters to [`struct_name`].
     pub fn add_instantiation(&self, rust_file: &mut RustFile, ty: &CppTypePath) {
         let trait_path = &self.trait_paths[&ty.path];
         let (first, rest) = ty

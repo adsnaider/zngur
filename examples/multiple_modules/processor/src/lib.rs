@@ -1,6 +1,10 @@
 pub use aggregation::StatsAccumulator;
 pub use receiver::Receiver;
 
+use generated::cpp_processor::RunConfig;
+use generated::std::unique_ptr;
+use zngur_lib::Const;
+
 pub struct Processor;
 
 impl Processor {
@@ -12,9 +16,11 @@ impl Processor {
         &self,
         receiver: &mut receiver::Receiver,
         stats: &mut aggregation::StatsAccumulator,
-        count: u32,
+        config: &unique_ptr<RunConfig, Const>,
     ) {
-        for _ in 0..count {
+        let config = config.get().expect("no run config");
+        let packets = config.packets().get();
+        for _ in 0..packets {
             let packet = receiver.next_packet();
             stats.add_packet(packet);
         }

@@ -2,8 +2,9 @@ use std::panic::catch_unwind;
 
 use expect_test::{Expect, expect};
 use zngur_def::{
-    CppHeapAllocated, CppIndirection, CppRef, CppStackOwned, CppTypePath, LayoutPolicy, Lifetime,
-    Mutability, PrimitiveRustType, RustPathAndGenerics, RustType, TriviallyRelocatable, ZngurSpec,
+    CppHeapAllocated, CppIndirection, CppRef, CppStackOwned, CppTemplateHome, CppTypePath,
+    LayoutPolicy, Lifetime, Mutability, PrimitiveRustType, RustPathAndGenerics, RustType,
+    TriviallyRelocatable, ZngurSpec,
 };
 
 use crate::{
@@ -734,9 +735,13 @@ impl ImportResolver for MockFilesystem {
         relpath: &std::path::Path,
     ) -> Result<String, String> {
         let path = cwd.join(relpath);
+        if let Some(content) = self.files.get(&path) {
+            return Ok(content.clone());
+        }
+        let norm = crate::normalize_lexical_path(&path);
         self.files
-            .get(&path)
-            .cloned()
+            .iter()
+            .find_map(|(k, v)| (crate::normalize_lexical_path(k) == norm).then(|| v.clone()))
             .ok_or_else(|| format!("File not found: {}", path.display()))
     }
 }
@@ -2631,7 +2636,7 @@ fn duplicate_module_import_across_merged_files_succeeds() {
         &resolver,
         |w| panic!("unexpected warning: {w}"),
     );
-    assert_eq!(parsed.spec.imported_modules.len(), 2);
+    assert_eq!(parsed.spec.imported_modules.len(), 1);
     let bar_count = parsed
         .processed_files
         .iter()
@@ -7718,12 +7723,12 @@ type c++::std::vector<i32, c++::MyAlloc> {
 }
 "#,
         expect![[r#"
-            Error: every instantiation of `c++::std::vector` must have the same number of template arguments as its first instantiation, which has 1
+            Error: every instantiation of `c++::std::vector` must have the same number of template arguments as its template and its other instantiations, which have 1
                ╭─[ test.zng:5:6 ]
                │
              5 │ type c++::std::vector<i32, c++::MyAlloc> {
                │      ─────────────────┬─────────────────  
-               │                       ╰─────────────────── every instantiation of `c++::std::vector` must have the same number of template arguments as its first instantiation, which has 1
+               │                       ╰─────────────────── every instantiation of `c++::std::vector` must have the same number of template arguments as its template and its other instantiations, which have 1
             ───╯
         "#]],
     );
@@ -7775,12 +7780,12 @@ type c++::std::unique_ptr<i64> {
 }
 "#,
         expect![[r#"
-            Error: `c++::std::unique_ptr` is declared in an imported module, so its instantiations must be declared there too
+            Error: `c++::std::unique_ptr` is also instantiated in imported module `./bar.zng`; to share a C++ class template between modules, declare `type<T> c++::std::unique_ptr<...>` in one of them (its home)
                ╭─[ test.zng:4:6 ]
                │
              4 │ type c++::std::unique_ptr<i64> {
                │      ────────────┬────────────  
-               │                  ╰────────────── `c++::std::unique_ptr` is declared in an imported module, so its instantiations must be declared there too
+               │                  ╰────────────── `c++::std::unique_ptr` is also instantiated in imported module `./bar.zng`; to share a C++ class template between modules, declare `type<T> c++::std::unique_ptr<...>` in one of them (its home)
             ───╯
         "#]],
         &resolver,
@@ -7901,8 +7906,6 @@ fn cpp_template_type_definitions_with_const_and_pointer_args() {
 
     let parsed = parse_str(
         r#"
-#unstable(template_types)
-
 type<T> c++::Pair<T> {
     #layout(size = 16, align = 8);
     #trivially_relocatable;
@@ -7953,8 +7956,7 @@ type c++::Node {}
         ),
     ] {
         let src = format!(
-            "#unstable(template_types)\n\
-             type<T> c++::Box<T> {{ #layout(size = 4, align = 4); #trivially_relocatable; {member} }}\n\
+            "type<T> c++::Box<T> {{ #layout(size = 4, align = 4); #trivially_relocatable; {member} }}\n\
              type c++::Box<const i32> {{}}\n"
         );
         let r = catch_unwind(|| {
@@ -8080,12 +8082,12 @@ mod c++::ns {
     for (src, expected, unexpected) in [
         (
             "import \"./bar.zng\";\nmod c++::ns { safe fn f<'a>(&'a const c++::Box<i64>); }\n",
-            "instantiation `c++::Box<i64>` of C++ class template `c++::Box` is not declared in `./bar.zng`; add `type c++::Box<i64> { ... }` there",
+            "instantiation `c++::Box<i64>` of C++ class template `c++::Box` is not declared; add `type c++::Box<i64> { ... }`",
             Some("cannot be passed or returned by value"),
         ),
         (
             "import \"./bar.zng\";\nmod c++::ns { safe fn f() -> c++::Box<i64>; }\n",
-            "instantiation `c++::Box<i64>` of C++ class template `c++::Box` is not declared in `./bar.zng`; add `type c++::Box<i64> { ... }` there",
+            "instantiation `c++::Box<i64>` of C++ class template `c++::Box` is not declared; add `type c++::Box<i64> { ... }`",
             Some("cannot be passed or returned by value"),
         ),
         (
@@ -8100,12 +8102,12 @@ mod c++::ns {
         ),
         (
             "import \"./bar.zng\";\nfn f(&const c++::Plain<i32>);\n",
-            "`c++::Plain` is declared as a plain C++ type in `./bar.zng`, so it cannot take template arguments",
+            "`c++::Plain` is declared as a plain C++ type, so it cannot take template arguments",
             None,
         ),
         (
             "import \"./bar.zng\";\ntype c++::Plain<i32> {}\n",
-            "`c++::Plain` is declared as a plain C++ type in an imported module, so it cannot be declared as a C++ class template",
+            "`c++::Plain` is already imported as a plain C++ type from `./bar.zng`",
             None,
         ),
     ] {
@@ -8371,4 +8373,1075 @@ type<T> c++::Box<T> {
         &fs_tpl_allow,
     );
     assert!(warnings_tpl_allow.is_empty());
+}
+
+fn unique_ptr_home() -> CppTemplateHome {
+    CppTemplateHome {
+        path: vec!["std".to_owned(), "unique_ptr".to_owned()],
+        arity: 1,
+        explicit: true,
+    }
+}
+
+const BAR_UNIQUE_PTR_HOME: &str = r#"
+#crate bar_bindings
+
+type<T> c++::std::unique_ptr<T> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+    unsafe fn get(&const self) -> T*;
+}
+"#;
+
+#[test]
+fn cpp_template_declares_a_local_home_with_defaults() {
+    let parsed = parse_str(
+        r#"
+type<T> c++::std::unique_ptr<T> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+    unsafe fn get(&const self) -> T*;
+}
+
+type c++::std::unique_ptr<i32> {
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    assert_eq!(parsed.spec.cpp_template_homes, vec![unique_ptr_home()]);
+    assert_eq!(parsed.spec.cpp_templates.len(), 1);
+    let [instantiation] = parsed.spec.types.as_slice() else {
+        panic!("expected one type");
+    };
+    assert_eq!(
+        instantiation.trivially_relocatable,
+        TriviallyRelocatable::Checked
+    );
+    assert_eq!(instantiation.cpp_methods.len(), 1);
+    assert_eq!(
+        instantiation.cpp_methods[0].output,
+        RustType::cpp_ptr(
+            Mutability::Mut,
+            CppIndirection::Pointer,
+            RustType::Primitive(PrimitiveRustType::Int(32))
+        )
+    );
+}
+
+#[test]
+fn cpp_template_without_a_visible_home_is_homed_implicitly() {
+    let parsed = parse_str(
+        r#"
+type c++::std::unique_ptr<i32> {
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    assert_eq!(
+        parsed.spec.cpp_template_homes,
+        vec![CppTemplateHome {
+            explicit: false,
+            ..unique_ptr_home()
+        }]
+    );
+}
+
+#[test]
+fn imported_cpp_template_home_applies_its_defaults() {
+    let resolver = MockFilesystem::new(vec![("./bar.zng", BAR_UNIQUE_PTR_HOME)]);
+    let parsed = parse_str_with_resolver(
+        r#"
+import "./bar.zng";
+
+type c++::a::B {
+}
+
+type c++::std::unique_ptr<c++::a::B> {
+}
+"#,
+        NullCfg,
+        &resolver,
+        |_| {},
+    );
+    let [module] = parsed.spec.imported_modules.as_slice() else {
+        panic!("expected one imported module");
+    };
+    assert_eq!(module.cpp_template_homes, vec![unique_ptr_home()]);
+    // Neither the template nor its home are this module's.
+    assert!(parsed.spec.cpp_template_homes.is_empty());
+    assert!(parsed.spec.cpp_templates.is_empty());
+    let instantiation = &parsed.spec.types[1];
+    assert_eq!(
+        instantiation.trivially_relocatable,
+        TriviallyRelocatable::Checked
+    );
+    assert_eq!(instantiation.cpp_methods.len(), 1);
+    assert_eq!(
+        instantiation.cpp_methods[0].output,
+        RustType::cpp_ptr(
+            Mutability::Mut,
+            CppIndirection::Pointer,
+            parsed.spec.types[0].ty.clone()
+        )
+    );
+}
+
+#[test]
+fn cpp_template_instantiation_without_a_local_argument_is_rejected() {
+    let resolver = MockFilesystem::new(vec![("./bar.zng", BAR_UNIQUE_PTR_HOME)]);
+    check_import_fail(
+        r#"
+import "./bar.zng";
+
+type i32 {
+    #layout(size = 4, align = 4);
+}
+
+type c++::std::unique_ptr<i32> {
+}
+"#,
+        expect![[r#"
+            Error: this instantiation of `c++::std::unique_ptr`, whose home is imported module `./bar.zng`, can only be declared there or in a module that declares one of its template arguments (like Rust's orphan rule)
+               ╭─[ test.zng:8:6 ]
+               │
+             8 │ type c++::std::unique_ptr<i32> {
+               │      ────────────┬────────────  
+               │                  ╰────────────── this instantiation of `c++::std::unique_ptr`, whose home is imported module `./bar.zng`, can only be declared there or in a module that declares one of its template arguments (like Rust's orphan rule)
+            ───╯
+        "#]],
+        &resolver,
+    );
+}
+
+#[test]
+fn cpp_template_with_an_imported_home_cant_be_declared_again() {
+    let resolver = MockFilesystem::new(vec![("./bar.zng", BAR_UNIQUE_PTR_HOME)]);
+    check_import_fail(
+        r#"
+import "./bar.zng";
+
+type<T> c++::std::unique_ptr<T> {
+}
+"#,
+        expect![[r#"
+            Error: `c++::std::unique_ptr` already has a home: imported module `./bar.zng`
+               ╭─[ test.zng:4:9 ]
+               │
+             4 │ type<T> c++::std::unique_ptr<T> {
+               │         ───────────┬───────────  
+               │                    ╰───────────── `c++::std::unique_ptr` already has a home: imported module `./bar.zng`
+            ───╯
+        "#]],
+        &resolver,
+    );
+}
+
+#[test]
+fn cpp_template_with_two_imported_homes_is_rejected() {
+    let resolver = MockFilesystem::new(vec![
+        ("./bar.zng", BAR_UNIQUE_PTR_HOME.to_owned()),
+        (
+            "./baz.zng",
+            BAR_UNIQUE_PTR_HOME.replace("bar_bindings", "baz_bindings"),
+        ),
+    ]);
+    check_import_fail(
+        r#"
+import "./bar.zng";
+import "./baz.zng";
+"#,
+        expect![[r#"
+            Error: imported modules `./bar.zng` and `./baz.zng` are both the home of `c++::std::unique_ptr`; a C++ class template can only have one home (declare `type<T> c++::std::unique_ptr<...>` in a module that both import)
+               ╭─[ test.zng:3:1 ]
+               │
+             3 │ import "./baz.zng";
+               │ ─────────┬─────────  
+               │          ╰─────────── imported modules `./bar.zng` and `./baz.zng` are both the home of `c++::std::unique_ptr`; a C++ class template can only have one home (declare `type<T> c++::std::unique_ptr<...>` in a module that both import)
+            ───╯
+        "#]],
+        &resolver,
+    );
+}
+
+#[test]
+fn cpp_template_multi_param_and_const_local_arguments() {
+    let resolver = MockFilesystem::new(vec![(
+        "./std_homes.zng",
+        r#"
+#crate std_homes
+
+type<K, V> c++::std::map<K, V> {
+    #layout(size = 48, align = 8);
+    #trivially_relocatable;
+}
+
+type<T> c++::std::span<T> {
+    #layout(size = 16, align = 8);
+    #trivially_relocatable;
+}
+
+type<T> c++::std::unique_ptr<T> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+}
+
+type<T> c++::std::vector<T> {
+    #layout(size = 24, align = 8);
+    #trivially_relocatable;
+}
+"#,
+    )]);
+
+    // Multi-parameter template with local type in non-first position and `const`-qualified local
+    // type argument both satisfy Rust's orphan rule.
+    let parsed = parse_str_with_resolver(
+        r#"
+import "./std_homes.zng";
+
+type c++::b::Val {}
+type c++::std::map<i32, c++::b::Val> {}
+type c++::std::span<const c++::b::Val> {}
+"#,
+        NullCfg,
+        &resolver,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    assert_eq!(parsed.spec.types.len(), 3);
+    assert_eq!(
+        parsed.spec.types[1].trivially_relocatable,
+        TriviallyRelocatable::Checked
+    );
+    assert_eq!(
+        parsed.spec.types[2].trivially_relocatable,
+        TriviallyRelocatable::Checked
+    );
+
+    // Builtins (including `const i32`), pointers/references to local types, and nested template
+    // instantiations (`<... as Trait>::Type` projections) are rejected outside the home.
+    for bad_instantiation in [
+        "type c++::std::span<const i32> {}",
+        "type c++::std::span<c++::b::Val*> {}",
+        "type c++::std::span<const c++::b::Val&> {}",
+        "type c++::std::unique_ptr<c++::b::Val> {}\ntype c++::std::vector<c++::std::unique_ptr<c++::b::Val>> {}",
+    ] {
+        let src =
+            format!("import \"./std_homes.zng\";\ntype c++::b::Val {{}}\n{bad_instantiation}\n");
+        let r = catch_unwind(|| {
+            let _ = parse_str_with_resolver(&src, NullCfg, &resolver, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains("can only be declared there or in a module that declares one of its template arguments"),
+            "unexpected error for `{bad_instantiation}`:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn cpp_template_transitive_dag_and_cycle_detection() {
+    // Diamond + depth-3 DAG: `test.zng` -> `m2.zng` -> `{m0.zng, m1.zng}` with `m1.zng` -> `m0.zng`.
+    // `m0` is the home of `unique_ptr`; `m1` instantiates `unique_ptr<m1::A>` with a constructor;
+    // `m2` passes `unique_ptr<m1::A>` by value; `test.zng` imports `m2` without directly importing
+    // `m0` or `m1`.
+    let resolver = MockFilesystem::new(vec![
+        (
+            "./m0.zng",
+            r#"
+#crate m0_bindings
+
+type<T> c++::std::unique_ptr<T> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+    unsafe fn get<'a>(&'a const self) -> T*;
+}
+"#,
+        ),
+        (
+            "./m1.zng",
+            r#"
+#crate m1_bindings
+import "./m0.zng";
+
+type c++::m1::A {}
+
+type c++::std::unique_ptr<c++::m1::A> {
+    safe constructor() as empty;
+}
+"#,
+        ),
+        (
+            "./m2.zng",
+            r#"
+#crate m2_bindings
+import "./m0.zng";
+import "./m1.zng";
+
+extern "C++" {
+    safe fn consume(c++::std::unique_ptr<c++::m1::A>);
+}
+"#,
+        ),
+    ]);
+
+    let parsed = parse_str_with_resolver(
+        r#"
+import "./m2.zng";
+"#,
+        NullCfg,
+        &resolver,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    let [m2] = parsed.spec.imported_modules.as_slice() else {
+        panic!("expected one imported module");
+    };
+    assert_eq!(m2.crate_name.as_deref(), Some("m2_bindings"));
+
+    // Direct 3-module chain `top -> mid -> home` where `top` takes `mid`'s instantiation by value
+    // without directly importing `home`.
+    let parsed_top = parse_str_with_resolver(
+        r#"
+import "./m1.zng";
+
+extern "C++" {
+    safe fn take_from_mid(c++::std::unique_ptr<c++::m1::A>);
+}
+"#,
+        NullCfg,
+        &resolver,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    let [m1] = parsed_top.spec.imported_modules.as_slice() else {
+        panic!("expected one imported module");
+    };
+    assert_eq!(
+        m1.cpp_templates,
+        vec![vec!["std".to_owned(), "unique_ptr".to_owned()]]
+    );
+    assert_eq!(m1.cpp_by_value_types.len(), 1);
+    assert_eq!(m1.cpp_by_value_types[0].1, "::std::unique_ptr< ::m1::A >");
+
+    // Cyclic `import`s are reported cleanly instead of recursing forever.
+    let cycle_resolver = MockFilesystem::new(vec![
+        ("./a.zng", "#crate a\nimport \"./b.zng\";\n"),
+        ("./b.zng", "#crate b\nimport \"./a.zng\";\n"),
+    ]);
+    let r = catch_unwind(|| {
+        let _ = parse_str_with_resolver("import \"./a.zng\";\n", NullCfg, &cycle_resolver, |_| {});
+    });
+    let err = r
+        .unwrap_err()
+        .downcast::<ErrorText>()
+        .expect("expected ErrorText")
+        .0;
+    assert!(
+        err.contains("cyclic module `import` involving"),
+        "expected cyclic module import error, got:\n{err}"
+    );
+}
+
+#[test]
+fn cpp_template_duplicate_module_imports_are_deduplicated() {
+    let resolver = MockFilesystem::new(vec![
+        ("./bar.zng", BAR_UNIQUE_PTR_HOME),
+        (
+            "./sub/part.zng",
+            r#"
+import "../bar.zng";
+
+type c++::a::C {}
+type c++::std::unique_ptr<c++::a::C> {}
+"#,
+        ),
+    ]);
+    let parsed = parse_str_with_resolver(
+        r#"
+import "./bar.zng";
+merge "./sub/part.zng";
+
+type c++::a::B {}
+type c++::std::unique_ptr<c++::a::B> {}
+"#,
+        NullCfg,
+        &resolver,
+        |_| {},
+    );
+    assert_eq!(parsed.spec.imported_modules.len(), 1);
+    assert_eq!(parsed.spec.types.len(), 4);
+    assert_eq!(parsed.spec.types[1].cpp_methods.len(), 1);
+    assert_eq!(parsed.spec.types[3].cpp_methods.len(), 1);
+}
+
+#[test]
+fn cpp_template_declaration_validation() {
+    // `type<T>` inside `mod c++::...` or via `use c++::...` is recognized as a C++ template
+    // without `#unstable(template_types)`.
+    let parsed = parse_str(
+        r#"
+mod c++::std {
+    type<T> unique_ptr<T> {
+        #layout(size = 8, align = 8);
+        #trivially_relocatable;
+    }
+}
+
+type c++::std::unique_ptr<i32> {}
+"#,
+        NullCfg,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    assert_eq!(parsed.spec.cpp_template_homes, vec![unique_ptr_home()]);
+
+    for (src, expected) in [
+        (
+            "mod crate { type<T> Foo<T> { #layout(size = 8, align = 8); } }\n",
+            "Template types are unstable. Enable them by using `#unstable(template_types)` at the top of the file.",
+        ),
+        (
+            "mod c++::std { type<'a, T> unique_ptr<T> {} }\n",
+            "`c++::` types don't have lifetime parameters",
+        ),
+        (
+            "type<T> c++::Foo {}\n",
+            "`c++::Foo` has no template arguments; C++ template declarations need template arguments",
+        ),
+        (
+            "type<T, U> c++::std::unique_ptr<T> { unsafe fn f(&const self) -> U*; }\n",
+            "type parameter `U` is not used in the template type",
+        ),
+        (
+            "type<T> c++::std::map<i32, i32> {}\n",
+            "type parameter `T` is not used in the template type",
+        ),
+        (
+            "type<T, T> c++::std::map<T, T> {}\n",
+            "type parameter `T` is declared twice",
+        ),
+        (
+            "type<T> c++::std::vector<T> {}\ntype<T, A> c++::std::vector<T, A> {}\n",
+            "every `type<...>` declaration of `c++::std::vector` must have the same number of template arguments",
+        ),
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(expected),
+            "expected `{expected}` for `{src}`, got:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn imported_cpp_template_conflict_and_layout_override() {
+    let resolver = MockFilesystem::new(vec![("./bar.zng", BAR_UNIQUE_PTR_HOME)]);
+
+    // Overriding `#layout` on an instantiation of an imported `type<T>` succeeds cleanly.
+    let parsed = parse_str_with_resolver(
+        r#"
+import "./bar.zng";
+
+type c++::a::CustomDeleterPtr {}
+type c++::std::unique_ptr<c++::a::CustomDeleterPtr> {
+    #layout(size = 16, align = 8);
+}
+"#,
+        NullCfg,
+        &resolver,
+        |_| {},
+    );
+    assert_eq!(
+        parsed.spec.types[1].layout,
+        Some(LayoutPolicy::StackAllocated { size: 16, align: 8 })
+    );
+
+    // An incompatible C++ method signature on an instantiation reports a conflict against the
+    // imported `type<T>`.
+    let r = catch_unwind(|| {
+        let _ = parse_str_with_resolver(
+            r#"
+import "./bar.zng";
+
+type c++::a::B {}
+type c++::std::unique_ptr<c++::a::B> {
+    safe fn get(&const self) -> i32;
+}
+"#,
+            NullCfg,
+            &resolver,
+            |_| {},
+        );
+    });
+    let err = r
+        .unwrap_err()
+        .downcast::<ErrorText>()
+        .expect("expected ErrorText")
+        .0;
+    assert!(
+        err.contains("Failed to apply template") && err.contains("C++ method mismatch"),
+        "expected template method conflict error, got:\n{err}"
+    );
+}
+
+#[test]
+fn cpp_template_three_hop_indirect_homes_and_conflicts() {
+    let resolver = MockFilesystem::new(vec![
+        ("./home.zng", BAR_UNIQUE_PTR_HOME.to_owned()),
+        (
+            "./home_alt.zng",
+            BAR_UNIQUE_PTR_HOME.replace("bar_bindings", "alt_bindings"),
+        ),
+        (
+            "./mid.zng",
+            r#"
+#crate mid_bindings
+import "./home.zng";
+
+type c++::mid::A {}
+type c++::std::unique_ptr<c++::mid::A> {}
+"#
+            .to_owned(),
+        ),
+        (
+            "./mid_alt.zng",
+            r#"
+#crate mid_alt_bindings
+import "./home_alt.zng";
+
+type c++::mid_alt::B {}
+type c++::std::unique_ptr<c++::mid_alt::B> {}
+"#
+            .to_owned(),
+        ),
+    ]);
+
+    // 1. `leaf -> mid -> home`: `leaf` can refer to `mid`'s instantiation without importing `home`,
+    //    and warnings from imported modules (`home.zng`'s elided `&const self`) are suppressed.
+    let parsed_leaf = parse_str_with_resolver(
+        r#"
+import "./mid.zng";
+
+extern "C++" {
+    safe fn inspect<'a>(&'a const c++::std::unique_ptr<c++::mid::A>);
+}
+"#,
+        NullCfg,
+        &resolver,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    assert!(parsed_leaf.spec.cpp_template_homes.is_empty());
+
+    // 2. Diamond `leaf -> {mid, home}` with indirect `mid` imported BEFORE direct `home` allows
+    //    `leaf` to declare its own instantiation using `home`.
+    let parsed_diamond = parse_str_with_resolver(
+        r#"
+import "./mid.zng";
+import "./home.zng";
+
+type c++::leaf::Item {}
+type c++::std::unique_ptr<c++::leaf::Item> {}
+"#,
+        NullCfg,
+        &resolver,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    assert_eq!(parsed_diamond.spec.types.len(), 2);
+    assert_eq!(parsed_diamond.spec.types[1].cpp_methods.len(), 1);
+
+    // 3. `leaf` cannot instantiate or re-home `unique_ptr` without directly importing `home.zng`,
+    //    and conflicting transitive homes (`mid` + `mid_alt`, or `mid` + `home_alt`) are rejected.
+    for (src, expected) in [
+        (
+            r#"
+import "./mid.zng";
+type c++::leaf::Item {}
+type c++::std::unique_ptr<c++::leaf::Item> {}
+"#,
+            "`c++::std::unique_ptr` already has a home (`#crate bar_bindings`, imported via `./mid.zng`), which is not directly imported here; `import` the home `.zng` file of `c++::std::unique_ptr` directly",
+        ),
+        (
+            r#"
+import "./mid.zng";
+type<T> c++::std::unique_ptr<T> {}
+"#,
+            "`c++::std::unique_ptr` already has a home (`#crate bar_bindings`, imported via `./mid.zng`)",
+        ),
+        (
+            r#"
+import "./mid.zng";
+import "./mid_alt.zng";
+"#,
+            "use different homes for `c++::std::unique_ptr`",
+        ),
+        (
+            r#"
+import "./mid.zng";
+import "./home_alt.zng";
+"#,
+            "use different homes for `c++::std::unique_ptr`",
+        ),
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str_with_resolver(src, NullCfg, &resolver, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(expected),
+            "expected `{expected}` for `{src}`, got:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn imported_plain_cpp_and_template_collisions_are_order_independent() {
+    let resolver = MockFilesystem::new(vec![
+        (
+            "./plain.zng",
+            "#crate plain_bindings\ntype c++::ns::Foo {}\n",
+        ),
+        (
+            "./template.zng",
+            "#crate template_bindings\ntype<T> c++::ns::Foo<T> {}\n",
+        ),
+    ]);
+
+    for src in [
+        "import \"./plain.zng\";\nimport \"./template.zng\";\n",
+        "import \"./template.zng\";\nimport \"./plain.zng\";\n",
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str_with_resolver(src, NullCfg, &resolver, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(
+                "`c++::ns::Foo` is imported both as a plain C++ type (`plain_bindings`) and as a C++ class template (`template_bindings`)"
+            ),
+            "unexpected error for `{src}`:\n{err}"
+        );
+    }
+
+    // Local plain `c++::` type colliding with an imported C++ class template is also rejected.
+    let r = catch_unwind(|| {
+        let _ = parse_str_with_resolver(
+            "import \"./template.zng\";\ntype c++::ns::Foo {}\n",
+            NullCfg,
+            &resolver,
+            |_| {},
+        );
+    });
+    let err = r
+        .unwrap_err()
+        .downcast::<ErrorText>()
+        .expect("expected ErrorText")
+        .0;
+    assert!(
+        err.contains("`c++::ns::Foo` is already imported from `./template.zng`"),
+        "unexpected error:\n{err}"
+    );
+}
+
+#[test]
+fn imported_cpp_template_rewrites_crate_paths_to_home_crate() {
+    let resolver = MockFilesystem::new(vec![(
+        "./home.zng",
+        r#"
+#crate home_bindings
+
+type crate::Tag {
+    #layout(size = 4, align = 4);
+}
+
+trait crate::HelperTrait {}
+
+type Box<dyn crate::HelperTrait> {
+    #layout(size = 16, align = 8);
+}
+
+type<T> c++::ns::Box<T> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+    safe constructor(crate::Tag) as from_tag;
+    safe fn into_tag<'a>(&'a const self, crate::Tag, Box<dyn crate::HelperTrait>) -> crate::Tag;
+}
+"#,
+    )]);
+
+    let parsed = parse_str_with_resolver(
+        r#"
+#crate downstream
+import "./home.zng";
+
+type c++::ds::Item {}
+type c++::ns::Box<c++::ds::Item> {}
+"#,
+        NullCfg,
+        &resolver,
+        |w| panic!("unexpected warning: {w}"),
+    );
+
+    let box_ty = &parsed.spec.types[1];
+    let expected_tag = RustType::Adt(RustPathAndGenerics {
+        path: vec!["home_bindings".to_owned(), "Tag".to_owned()],
+        ..Default::default()
+    });
+    let expected_helper = RustType::Boxed(Box::new(RustType::Dyn(
+        zngur_def::RustTrait::Normal(RustPathAndGenerics {
+            path: vec!["home_bindings".to_owned(), "HelperTrait".to_owned()],
+            ..Default::default()
+        }),
+        vec![],
+    )));
+    assert_eq!(
+        box_ty.cpp_constructors[0].inputs,
+        vec![expected_tag.clone()]
+    );
+    assert_eq!(
+        box_ty.cpp_methods[0].inputs,
+        vec![expected_tag.clone(), expected_helper]
+    );
+    assert_eq!(box_ty.cpp_methods[0].output, expected_tag);
+    assert_eq!(
+        box_ty.cpp_methods[0].output.to_string(),
+        "::home_bindings::Tag"
+    );
+}
+
+#[test]
+fn transitive_cpp_template_home_propagates_across_unused_middle_module() {
+    // `mid.zng` imports `home.zng` without instantiating or mentioning `c++::std::unique_ptr`.
+    // `leaf.zng` importing `mid.zng` must still know that `home.zng` owns `unique_ptr`.
+    let resolver = MockFilesystem::new(vec![
+        ("./home.zng", BAR_UNIQUE_PTR_HOME.to_owned()),
+        (
+            "./other_home.zng",
+            BAR_UNIQUE_PTR_HOME.replace("bar_bindings", "other_bindings"),
+        ),
+        (
+            "./mid.zng",
+            "#crate mid_bindings\nimport \"./home.zng\";\ntype c++::mid::Thing {}\n".to_owned(),
+        ),
+        (
+            "./plain_unique_ptr.zng",
+            "#crate plain_bindings\ntype c++::std::unique_ptr {}\n".to_owned(),
+        ),
+    ]);
+
+    for (src, expected) in [
+        (
+            "import \"./mid.zng\";\ntype c++::leaf::Item {}\ntype c++::std::unique_ptr<c++::leaf::Item> {}\n",
+            "`c++::std::unique_ptr` already has a home (`#crate bar_bindings`, imported via `./mid.zng`), which is not directly imported here",
+        ),
+        (
+            "import \"./mid.zng\";\ntype c++::std::unique_ptr<i32> {}\n",
+            "`c++::std::unique_ptr` already has a home (`#crate bar_bindings`, imported via `./mid.zng`), which is not directly imported here",
+        ),
+        (
+            "import \"./mid.zng\";\ntype<T> c++::std::unique_ptr<T> {}\n",
+            "`c++::std::unique_ptr` already has a home (`#crate bar_bindings`, imported via `./mid.zng`); `import` its home `.zng` file directly",
+        ),
+        (
+            "import \"./mid.zng\";\nimport \"./other_home.zng\";\n",
+            "use different homes for `c++::std::unique_ptr`",
+        ),
+        (
+            "import \"./mid.zng\";\ntype c++::std::unique_ptr {}\n",
+            "`c++::std::unique_ptr` is already a C++ class template (`#crate bar_bindings`, imported via `./mid.zng`), and cannot also be declared as a plain C++ type in this module",
+        ),
+        (
+            "import \"./mid.zng\";\nimport \"./plain_unique_ptr.zng\";\n",
+            "`c++::std::unique_ptr` is imported both as a plain C++ type (`plain_bindings`) and as a C++ class template (`bar_bindings via `./mid.zng``)",
+        ),
+        (
+            "import \"./plain_unique_ptr.zng\";\nimport \"./mid.zng\";\n",
+            "`c++::std::unique_ptr` is imported both as a plain C++ type (`plain_bindings`) and as a C++ class template (`bar_bindings via `./mid.zng``)",
+        ),
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str_with_resolver(src, NullCfg, &resolver, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(expected),
+            "expected `{expected}` for `{src}`, got:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn unused_cpp_template_home_validates_directives_and_members() {
+    // Layout-less `type<T> c++::Foo<T>` with `#trivially_relocatable`, C++ constructors, and
+    // methods returning `c++::Foo<T>` is valid (instantiations supply their own `#layout`).
+    let parsed = parse_str(
+        r#"
+#crate home_bindings
+
+type<T> c++::ns::Vec<T> {
+    #trivially_relocatable;
+    safe constructor() as new;
+    safe fn clone_self<'a>(&'a const self) -> c++::ns::Vec<T>;
+}
+"#,
+        NullCfg,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    assert_eq!(parsed.spec.cpp_templates.len(), 1);
+    assert_eq!(parsed.spec.cpp_template_homes.len(), 1);
+
+    for (src, expected) in [
+        (
+            "type<T> c++::Foo<T> { #heap_allocated; }\n",
+            "`#heap_allocated` and `#only_by_ref` are for Rust types",
+        ),
+        (
+            "type<T> c++::Foo<T> { #only_by_ref; }\n",
+            "`#heap_allocated` and `#only_by_ref` are for Rust types",
+        ),
+        (
+            "type<T> c++::Foo<T> { wellknown_traits(?Sized); }\n",
+            "`?Sized` is not supported on C++ types",
+        ),
+        (
+            "type<T> c++::Foo<T> { #cpp_heap_allocated \"Foo\"; }\n",
+            "C++ class templates can't be `#cpp_heap_allocated`",
+        ),
+        (
+            "type<T> c++::Foo<T> { #cpp_ref \"Foo\"; }\n",
+            "`#cpp_ref` cannot be used on C++ class templates",
+        ),
+        (
+            "type<T> c++::Foo<T> { #cpp_stack_owned \"Foo\"; }\n",
+            "`#cpp_stack_owned` cannot be used on C++ class templates",
+        ),
+        (
+            "type<T> c++::Foo<T> { constructor(i32); }\n",
+            "C++ constructors start with `safe` or `unsafe`",
+        ),
+        (
+            "type<T> c++::Foo<T> { field x (offset = 0, type = i32); }\n",
+            "C++ field accessors omit `offset`",
+        ),
+        (
+            "type<T> c++::Foo<T> { variant A {} }\n",
+            "enum variants cannot be declared on `c++::` types",
+        ),
+        (
+            "type<T> c++::Foo<T> { safe fn f<'a>(&'a const self, c++::Undeclared); }\n",
+            "`c++::Undeclared` is not declared or imported",
+        ),
+        (
+            "type c++::Opaque {}\ntype<T> c++::Foo<T> { safe fn f<'a>(&'a const self, c++::Opaque); }\n",
+            "`c++::Opaque` cannot be passed or returned by value without `#layout(...)` and `#trivially_relocatable`",
+        ),
+        (
+            "type c++::Plain {}\ntype<T> c++::Foo<T> { safe fn f<'a>(&'a const self, &'a const c++::Plain<i32>); }\n",
+            "`c++::Plain` is declared as a plain C++ type, so it cannot take template arguments",
+        ),
+        (
+            "type<T> c++::Foo<T> { safe fn f<'a>(&'a const self, &'a const c++::Foo<i32, i32>); }\n",
+            "`c++::Foo` takes 1 template argument, not 2",
+        ),
+        (
+            "type<T> c++::Foo<T> { safe fn f<'a>(&'a const self, &'a const c++::Foo<i64>); }\n",
+            "instantiation `c++::Foo<i64>` of C++ class template `c++::Foo` is not declared",
+        ),
+        (
+            "type<T> c++::Foo<T> { safe fn f<'a>(&'a const self, &'a const c++::Unknown<T>); }\n",
+            "C++ class template `c++::Unknown` is not declared or imported",
+        ),
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(expected),
+            "expected `{expected}` for `{src}`, got:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn undeclared_and_transitive_cpp_template_instantiations_require_direct_import() {
+    let resolver = MockFilesystem::new(vec![
+        (
+            "./m0.zng",
+            r#"
+#crate m0_bindings
+
+type<T> c++::std::unique_ptr<T> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+}
+
+type c++::std::unique_ptr<i32> {}
+"#,
+        ),
+        (
+            "./m1.zng",
+            "#crate m1_bindings\nimport \"./m0.zng\";\ntype c++::m1::Helper {}\n",
+        ),
+    ]);
+
+    for (src, expected) in [
+        // Direct import of `m0.zng`, but `unique_ptr<i64>` is not declared anywhere: only the
+        // undeclared-instantiation error should fire (no bogus by-value `#layout` error).
+        (
+            "import \"./m0.zng\";\nmod c++::ns { safe fn f() -> c++::std::unique_ptr<i64>; }\n",
+            "instantiation `c++::std::unique_ptr<i64>` of C++ class template `c++::std::unique_ptr` is not declared; add `type c++::std::unique_ptr<i64> { ... }`",
+        ),
+        // `top -> m1 -> m0`: `m0`'s `unique_ptr<i32>` is NOT re-exported by `m1`, so both by-ref
+        // and by-value uses in `top` are rejected with a clear direct-import diagnostic and no
+        // bogus by-value `#layout` error.
+        (
+            "import \"./m1.zng\";\nmod c++::ns { safe fn by_ref<'a>(&'a const c++::std::unique_ptr<i32>); }\n",
+            "instantiation `c++::std::unique_ptr<i32>` of C++ class template `c++::std::unique_ptr` is declared in `m0.zng` (imported transitively), which is not directly imported here; `import` that `.zng` file directly",
+        ),
+        (
+            "import \"./m1.zng\";\nmod c++::ns { safe fn by_val() -> c++::std::unique_ptr<i32>; }\n",
+            "instantiation `c++::std::unique_ptr<i32>` of C++ class template `c++::std::unique_ptr` is declared in `m0.zng` (imported transitively), which is not directly imported here; `import` that `.zng` file directly",
+        ),
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str_with_resolver(src, NullCfg, &resolver, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(expected),
+            "expected `{expected}` for `{src}`, got:\n{err}"
+        );
+        assert!(
+            !err.contains("cannot be passed or returned by value"),
+            "did not expect secondary by-value error for `{src}`, got:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn conflicting_cpp_template_blocks_in_home_module_are_rejected() {
+    // Non-overlapping partial patterns (`Pair<T, i32>` vs `Pair<T, i64>`) can legitimately declare
+    // different layouts or member signatures in an instantiation-less home module.
+    let parsed = parse_str(
+        r#"
+#crate home_bindings
+
+type<T> c++::ns::Pair<T, i32> {
+    #layout(size = 8, align = 4);
+    safe fn second<'a>(&'a const self) -> i32;
+}
+
+type<T> c++::ns::Pair<T, i64> {
+    #layout(size = 16, align = 8);
+    safe fn second<'a>(&'a const self) -> i64;
+}
+"#,
+        NullCfg,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    assert_eq!(parsed.spec.cpp_templates.len(), 2);
+
+    // Overlapping `type<...>` blocks with conflicting `#layout` or `safe fn` signatures fail in the
+    // home module itself (both in one file and across `merge`d files), even without instantiations.
+    let resolver = MockFilesystem::new(vec![(
+        "./extra.zng",
+        r#"
+type<U> c++::ns::Box<U> {
+    safe fn get<'a>(&'a const self) -> i64;
+}
+"#,
+    )]);
+    let r = catch_unwind(|| {
+        let _ = parse_str_with_resolver(
+            r#"
+#crate home_bindings
+merge "./extra.zng";
+
+type<T> c++::ns::Box<T> {
+    safe fn get<'a>(&'a const self) -> i32;
+}
+"#,
+            NullCfg,
+            &resolver,
+            |_| {},
+        );
+    });
+    let err = r
+        .unwrap_err()
+        .downcast::<ErrorText>()
+        .expect("expected ErrorText")
+        .0;
+    assert!(
+        err.contains("Failed to apply template") && err.contains("C++ method mismatch"),
+        "expected template method conflict error across merged files, got:\n{err}"
+    );
+
+    for (src, expected) in [
+        (
+            r#"
+#crate home_bindings
+type<T> c++::ns::Box<T> {
+    #layout(size = 8, align = 8);
+}
+type<T> c++::ns::Box<T> {
+    #layout(size = 16, align = 8);
+}
+"#,
+            "Conflicting layout policy found",
+        ),
+        (
+            r#"
+#crate home_bindings
+type<T> c++::ns::Pair<T, i32> {
+    #layout(size = 8, align = 8);
+}
+type<U> c++::ns::Pair<i64, U> {
+    #layout(size = 16, align = 8);
+}
+"#,
+            "Conflicting layout policy found",
+        ),
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(expected),
+            "expected `{expected}` for `{src}`, got:\n{err}"
+        );
+    }
 }

@@ -1199,13 +1199,205 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
 // Represents a ZngurType created from a template type
 pub struct TemplateMatch(pub(crate) ZngurType);
 
-impl Merge<ZngurType> for TemplateMatch {
-    fn merge(self, into: &mut ZngurType) -> zngur_def::MergeResult {
+impl TemplateMatch {
+    /// Merges the instantiated template into `into`, preserving an explicit `#layout` declared on
+    /// the concrete type itself (`concrete_had_layout`) while still detecting `#layout` conflicts
+    /// across multiple templates matching `into`.
+    pub(crate) fn merge_into(
+        self,
+        into: &mut ZngurType,
+        concrete_had_layout: bool,
+    ) -> zngur_def::MergeResult {
         let TemplateMatch(mut ty) = self;
-        // The concrete type's layout should override the template's layout without causing a conflict
-        if into.layout.is_some() {
+        if concrete_had_layout {
             ty.layout = None;
         }
         ty.merge(into)
     }
+}
+
+impl Merge<ZngurType> for TemplateMatch {
+    fn merge(self, into: &mut ZngurType) -> zngur_def::MergeResult {
+        let concrete_had_layout = into.layout.is_some();
+        self.merge_into(into, concrete_had_layout)
+    }
+}
+
+/// Computes the most general unifier of two `type<...> c++::...` template headers (after renaming
+/// their type variables apart), returning `None` if no concrete instantiation could match both.
+pub(crate) fn unify_cpp_template_types(t1: &RustType, t2: &RustType) -> Option<RustType> {
+    fn map_type_vars(ty: &RustType, f: &mut impl FnMut(&TypeVar) -> RustType) -> RustType {
+        match ty {
+            RustType::TypeVar(v) => f(v),
+            RustType::Primitive(p) => RustType::Primitive(p.clone()),
+            RustType::Ref(m, l, inner) => {
+                RustType::Ref(*m, l.clone(), Box::new(map_type_vars(inner, f)))
+            }
+            RustType::Raw(m, inner) => RustType::Raw(*m, Box::new(map_type_vars(inner, f))),
+            RustType::Boxed(inner) => RustType::Boxed(Box::new(map_type_vars(inner, f))),
+            RustType::Slice(inner) => RustType::Slice(Box::new(map_type_vars(inner, f))),
+            RustType::CppPtr(k, inner) => RustType::CppPtr(*k, Box::new(map_type_vars(inner, f))),
+            RustType::CppConst(inner) => RustType::CppConst(Box::new(map_type_vars(inner, f))),
+            RustType::CppVar(inner) => RustType::CppVar(Box::new(map_type_vars(inner, f))),
+            RustType::Tuple(tys) => {
+                RustType::Tuple(tys.iter().map(|t| map_type_vars(t, f)).collect())
+            }
+            RustType::Cpp(path) => RustType::Cpp(CppTypePath {
+                path: path.path.clone(),
+                generics: path.generics.iter().map(|t| map_type_vars(t, f)).collect(),
+            }),
+            RustType::Adt(pg) => RustType::Adt(RustPathAndGenerics {
+                path: pg.path.clone(),
+                lifetimes: pg.lifetimes.clone(),
+                generics: pg.generics.iter().map(|t| map_type_vars(t, f)).collect(),
+                named_generics: pg
+                    .named_generics
+                    .iter()
+                    .map(|(n, t)| (n.clone(), map_type_vars(t, f)))
+                    .collect(),
+            }),
+            RustType::Dyn(tr, bounds) => RustType::Dyn(map_trait_vars(tr, f), bounds.clone()),
+            RustType::Impl(tr, bounds) => RustType::Impl(map_trait_vars(tr, f), bounds.clone()),
+        }
+    }
+
+    fn map_trait_vars(tr: &RustTrait, f: &mut impl FnMut(&TypeVar) -> RustType) -> RustTrait {
+        match tr {
+            RustTrait::Normal(pg) => RustTrait::Normal(RustPathAndGenerics {
+                path: pg.path.clone(),
+                lifetimes: pg.lifetimes.clone(),
+                generics: pg.generics.iter().map(|t| map_type_vars(t, f)).collect(),
+                named_generics: pg
+                    .named_generics
+                    .iter()
+                    .map(|(n, t)| (n.clone(), map_type_vars(t, f)))
+                    .collect(),
+            }),
+            RustTrait::Fn {
+                name,
+                lifetimes,
+                inputs,
+                output,
+            } => RustTrait::Fn {
+                name: name.clone(),
+                lifetimes: lifetimes.clone(),
+                inputs: inputs.iter().map(|t| map_type_vars(t, f)).collect(),
+                output: Box::new(map_type_vars(output, f)),
+            },
+        }
+    }
+
+    fn apply_subst(ty: &RustType, subst: &HashMap<TypeVar, RustType>) -> RustType {
+        map_type_vars(ty, &mut |v| match subst.get(v) {
+            Some(bound) => apply_subst(bound, subst),
+            None => RustType::TypeVar(v.clone()),
+        })
+    }
+
+    fn unify(a: &RustType, b: &RustType, subst: &mut HashMap<TypeVar, RustType>) -> bool {
+        let a = apply_subst(a, subst);
+        let b = apply_subst(b, subst);
+        if a == b {
+            return true;
+        }
+        match (&a, &b) {
+            (RustType::TypeVar(va), RustType::TypeVar(vb)) => {
+                // Keep `t2`'s variable names (`__u2_*`) when unifying two variables.
+                if va.0.starts_with("__u1_") && vb.0.starts_with("__u2_") {
+                    subst.insert(va.clone(), b);
+                } else {
+                    subst.insert(vb.clone(), a);
+                }
+                true
+            }
+            (RustType::TypeVar(v), other) | (other, RustType::TypeVar(v)) => {
+                if other.type_vars().contains(&v) {
+                    return false;
+                }
+                subst.insert(v.clone(), other.clone());
+                true
+            }
+            (RustType::Primitive(p1), RustType::Primitive(p2)) => p1 == p2,
+            (RustType::Cpp(p1), RustType::Cpp(p2)) => {
+                p1.path == p2.path
+                    && p1.generics.len() == p2.generics.len()
+                    && p1
+                        .generics
+                        .iter()
+                        .zip(&p2.generics)
+                        .all(|(x, y)| unify(x, y, subst))
+            }
+            (RustType::CppPtr(k1, x), RustType::CppPtr(k2, y)) => k1 == k2 && unify(x, y, subst),
+            (RustType::CppConst(x), RustType::CppConst(y))
+            | (RustType::CppVar(x), RustType::CppVar(y))
+            | (RustType::Boxed(x), RustType::Boxed(y))
+            | (RustType::Slice(x), RustType::Slice(y)) => unify(x, y, subst),
+            (RustType::Raw(m1, x), RustType::Raw(m2, y))
+            | (RustType::Ref(m1, _, x), RustType::Ref(m2, _, y)) => m1 == m2 && unify(x, y, subst),
+            (RustType::Tuple(xs), RustType::Tuple(ys)) => {
+                xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| unify(x, y, subst))
+            }
+            (RustType::Adt(pg1), RustType::Adt(pg2)) => {
+                pg1.path == pg2.path
+                    && pg1.generics.len() == pg2.generics.len()
+                    && pg1.named_generics.len() == pg2.named_generics.len()
+                    && pg1
+                        .generics
+                        .iter()
+                        .zip(&pg2.generics)
+                        .all(|(x, y)| unify(x, y, subst))
+                    && pg1
+                        .named_generics
+                        .iter()
+                        .zip(&pg2.named_generics)
+                        .all(|((n1, x), (n2, y))| n1 == n2 && unify(x, y, subst))
+            }
+            _ => false,
+        }
+    }
+
+    let r1 = map_type_vars(t1, &mut |v| {
+        RustType::TypeVar(TypeVar(format!("__u1_{}", v.0)))
+    });
+    let r2 = map_type_vars(t2, &mut |v| {
+        RustType::TypeVar(TypeVar(format!("__u2_{}", v.0)))
+    });
+    let mut subst = HashMap::new();
+    if !unify(&r1, &r2, &mut subst) {
+        return None;
+    }
+    let unified = apply_subst(&r2, &subst);
+    let mut clean_names: HashMap<TypeVar, TypeVar> = HashMap::new();
+    let mut used_clean: HashSet<TypeVar> = HashSet::new();
+    let mut sorted_vars: Vec<TypeVar> = unified.type_vars().into_iter().cloned().collect();
+    sorted_vars.sort_by(|a, b| {
+        // Assign `__u2_*` variables their original names before `__u1_*` variables.
+        let a_is_u2 = a.0.starts_with("__u2_");
+        let b_is_u2 = b.0.starts_with("__u2_");
+        b_is_u2.cmp(&a_is_u2).then_with(|| a.0.cmp(&b.0))
+    });
+    for raw in sorted_vars {
+        let base = raw
+            .0
+            .strip_prefix("__u2_")
+            .or_else(|| raw.0.strip_prefix("__u1_"))
+            .unwrap_or(&raw.0);
+        let candidate = TypeVar(base.to_owned());
+        let chosen = if used_clean.insert(candidate.clone()) {
+            candidate
+        } else {
+            let mut idx = 0usize;
+            loop {
+                let c = TypeVar(format!("{base}_{idx}"));
+                idx += 1;
+                if used_clean.insert(c.clone()) {
+                    break c;
+                }
+            }
+        };
+        clean_names.insert(raw, chosen);
+    }
+    Some(map_type_vars(&unified, &mut |v| {
+        RustType::TypeVar(clean_names.get(v).cloned().unwrap_or_else(|| v.clone()))
+    }))
 }

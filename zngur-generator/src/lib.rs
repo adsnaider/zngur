@@ -155,7 +155,23 @@ impl ZngurGenerator {
                     .map(|segs| RustType::Cpp(segs.clone().into())),
             )
             .collect();
-        let cpp_templates = CppTemplates::new(&zng.types, &mut rust_file, &mut cpp_tree);
+        let local_cpp_fn_paths: std::collections::HashSet<Vec<String>> = zng
+            .cpp_funcs
+            .iter()
+            .map(|func| {
+                let mut p = func.namespace.clone();
+                p.push(func.rust_name().to_owned());
+                p
+            })
+            .collect();
+        let cpp_templates = CppTemplates::new(
+            &zng.cpp_template_homes,
+            &zng.imported_modules,
+            &zng.types,
+            &local_cpp_fn_paths,
+            &mut rust_file,
+            &mut cpp_tree,
+        );
         for mut ty_def in zng.types {
             let raw_lifetimes = ty_def.lifetimes.clone();
             let raw_ty = ty_def.ty.clone();
@@ -655,15 +671,6 @@ impl ZngurGenerator {
         // `c++::` types of imported modules are defined in their own crate (at
         // `::<crate>::generated::<path>`). Re-exporting them at the same relative path as local
         // `c++::` types lets this module's generated code refer to both the same way.
-        let local_cpp_fn_paths: std::collections::HashSet<Vec<String>> = zng
-            .cpp_funcs
-            .iter()
-            .map(|func| {
-                let mut p = func.namespace.clone();
-                p.push(func.rust_name().to_owned());
-                p
-            })
-            .collect();
         let mut reexported = std::collections::HashSet::new();
         for module in &zng.imported_modules {
             let Some(crate_name) = &module.crate_name else {
@@ -674,27 +681,12 @@ impl ZngurGenerator {
                 let Some((type_name, module_path)) = segs.split_last() else {
                     continue;
                 };
-                if !reexported.insert((module_crate.clone(), segs.clone())) {
+                if !reexported.insert(segs.clone()) {
                     continue;
                 }
-                let template_arity = module
-                    .cpp_template_instantiations
-                    .iter()
-                    .find(|inst| inst.path == *segs)
-                    .map(|inst| inst.generics.len());
                 let item = if local_cpp_fn_paths.contains(segs) {
-                    if let Some(arity) = template_arity {
-                        let params = (0..arity)
-                            .map(|n| format!("T{n}"))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        format!(
-                            "\n#[allow(dead_code, non_camel_case_types)]\npub type \
-                             {type_name}<{params}, C = ::zngur_lib::NonConst> = \
-                             ::{module_crate}::generated::{}<{params}, C>;\n",
-                            segs.join("::")
-                        )
-                    } else if module.cpp_heap_allocated_types.contains(segs) {
+                    let is_heap = module.cpp_heap_allocated_types.contains(segs);
+                    if is_heap {
                         format!(
                             "\n#[allow(dead_code, non_camel_case_types)]\npub type {type_name} = \
                              ::{module_crate}::generated::{};\n",
@@ -2151,10 +2143,8 @@ pub type Handle = super::Handle;
             imported_modules: vec![ModuleImport {
                 path: "./base.zng".into(),
                 crate_name: Some("base".to_owned()),
-                cpp_types: vec![
-                    vec!["ns".to_owned(), "Bar".to_owned()],
-                    vec!["ns".to_owned(), "Baz".to_owned()],
-                ],
+                cpp_types: vec![vec!["ns".to_owned(), "Bar".to_owned()]],
+                cpp_templates: vec![vec!["ns".to_owned(), "Baz".to_owned()]],
                 cpp_template_instantiations: vec![imported_baz_path],
                 ..Default::default()
             }],
@@ -3930,6 +3920,207 @@ pub type Handle = super::Handle;
                 "::zngur_lib::ZngCppStackObject for {up_i32_struct}<C>"
             )),
             "{rust_code}"
+        );
+    }
+
+    #[test]
+    fn cpp_template_instantiations_use_an_imported_home() {
+        let b = cpp(&["a", "B"]);
+        let i32_ty = RustType::Primitive(PrimitiveRustType::Int(32));
+        let unique_ptr_path = vec!["std".to_owned(), "unique_ptr".to_owned()];
+        let map_path = vec!["std".to_owned(), "map".to_owned()];
+        let span_path = vec!["std".to_owned(), "span".to_owned()];
+        let vec_path = vec!["std".to_owned(), "vector".to_owned()];
+
+        let up_b_path = CppTypePath {
+            path: unique_ptr_path.clone(),
+            generics: vec![b.clone()],
+        };
+        let map_i32_b_path = CppTypePath {
+            path: map_path.clone(),
+            generics: vec![i32_ty, b.clone()],
+        };
+        let span_const_b_path = CppTypePath {
+            path: span_path.clone(),
+            generics: vec![RustType::CppConst(Box::new(b.clone()))],
+        };
+        let up_b_struct = struct_name(&up_b_path);
+        let map_struct = struct_name(&map_i32_b_path);
+        let span_struct = struct_name(&span_const_b_path);
+
+        let bar_import = ModuleImport {
+            path: "./bar.zng".into(),
+            crate_name: Some("bar".to_owned()),
+            cpp_template_homes: vec![
+                CppTemplateHome {
+                    path: unique_ptr_path.clone(),
+                    arity: 1,
+                    explicit: true,
+                },
+                CppTemplateHome {
+                    path: map_path.clone(),
+                    arity: 2,
+                    explicit: true,
+                },
+                CppTemplateHome {
+                    path: span_path.clone(),
+                    arity: 1,
+                    explicit: true,
+                },
+            ],
+            cpp_templates: vec![unique_ptr_path, map_path, span_path],
+            ..Default::default()
+        };
+        // `mid` instantiates `std::vector<mid::Item>` whose home isn't directly imported here;
+        // `cpp_templates` still re-exports `std::vector` so signatures using it compile.
+        let mid_import = ModuleImport {
+            path: "./mid.zng".into(),
+            crate_name: Some("mid".to_owned()),
+            cpp_types: vec![vec!["mid".to_owned(), "Item".to_owned()]],
+            cpp_templates: vec![vec_path],
+            ..Default::default()
+        };
+        let spec = ZngurSpec {
+            types: vec![
+                minimal_opaque_cpp_type(b),
+                minimal_by_value_cpp_type(RustType::Cpp(up_b_path), 8, 8),
+                minimal_opaque_cpp_type(RustType::Cpp(map_i32_b_path)),
+                minimal_by_value_cpp_type(RustType::Cpp(span_const_b_path), 16, 8),
+            ],
+            // Duplicate `bar_import` also verifies `pub use` deduplication.
+            imported_modules: vec![bar_import.clone(), bar_import, mid_import],
+            ..Default::default()
+        };
+        let (rust_code, _h, _cpp) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+
+        assert!(
+            !rust_code.contains("pub trait __ZngurCppTemplate_unique_ptr"),
+            "{rust_code}"
+        );
+        assert_eq!(
+            rust_code
+                .matches("pub use ::bar::generated::std::unique_ptr;")
+                .count(),
+            1,
+            "{rust_code}"
+        );
+        assert_eq!(
+            rust_code
+                .matches("pub use ::bar::generated::std::map;")
+                .count(),
+            1,
+            "{rust_code}"
+        );
+        assert_eq!(
+            rust_code
+                .matches("pub use ::bar::generated::std::span;")
+                .count(),
+            1,
+            "{rust_code}"
+        );
+        assert_eq!(
+            rust_code
+                .matches("pub use ::mid::generated::std::vector;")
+                .count(),
+            1,
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(&format!(
+                "impl<C: ::zngur_lib::Constness> ::bar::generated::std::__ZngurCppTemplate_unique_ptr<C> \
+                 for a::B {{\n    type Type = {up_b_struct}<C>;\n}}"
+            )),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(&format!(
+                "impl<C: ::zngur_lib::Constness> ::bar::generated::std::__ZngurCppTemplate_map<a::B, C> \
+                 for i32 {{\n    type Type = {map_struct}<C>;\n}}"
+            )),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(&format!(
+                "impl<C: ::zngur_lib::Constness> ::bar::generated::std::__ZngurCppTemplate_span<C> \
+                 for a::B::<::zngur_lib::Const> {{\n    type Type = {span_struct}<C>;\n}}"
+            )),
+            "{rust_code}"
+        );
+
+        // When the importing module also declares a free C++ function with the same Rust name in
+        // that namespace, re-exporting uses a `pub type` alias instead of `pub use` so the value
+        // namespace does not collide.
+        let collide_spec = ZngurSpec {
+            imported_modules: vec![
+                ModuleImport {
+                    path: "./bar.zng".into(),
+                    crate_name: Some("bar".to_owned()),
+                    cpp_template_homes: vec![CppTemplateHome {
+                        path: vec!["ns".to_owned(), "Box".to_owned()],
+                        arity: 1,
+                        explicit: true,
+                    }],
+                    cpp_templates: vec![vec!["ns".to_owned(), "Box".to_owned()]],
+                    ..Default::default()
+                },
+                ModuleImport {
+                    path: "./mid.zng".into(),
+                    crate_name: Some("mid".to_owned()),
+                    cpp_template_instantiations: vec![CppTypePath {
+                        path: vec!["ns".to_owned(), "Pair".to_owned()],
+                        generics: vec![
+                            RustType::Primitive(PrimitiveRustType::Int(32)),
+                            RustType::Primitive(PrimitiveRustType::Int(64)),
+                        ],
+                    }],
+                    cpp_templates: vec![vec!["ns".to_owned(), "Pair".to_owned()]],
+                    ..Default::default()
+                },
+            ],
+            cpp_funcs: vec![
+                zngur_def::ZngurCppFn {
+                    namespace: vec!["ns".to_owned()],
+                    cpp_name: "Box".to_owned(),
+                    rust_name: None,
+                    lifetimes: vec![],
+                    inputs: vec![],
+                    output: RustType::Tuple(vec![]),
+                    is_safe: true,
+                },
+                zngur_def::ZngurCppFn {
+                    namespace: vec!["ns".to_owned()],
+                    cpp_name: "Pair".to_owned(),
+                    rust_name: None,
+                    lifetimes: vec![],
+                    inputs: vec![],
+                    output: RustType::Tuple(vec![]),
+                    is_safe: true,
+                },
+            ],
+            ..Default::default()
+        };
+        let (collide_rust, _, _) =
+            ZngurGenerator::build_from_zng(collide_spec, "test_crate".to_owned()).render(false);
+        assert!(
+            collide_rust.contains(
+                "pub type Box<T0, C = ::zngur_lib::NonConst> = ::bar::generated::ns::Box<T0, C>;"
+            ),
+            "{collide_rust}"
+        );
+        assert!(
+            collide_rust.contains(
+                "pub type Pair<T0, T1, C = ::zngur_lib::NonConst> = ::mid::generated::ns::Pair<T0, T1, C>;"
+            ),
+            "{collide_rust}"
+        );
+        assert!(
+            !collide_rust.contains("pub use ::bar::generated::ns::Box;"),
+            "{collide_rust}"
+        );
+        assert!(
+            !collide_rust.contains("pub use ::mid::generated::ns::Pair;"),
+            "{collide_rust}"
         );
     }
 

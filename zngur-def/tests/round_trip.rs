@@ -118,6 +118,11 @@ fn check_round_trip_with_resolver(
     };
 
     assert_eq!(parsed.spec.types, reparsed.spec.types);
+    assert_eq!(parsed.spec.cpp_templates, reparsed.spec.cpp_templates);
+    assert_eq!(
+        parsed.spec.cpp_template_homes,
+        reparsed.spec.cpp_template_homes
+    );
     assert_eq!(parsed.spec.traits, reparsed.spec.traits);
     assert_eq!(parsed.spec.funcs, reparsed.spec.funcs);
     assert_eq!(parsed.spec.cpp_funcs, reparsed.spec.cpp_funcs);
@@ -709,6 +714,8 @@ fn reparse_all_examples() {
         }
         check_fields!(
             types,
+            cpp_templates,
+            cpp_template_homes,
             traits,
             funcs,
             cpp_funcs,
@@ -984,6 +991,36 @@ type c++::View<i32* const> {
             }
 
             type c++::View<i32* const> {
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn reparse_cpp_template_home() {
+    let _ = check_round_trip(
+        r#"
+type<T> c++::std::unique_ptr<T> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+    unsafe fn get(&const self) -> T*;
+}
+type c++::std::unique_ptr<i32> {
+}
+        "#,
+        expect![[r#"
+            type<T> c++::std::unique_ptr<T> {
+                #layout(size = 8, align = 8);
+                #trivially_relocatable;
+
+                unsafe fn get(&const self) -> T*;
+            }
+
+            type c++::std::unique_ptr<i32> {
+                #layout(size = 8, align = 8);
+                #trivially_relocatable;
+
+                unsafe fn get(&const self) -> i32*;
             }
         "#]],
     );

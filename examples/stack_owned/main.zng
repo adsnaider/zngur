@@ -1,7 +1,6 @@
 // References without lifetimes are fine for these member functions' arguments: nothing returned
 // borrows from them.
 #allow(elided_lifetimes)
-#unstable(template_types)
 
 #cpp_additional_includes "
 #include <cpp_type.h>
