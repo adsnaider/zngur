@@ -2393,6 +2393,7 @@ impl ProcessedItem<'_> {
                     }
                 }
                 let mut has_removed_cpp_directive = false;
+                let mut unchecked_layout_span: Option<ReportSpan> = None;
                 while let Some(item) = to_process.pop() {
                     let item_span = item.span;
                     let item = item.inner;
@@ -2433,6 +2434,15 @@ impl ProcessedItem<'_> {
                                 &l.into_span_key_with(rust_ty.clone()),
                                 span.into_range(),
                             );
+                            // Reported once the type is merged, if it isn't `#trivially_relocatable`.
+                            if matches!(rust_ty, RustType::Cpp(_))
+                                && matches!(l, LayoutPolicy::StackAllocated { .. })
+                                && !ctx.allows("layout_without_relocatable")
+                                && unchecked_layout_span.is_none()
+                            {
+                                unchecked_layout_span =
+                                    Some(ctx.report_span_for_range(span.into_range()));
+                            }
                             layout = Some(l);
                             match layout_span {
                                 Some(_) => {
@@ -3259,12 +3269,27 @@ impl ProcessedItem<'_> {
                         allowed_lints: ctx.allowed_lints.clone(),
                         imported: false,
                         has_removed_cpp_directive,
+                        unchecked_layout_span,
                     });
                 } else {
+                    let erased_ty = rust_ty.with_erased_lifetimes();
                     r.type_allowed_lints
-                        .entry(rust_ty.with_erased_lifetimes())
+                        .entry(erased_ty.clone())
                         .or_insert_with(|| ctx.allowed_lints.clone());
                     ctx.record_span(&zngur_type, ty.span.into_range());
+                    if let Some(span) = unchecked_layout_span {
+                        r.unchecked_cpp_layouts
+                            .entry(erased_ty.clone())
+                            .or_default()
+                            .push(span);
+                    }
+                    if matches!(rust_ty, RustType::Cpp(_))
+                        && !ctx.allows("layout_without_relocatable")
+                    {
+                        r.unchecked_cpp_types
+                            .entry(erased_ty)
+                            .or_insert_with(|| ctx.report_span_for_range(ty.span.into_range()));
+                    }
                     checked_merge(
                         zngur_type,
                         &mut r.spec,
@@ -4509,8 +4534,7 @@ struct ParseContext<'this, 'source, 'cfg> {
     depth: usize,
     /// Lints silenced for the current file via `#allow(...)`.
     allowed_lints: HashSet<String>,
-    /// Whether non-fatal warnings are suppressed (when recursively parsing `import`ed modules,
-    /// whose own builds emit their warnings).
+    /// Suppresses non-fatal warnings while parsing an `import`ed module.
     suppress_warnings: bool,
     cfg_provider: &'cfg dyn RustCfgProvider,
     report_sink: &'cfg mut dyn ReportSink,
@@ -4678,24 +4702,28 @@ impl<'this, 'source, 'cfg> ParseContext<'this, 'source, 'cfg> {
         self.add_errors([Rich::custom(span, error)].into_iter());
     }
 
-    /// Records a non-fatal warning as an ariadne diagnostic pointing at `span`.
-    /// Rendering is deferred until dispatch time (see `render_report`).
-    fn add_warning_str(&mut self, warning: &str, span: Span) {
-        let report = Report::build(
-            ReportKind::Warning,
-            (self.source_id.to_owned(), span.into_range()),
-        )
-        .with_message(warning)
-        .with_label(
-            Label::new((self.source_id.to_owned(), span.into_range()))
-                .with_message(warning)
-                .with_color(Color::Yellow),
-        )
-        .finish();
+    /// Records a non-fatal warning pointing at `span`, which may be in another file than the
+    /// current one (e.g. a recorded span).
+    fn add_warning_at(&mut self, warning: &str, span: ReportSpan) {
+        let report = Report::build(ReportKind::Warning, span.clone())
+            .with_message(warning)
+            .with_label(
+                Label::new(span)
+                    .with_message(warning)
+                    .with_color(Color::Yellow),
+            )
+            .finish();
         self.sink_report(ReportEntry {
             fatal: false,
             report,
         });
+    }
+
+    /// Records a non-fatal warning as an ariadne diagnostic pointing at `span`.
+    /// Rendering is deferred until dispatch time (see `render_report`).
+    fn add_warning_str(&mut self, warning: &str, span: Span) {
+        let span = self.report_span_for_range(span.into_range());
+        self.add_warning_at(warning, span);
     }
 
     /// a count of the errors recorded by this parse context and any nested ones
@@ -5274,6 +5302,7 @@ impl<'a> ParsedZngFile<'a> {
                     .templates
                     .extend(cached.own_cpp_templates.into_iter().map(|t| TemplateDef {
                         imported: true,
+                        unchecked_layout_span: None,
                         ..t
                     }));
             }
@@ -5571,6 +5600,9 @@ struct TemplateDef {
     /// do), rather than from this one.
     imported: bool,
     has_removed_cpp_directive: bool,
+    /// Span of `#layout(...)` if this is a local `c++::` template whose file doesn't silence
+    /// `layout_without_relocatable`.
+    unchecked_layout_span: Option<ReportSpan>,
 }
 
 struct TemplateItemLintOrigin {
@@ -5664,6 +5696,12 @@ struct ZngurSpecBuilder {
     types_with_removed_cpp_directive: HashSet<RustType>,
     /// Lints silenced via `#allow(...)` in the file of each concrete `type` declaration.
     type_allowed_lints: HashMap<RustType, HashSet<String>>,
+    /// `#layout(...)` spans on concrete `c++::` types in files that don't silence
+    /// `layout_without_relocatable`.
+    unchecked_cpp_layouts: HashMap<RustType, Vec<ReportSpan>>,
+    /// First `type c++::...` span for each concrete `c++::` type in a file that doesn't silence
+    /// `layout_without_relocatable`.
+    unchecked_cpp_types: HashMap<RustType, ReportSpan>,
     imports: Vec<Import>,
     /// The span of each entry of `spec.imported_modules`, in the file that imports it.
     module_import_spans: Vec<ReportSpan>,
@@ -5681,6 +5719,8 @@ impl ZngurSpecBuilder {
             mut templates,
             types_with_removed_cpp_directive,
             type_allowed_lints,
+            unchecked_cpp_layouts,
+            unchecked_cpp_types,
             imports,
             module_import_spans,
             module_import_resolved_paths,
@@ -5759,8 +5799,14 @@ impl ZngurSpecBuilder {
                 template.ty.layout = None;
             }
         }
+        let has_checked_cpp_layout = |layout: &Option<LayoutPolicy>| {
+            matches!(layout, Some(LayoutPolicy::StackAllocated { .. }))
+        };
+        let mut reported_layouts: HashSet<ReportSpan> = HashSet::new();
+        let mut matched_local_templates: HashSet<usize> = HashSet::new();
         let mut all_template_locations = Vec::with_capacity(spec.types.len());
         let mut all_template_has_removed_directive = Vec::with_capacity(spec.types.len());
+        let mut all_layout_templates: Vec<Vec<usize>> = Vec::with_capacity(spec.types.len());
         let mut all_template_member_lints = Vec::with_capacity(spec.types.len());
         let mut matched_template_indices: HashSet<usize> = HashSet::new();
         let mut checked_template_pairs: HashSet<(usize, usize)> = HashSet::new();
@@ -5768,17 +5814,20 @@ impl ZngurSpecBuilder {
             let concrete_had_layout = ty.layout.is_some();
             let mut template_locations = Vec::new();
             let mut template_has_removed_directive = false;
+            let mut layout_templates = Vec::new();
             let mut matched_on_ty: Vec<usize> = Vec::new();
             let mut member_lints = TemplateMemberLints::default();
-            for (t_idx, template) in templates.iter().enumerate() {
+            for (template_idx, template) in templates.iter().enumerate() {
                 if let Some(template_match) = try_match_template(ty, &template.ty) {
-                    matched_template_indices.insert(t_idx);
+                    matched_template_indices.insert(template_idx);
                     if !concrete_had_layout {
                         for &prev_idx in &matched_on_ty {
-                            checked_template_pairs.insert((prev_idx, t_idx));
+                            checked_template_pairs.insert((prev_idx, template_idx));
                         }
-                        matched_on_ty.push(t_idx);
+                        matched_on_ty.push(template_idx);
                     }
+                    let inherits_layout =
+                        !concrete_had_layout && has_checked_cpp_layout(&template.ty.layout);
                     let location = (template.source_id, template.span.into_range());
                     let tpl_ty = &template.ty.ty;
                     let method_origins: Vec<(String, TemplateItemLintOrigin)> = template
@@ -5918,6 +5967,12 @@ impl ZngurSpecBuilder {
                             }
                         }
                     } else {
+                        if inherits_layout {
+                            layout_templates.push(template_idx);
+                            if !template.imported {
+                                matched_local_templates.insert(template_idx);
+                            }
+                        }
                         if !template.imported && template.has_removed_cpp_directive {
                             template_has_removed_directive = true;
                         }
@@ -5936,6 +5991,7 @@ impl ZngurSpecBuilder {
             }
             all_template_locations.push(template_locations);
             all_template_has_removed_directive.push(template_has_removed_directive);
+            all_layout_templates.push(layout_templates);
             all_template_member_lints.push(member_lints);
         }
         // Validate mutual compatibility across overlapping local `type<...> c++::...` blocks even
@@ -6058,12 +6114,16 @@ impl ZngurSpecBuilder {
             .collect();
 
         let mut reported_deferred: HashSet<(ReportSpan, &'static str)> = HashSet::new();
-        for (((ty, template_locations), template_member_lints), &template_has_removed_directive) in
-            spec.types
-                .iter_mut()
-                .zip(&all_template_locations)
-                .zip(&all_template_member_lints)
-                .zip(&all_template_has_removed_directive)
+        for (
+            (((ty, template_locations), template_member_lints), &template_has_removed_directive),
+            layout_templates,
+        ) in spec
+            .types
+            .iter_mut()
+            .zip(&all_template_locations)
+            .zip(&all_template_member_lints)
+            .zip(&all_template_has_removed_directive)
+            .zip(&all_layout_templates)
         {
             let instantiation_allowed = type_allowed_lints.get(&ty.ty.with_erased_lifetimes());
             if !template_locations.is_empty() {
@@ -6304,6 +6364,68 @@ impl ZngurSpecBuilder {
                     ctx.add_fatal_error_at_span(m_span, msg);
                 }
             }
+            // A layout without `#trivially_relocatable` (after merging, so either may come from
+            // another file or a template) is only checked in C++. Reported at each `#layout` (or,
+            // for an imported template, at the local instantiation) once, unless its file silences
+            // `layout_without_relocatable`.
+            if matches!(ty.ty, RustType::Cpp(_))
+                && has_checked_cpp_layout(&ty.layout)
+                && !ty.trivially_relocatable.is_relocatable()
+            {
+                let erased_ty = ty.ty.with_erased_lifetimes();
+                if let Some(spans) = unchecked_cpp_layouts.get(&erased_ty) {
+                    for span in spans {
+                        if reported_layouts.insert(span.clone()) {
+                            let t = zng_spelling(&ty.ty);
+                            ctx.add_warning_at(
+                                &format!(
+                                    "this layout is only checked in C++: Rust holds `{t}` by value only \
+                                     if it's also `#trivially_relocatable`, so it only refers to it (a \
+                                     zero-sized type); silence this with \
+                                     `#allow(layout_without_relocatable)`"
+                                ),
+                                span.clone(),
+                            );
+                        }
+                    }
+                }
+                for &template_idx in layout_templates {
+                    let template = &templates[template_idx];
+                    if template.imported {
+                        if let Some(span) = unchecked_cpp_types.get(&erased_ty)
+                            && reported_layouts.insert(span.clone())
+                        {
+                            let inst = zng_spelling(&ty.ty);
+                            let template_ty = zng_spelling(&template.ty.ty);
+                            ctx.add_warning_at(
+                                &format!(
+                                    "the layout of `{inst}` (from `{template_ty}`) is only \
+                                     checked in C++: Rust holds `{inst}` by value only if it's \
+                                     also `#trivially_relocatable`, so it only refers to it (a \
+                                     zero-sized type); silence this with \
+                                     `#allow(layout_without_relocatable)`"
+                                ),
+                                span.clone(),
+                            );
+                        }
+                    } else if let Some(span) = &template.unchecked_layout_span
+                        && reported_layouts.insert(span.clone())
+                    {
+                        let inst = zng_spelling(&ty.ty);
+                        let template_ty = zng_spelling(&template.ty.ty);
+                        ctx.add_warning_at(
+                            &format!(
+                                "for instantiation `{inst}`, this layout is only checked \
+                                 in C++: Rust holds `{template_ty}` by value only when \
+                                 `#trivially_relocatable`, so `{inst}` is only referred to \
+                                 (a zero-sized type); silence this with \
+                                 `#allow(layout_without_relocatable)`"
+                            ),
+                            span.clone(),
+                        );
+                    }
+                }
+            }
             let fallback_span = template_locations
                 .last()
                 .cloned()
@@ -6432,6 +6554,37 @@ impl ZngurSpecBuilder {
                 });
             if let Err(msg) = func_check {
                 ctx.add_fatal_error_at_span(f_span, &msg);
+            }
+        }
+        // Check local `type<T> c++::...` templates that have no instantiations in this module
+        // (e.g. a shared template-home module).
+        for (idx, template) in templates.iter().enumerate() {
+            if template.imported
+                || matched_local_templates.contains(&idx)
+                || !matches!(template.ty.ty, RustType::Cpp(_))
+                || !has_checked_cpp_layout(&template.ty.layout)
+                || templates.iter().any(|other| {
+                    !other.imported
+                        && other.ty.trivially_relocatable.is_relocatable()
+                        && (other.ty.layout.is_none() || other.ty.layout == template.ty.layout)
+                        && try_match_template(&template.ty, &other.ty).is_some()
+                })
+            {
+                continue;
+            }
+            if let Some(span) = &template.unchecked_layout_span
+                && reported_layouts.insert(span.clone())
+            {
+                let t = zng_spelling(&template.ty.ty);
+                ctx.add_warning_at(
+                    &format!(
+                        "this layout is only checked in C++: Rust holds `{t}` by value only \
+                         if it's also `#trivially_relocatable`, so it only refers to it (a \
+                         zero-sized type); silence this with \
+                         `#allow(layout_without_relocatable)`"
+                    ),
+                    span.clone(),
+                );
             }
         }
         // Check that imported `c++::` types and templates do not collide with local plain
@@ -9447,7 +9600,11 @@ fn extern_cpp_item<'a>()
 }
 
 /// The warnings that `#allow(...)` can silence.
-const KNOWN_LINTS: &[&str] = &["elided_lifetimes", "safe_raw_pointer"];
+const KNOWN_LINTS: &[&str] = &[
+    "elided_lifetimes",
+    "safe_raw_pointer",
+    "layout_without_relocatable",
+];
 
 fn allow_item<'a>() -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, ZngParserExtra<'a>> + Clone
 {

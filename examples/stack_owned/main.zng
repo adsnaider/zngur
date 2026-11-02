@@ -1,6 +1,9 @@
 // References without lifetimes are fine for these member functions' arguments: nothing returned
 // borrows from them.
 #allow(elided_lifetimes)
+// `c++::OpaqueRef` intentionally declares a layout without `#trivially_relocatable` to test that it
+// stays a zero-sized reference-only type in Rust while checking its layout in C++.
+#allow(layout_without_relocatable)
 
 #cpp_additional_includes "
 #include <cpp_type.h>
