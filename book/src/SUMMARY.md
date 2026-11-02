@@ -25,6 +25,7 @@
   - [C++ constructors](./call_cpp_from_rust/cpp_constructors.md)
   - [Free C++ functions](./call_cpp_from_rust/cpp_functions.md)
   - [C++ fields](./call_cpp_from_rust/cpp_fields.md)
+  - [C++ class templates](./call_cpp_from_rust/cpp_templates.md)
   - [Trait objects](./call_cpp_from_rust/trait_object.md)
 - [Import](./import.md)
 - [Lifetimes](./lifetimes.md)

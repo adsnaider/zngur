@@ -60,7 +60,9 @@ Every C++ class gets a constness parameter in Rust, which defaults to non-`const
   `distance(&p, &q)` works whether `p` and `q` are `const` or not. C++ only reads them, so that's
   sound. Return values, receivers and fields keep their constness.
 - Builtins have the same parameter through `zngur_lib::Cpp<T, C>`: `const int32_t&` is
-  `&'a Cpp<i32, Const>` (and `&'a Cpp<i32, C1>` as an argument).
+  `&'a Cpp<i32, Const>` (and `&'a Cpp<i32, C1>` as an argument). A `const` builtin as a C++
+  template argument is a `Cpp<i32, Const>` too (`c++::std::span<const i32>` is
+  `std::span<Cpp<i32, Const>>`), while a non-`const` one is just `i32` (`std::span<i32>`).
 
 ## References and lifetimes
 

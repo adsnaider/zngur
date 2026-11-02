@@ -65,10 +65,7 @@ C++ functions that Rust calls directly ([member functions](./call_cpp_from_rust/
 against C++, so zngur warns about elided ones (`elided_lifetimes`, silenced with `#allow(elided_lifetimes)` at the top of the file):
 
 ```zng
-type c++::IntVec {
-    #layout(size = 24, align = 8);
-    #trivially_relocatable;
-
+type c++::std::vector<i32> {
     unsafe fn at<'a>(&'a const self, usize) -> &'a const i32; // borrows from the vector...
     safe fn push_back<'a>(&'a unique var self, i32);          // ...so this can't be called meanwhile
 }

@@ -25,7 +25,10 @@ twice = 42 2.5
 Constructed CppType 1 2
 fields = 101 2
 CppType 101 2
+pairs = 34 3.75
+boxed = 11
 nodes = 1 -> 2, type = 5
+squares = 5 items, squares[3] = 9
 Constructed CppType 2 3
 const sum() = 5
 Constructed CppType 4 5
@@ -36,3 +39,6 @@ Constructed CppType 3 30
 Constructed CppType 10 20
 Constructed CppType 1 2
 total_with() = 33
+Destroyed Pair 50 6
+Destroyed Pair 1.5 2.25
+Destroyed Pair 30 4

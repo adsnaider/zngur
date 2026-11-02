@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use zngur_def::{
-    CppConstness, CppMethodReceiver, Lifetime, Merge, RustPathAndGenerics, RustTrait, RustType,
-    TypeVar, ZngurConstructor, ZngurCppConstructor, ZngurCppField, ZngurCppMethod, ZngurField,
-    ZngurMethod, ZngurMethodDetails, ZngurMethodReceiver, ZngurType, ZngurVariant,
+    CppConstness, CppMethodReceiver, CppTypePath, Lifetime, Merge, RustPathAndGenerics, RustTrait,
+    RustType, TypeVar, ZngurConstructor, ZngurCppConstructor, ZngurCppField, ZngurCppMethod,
+    ZngurField, ZngurMethod, ZngurMethodDetails, ZngurMethodReceiver, ZngurType, ZngurVariant,
 };
 
 fn match_lifetime<'a, 'b>(
@@ -181,7 +181,17 @@ fn matches_template<'a, 'b>(
         (RustType::Adt(adt1), RustType::Adt(adt2)) => {
             match_generics(adt1, adt2, template_lts, bound_fn_lts, mapping, lt_mapping)
         }
-        (RustType::Cpp(a), RustType::Cpp(b)) => a == b,
+        (RustType::Cpp(a), RustType::Cpp(b)) => {
+            a.path == b.path
+                && match_lists(
+                    &a.generics,
+                    &b.generics,
+                    template_lts,
+                    bound_fn_lts,
+                    mapping,
+                    lt_mapping,
+                )
+        }
         (RustType::CppPtr(k1, t1), RustType::CppPtr(k2, t2)) => {
             k1 == k2 && matches_template(t1, t2, template_lts, bound_fn_lts, mapping, lt_mapping)
         }
@@ -384,7 +394,10 @@ fn substitute_vars(
                 fresh_avoid,
                 in_scope_lts,
             )?),
-            c @ RustType::Cpp(_) => c.clone(),
+            RustType::Cpp(path) => RustType::Cpp(CppTypePath {
+                path: path.path.clone(),
+                generics: substitute_vec(&path.generics, ctx, fresh_avoid, in_scope_lts)?,
+            }),
             RustType::CppPtr(kind, t) => RustType::CppPtr(
                 *kind,
                 Box::new(substitute_type(t, ctx, fresh_avoid, in_scope_lts)?),

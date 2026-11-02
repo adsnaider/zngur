@@ -1,5 +1,6 @@
 alignas
 alignof
+arities
 assocs
 autozng
 barbaz

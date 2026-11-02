@@ -64,6 +64,49 @@ impl<'a> CppHeaderTemplate<'a> {
     pub fn cpp_handle_field_name(&self, name: &str) -> String {
         crate::cpp::cpp_handle_field_name(name)
     }
+
+    /// `self.type_defs` that specialize `CppTypeOf`, ordered so any inner `CppTypeOf` pointee is
+    /// specialized before an outer template instantiation whose arguments mention `CppPtr<...>` to
+    /// it.
+    fn cpp_type_of_defs(&self) -> Vec<&'a CppTypeDefinition> {
+        let defs: Vec<&'a CppTypeDefinition> = self
+            .type_defs
+            .iter()
+            .filter(|td| td.cpp_object_type().is_some())
+            .collect();
+        fn visit<'a>(
+            idx: usize,
+            defs: &[&'a CppTypeDefinition],
+            visited: &mut [bool],
+            out: &mut Vec<&'a CppTypeDefinition>,
+        ) {
+            if visited[idx] {
+                return;
+            }
+            visited[idx] = true;
+            fn visit_nested<'a>(
+                ty: &crate::cpp::CppType,
+                defs: &[&'a CppTypeDefinition],
+                visited: &mut [bool],
+                out: &mut Vec<&'a CppTypeDefinition>,
+            ) {
+                for arg in &ty.generic_args {
+                    visit_nested(arg, defs, visited, out);
+                    if let Some(dep) = defs.iter().position(|d| &d.ty == arg) {
+                        visit(dep, defs, visited, out);
+                    }
+                }
+            }
+            visit_nested(&defs[idx].ty, defs, visited, out);
+            out.push(defs[idx]);
+        }
+        let mut visited = vec![false; defs.len()];
+        let mut out = Vec::with_capacity(defs.len());
+        for idx in 0..defs.len() {
+            visit(idx, &defs, &mut visited, &mut out);
+        }
+        out
+    }
 }
 
 #[derive(Template)]
