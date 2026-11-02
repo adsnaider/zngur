@@ -638,6 +638,7 @@ dependencies = [
  "build-rs 0.3.4",
  "cc",
  "zngur",
+ "zngur-lib",
 ]
 
 [[package]]

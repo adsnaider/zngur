@@ -5,10 +5,7 @@ use std::{
 
 use indexmap::IndexMap;
 use itertools::Itertools;
-use zngur_def::{
-    CppHeapAllocatedData, CppStackOwnedData, LayoutPolicy, RustTrait, ZngurFieldData,
-    ZngurMethodReceiver,
-};
+use zngur_def::{LayoutPolicy, RustTrait, ZngurFieldData, ZngurMethodReceiver};
 
 use crate::{
     ZngurWellknownTraitData,
@@ -595,6 +592,13 @@ impl CppRef {
     }
 }
 
+/// A C++ type that Rust holds by value (`#layout` + `#trivially_relocatable`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CppStackOwnedData {
+    pub destructor_fn: String,
+    pub cpp_type: String,
+}
+
 #[derive(Debug)]
 pub struct CppTypeDefinition {
     pub ty: CppType,
@@ -607,19 +611,16 @@ pub struct CppTypeDefinition {
     pub from_trait: Option<RustTrait>,
     pub from_trait_ref: Option<RustTrait>,
     pub wellknown_traits: Vec<ZngurWellknownTraitData>,
-    pub cpp_heap_allocated: Option<CppHeapAllocatedData>,
     pub cpp_ref: Option<CppRef>,
     pub cpp_stack_owned: Option<CppStackOwnedData>,
     /// Whether the C++ code checks that the type that Rust holds by value is trivially
-    /// relocatable (`#trivially_relocatable` or `#cpp_stack_owned`, but not
-    /// `#unsafe(trivially_relocatable)`).
+    /// relocatable (`#trivially_relocatable`, as opposed to `#unsafe(trivially_relocatable)`).
     pub check_trivially_relocatable: bool,
 }
 
 impl CppTypeDefinition {
     /// The C++ type that this type's Rust wrapper holds or refers to directly, so that a
-    /// Rust reference or raw pointer to the wrapper is a C++ pointer to it. Heap-allocated types
-    /// don't have one: their wrapper only holds a pointer to the C++ object.
+    /// Rust reference or raw pointer to the wrapper is a C++ pointer to it.
     pub fn cpp_object_type(&self) -> Option<&str> {
         match (&self.cpp_stack_owned, &self.cpp_ref) {
             (Some(stack_owned), _) => Some(&stack_owned.cpp_type),
@@ -744,7 +745,6 @@ impl Default for CppTypeDefinition {
             wellknown_traits: vec![],
             from_trait: None,
             from_trait_ref: None,
-            cpp_heap_allocated: None,
             cpp_ref: None,
             cpp_stack_owned: None,
             check_trivially_relocatable: false,

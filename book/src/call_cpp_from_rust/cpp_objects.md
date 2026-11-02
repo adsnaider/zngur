@@ -9,10 +9,10 @@ A reference in a `.zng` file says what it refers to:
   `&'a mut T` is the only way to reach the value. It's written like a Rust reference, `&'a T` /
   `&'a mut T`, and C++ code that gets one must keep these rules.
 
-C++ classes (`c++::` types, except legacy `#cpp_heap_allocated` wrappers, which hold a Rust-owned
-pointer) are always C++ objects, so references to them always say `const` or `var`. Rust types
-(`crate::Foo`, `str`, slices, `Box`, ...) are always Rust values, so they never do. Builtins
-(`bool`, `i8`..=`i64`, `u8`..=`u64`, `usize`, `f32`, `f64`) and C++ pointers can be either.
+C++ classes (`c++::` types) are always C++ objects, so references to them always say `const` or
+`var`. Rust types (`crate::Foo`, `str`, slices, `Box`, ...) are always Rust values, so they never
+do. Builtins (`bool`, `i8`..=`i64`, `u8`..=`u64`, `usize`, `f32`, `f64`) and C++ pointers can be
+either.
 
 ## References to C++ objects
 

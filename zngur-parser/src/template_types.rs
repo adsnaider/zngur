@@ -982,9 +982,6 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
         constructor,
         variants,
         fields,
-        cpp_ref,
-        cpp_heap_allocated,
-        cpp_stack_owned,
     } = template;
     debug_assert_eq!(
         substitute_vars(
@@ -1194,9 +1191,6 @@ pub fn try_match_template(target: &ZngurType, template: &ZngurType) -> Option<Te
                 }
             })
             .collect(),
-        cpp_heap_allocated: cpp_heap_allocated.clone(),
-        cpp_ref: cpp_ref.clone(),
-        cpp_stack_owned: cpp_stack_owned.clone(),
     };
     Some(TemplateMatch(new_ty))
 }

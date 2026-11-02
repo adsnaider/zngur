@@ -5,11 +5,14 @@ is the C++ type `::osmium::Way`. Multiple declarations sharing a prefix can also
 `mod c++::osmium { type Way { ... } }`. What Rust can do with such a type follows from what the
 `.zng` file says about it:
 
-| Declaration                                                                    | Rust can                                                 |
-| ------------------------------------------------------------------------------ | -------------------------------------------------------- |
-| no layout                                                                      | only refer to it (`&const T`, `&var T`, `&unique var T`) |
-| a layout, without `#trivially_relocatable` or `#unsafe(trivially_relocatable)` | only refer to it (the layout is checked in C++)          |
-| a layout and `#trivially_relocatable` (or `#unsafe(trivially_relocatable)`)    | hold it by value, like a Rust value                      |
+| Declaration                                                                    | Rust can                                                                               |
+| ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------- |
+| no layout                                                                      | only refer to it (`&const T`, `&var T`, `&unique var T`, raw pointers, smart pointers) |
+| a layout, without `#trivially_relocatable` or `#unsafe(trivially_relocatable)` | only refer to it (the layout is checked in C++)                                        |
+| a layout and `#trivially_relocatable` (or `#unsafe(trivially_relocatable)`)    | hold it by value, like a Rust value                                                    |
+
+To own a C++ object that isn't trivially relocatable, hold it through a C++ smart pointer, like
+`std::unique_ptr` (see [C++ class templates](./cpp_templates.md)).
 
 > **NOTE**: In C++, the Rust wrapper of a `c++::a::B` type is `rust::cpp::a::B`, apart from the
 > wrappers of Rust types (`rust::crate::...`, `rust::std::...`, ...). In Rust, its wrapper is at
@@ -39,8 +42,9 @@ This enables passing references to `osmium::Way` across the boundary as C++ obje
 (`&'a const c++::osmium::Way`, `&'a var c++::osmium::Way`, `&'a unique var c++::osmium::Way`; see
 [C++ objects vs Rust values](./cpp_objects.md)), which C++ sees directly as `const ::osmium::Way&`
 or `::osmium::Way&` and Rust sees as `&'a Way<Const>`, `&'a Way`, or `&'a mut Way`. Rust can't do
-anything meaningful with it on its own except passing it back to C++ or calling `extern "C++"`
-`impl` and `impl Trait for` blocks written for `c++::osmium::Way` in C++. See
+anything meaningful with it on its own except passing it back to C++ or calling its
+[member functions](./cpp_methods.md). You can also write `extern "C++"` `impl` and `impl Trait for`
+blocks for `c++::osmium::Way` in C++. See
 [`examples/osmium`](https://github.com/HKalbasi/zngur/blob/main/examples/osmium) for a full working
 example.
 
@@ -173,6 +177,9 @@ The wrapper unconditionally implements the following traits defined in the `zngu
 - The marker `ZngCppStackObject`
 - The `ZngCppDestruct` trait with an `unsafe fn destruct(&mut self)`.
 
+C++ types that Rust holds by value can also be constructed in place, through
+[C++ constructors](./cpp_constructors.md).
+
 #### Conservative Layout
 
 When exact type size or alignment is not known ahead of time (e.g. across platforms or compiler
@@ -217,8 +224,5 @@ type c++::ns::Handle {
 }
 ```
 
-## Legacy `#cpp_*` Directives
-
-For backwards compatibility, `#cpp_ref`, `#cpp_stack_owned`, and `#cpp_heap_allocated` remain
-supported (with `#cpp_value` as a deprecated alias for `#cpp_heap_allocated`). On `c++::` types,
-their C++ type name argument may be omitted and defaults to the `c++::` path.
+> **NOTE**: `#cpp_stack_owned`, `#cpp_ref`, `#cpp_heap_allocated` and `#cpp_value` were removed.
+> zngur explains how to replace them when it finds them.

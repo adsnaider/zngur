@@ -393,23 +393,30 @@ In the same directory, create a `main.zng` file with the following content:
 //     #include "inventory.h"
 // "#
 
-type c++::Inventory {
-    #layout(size = 16, align = 8);
+type c++::cpp_inventory::Inventory {}
 
-    #cpp_heap_allocated "::cpp_inventory::Inventory";
+type c++::cpp_inventory::Item {}
+
+type c++::std::unique_ptr<c++::cpp_inventory::Inventory> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+
+    // `get()` returns a C++ pointer, which is null if the `unique_ptr` is empty: a nullable
+    // reference (`Option<&Inventory>`), which lives as long as the borrow of the `unique_ptr`.
+    safe fn get<'a>(&'a const self) -> ::std::option::Option<&'a var c++::cpp_inventory::Inventory>;
+    safe fn get<'a>(&'a unique var self) -> ::std::option::Option<&'a unique var c++::cpp_inventory::Inventory> as get_mut;
 }
 
-type c++::Item {
-    #layout(size = 16, align = 8);
-
-    #cpp_heap_allocated "::cpp_inventory::Item";
+type c++::std::unique_ptr<c++::cpp_inventory::Item> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
 }
 ```
 
-The `c++::` prefix tells Zngur to generate Rust wrapper structs directly inside the `generated`
-module (`generated::Inventory` and `generated::Item`, or nested submodules like `generated::ns::Foo`
-for `c++::ns::Foo`, which can also be grouped with `mod c++::ns { ... }`) and corresponding C++
-wrappers in the `rust::cpp` namespace (`rust::cpp::Inventory` and `rust::cpp::Item`).
+C++ types are named by their C++ path, after `c++::`. `Inventory` and `Item` have no layout, so Rust
+can only refer to them, as `&Inventory` or `&mut Inventory`. To own them, Rust holds
+`std::unique_ptr`s to them, which it can hold by value: they have a layout, and are trivially
+relocatable (they can be moved like Rust values).
 
 And add these to the `main.rs` file:
 
@@ -466,9 +473,15 @@ fn main() {
 }
 ```
 
-Now we have a `c++::Inventory` and a `c++::Item` that can contain their C++ counterparts.
-But there is no way to use them in Rust.
-In Zngur, the Rust side can't access C++ opaque objects.
+The generated code uses `zngur-lib`, so add it to your dependencies too:
+
+```toml
+[dependencies]
+zngur-lib = "0.10.0" # The same version as `zngur`
+```
+
+Now we have a `c++::cpp_inventory::Inventory` and a `c++::cpp_inventory::Item` that Rust can own
+through `std::unique_ptr`s. But there is no way to use them in Rust yet.
 So to make these types useful in Rust, we can add `impl` blocks for these types in C++.
 Add this to the `main.zng`:
 
@@ -481,14 +494,14 @@ type str {
 }
 
 extern "C++" {
-    impl c++::Inventory {
-        safe fn new_empty(u32) -> c++::Inventory;
+    impl c++::cpp_inventory::Inventory {
+        safe fn new_empty(u32) -> c++::std::unique_ptr<c++::cpp_inventory::Inventory>;
         safe fn add_banana(&mut self, u32);
-        safe fn add_item(&mut self, c++::Item);
+        safe fn add_item(&mut self, c++::std::unique_ptr<c++::cpp_inventory::Item>);
     }
 
-    impl c++::Item {
-        safe fn new(&str, u32) -> c++::Item;
+    impl c++::cpp_inventory::Item {
+        safe fn new(&str, u32) -> c++::std::unique_ptr<c++::cpp_inventory::Item>;
     }
 }
 ```
@@ -502,25 +515,32 @@ Create a file named `impls.cpp` with this content:
 
 namespace rust {
 
-using cpp::Inventory;
-using cpp::Item;
+using cpp::cpp_inventory::Inventory;
+using cpp::cpp_inventory::Item;
 
-Inventory Impl<Inventory>::new_empty(uint32_t space) {
-  return Inventory::build(space);
+// The Rust wrappers of `std::unique_ptr<Inventory>` and `std::unique_ptr<Item>`. (C++ types
+// declared in the `.zng` file have their wrappers in `rust::cpp`. Inside `namespace rust`, `std::`
+// is the namespace of Rust's standard library types; the C++ standard library is `::std::`.)
+using InventoryPtr = cpp::std::unique_ptr<Inventory>;
+using ItemPtr = cpp::std::unique_ptr<Item>;
+
+InventoryPtr Impl<Inventory>::new_empty(uint32_t space) {
+  return InventoryPtr::build(new ::cpp_inventory::Inventory(space));
 }
 
-Unit Impl<Inventory>::add_banana(RefMut<Inventory> self, uint32_t count) {
-  self.cpp().add_banana(count);
+// The receivers are C++ references to the C++ objects.
+Unit Impl<Inventory>::add_banana(::cpp_inventory::Inventory &self, uint32_t count) {
+  self.add_banana(count);
   return {};
 }
 
-Unit Impl<Inventory>::add_item(RefMut<Inventory> self, Item item) {
-  self.cpp().add_item(item.cpp());
+Unit Impl<Inventory>::add_item(::cpp_inventory::Inventory &self, ItemPtr item) {
+  self.add_item(::std::move(*item.cpp()));
   return {};
 }
 
-Item Impl<Item>::new_(Ref<Str> name, uint32_t size) {
-  return Item::build(cpp_inventory::Item{
+ItemPtr Impl<Item>::new_(Ref<Str> name, uint32_t size) {
+  return ItemPtr::build(new ::cpp_inventory::Item{
       .name = ::std::string(reinterpret_cast<const char *>(name.as_ptr()),
                             name.len()),
       .size = size});
@@ -549,7 +569,7 @@ In Zngur, that code is the wrapper, which lives in the C++ so it can do whatever
 
 In the Rust to C++ side, we used `zngur_dbg` macro to see the result.
 We will do the same here with the `dbg!` macro.
-To do that, we need to implement the `Debug` trait for `c++::Inventory`.
+To do that, we need to implement the `Debug` trait for `c++::cpp_inventory::Inventory`.
 Add this to the `main.zng`:
 
 ```
@@ -580,7 +600,7 @@ type ::std::fmt::Formatter {
 extern "C++" {
     // ...
 
-    impl std::fmt::Debug for c++::Inventory {
+    impl std::fmt::Debug for c++::cpp_inventory::Inventory {
         safe fn fmt(&self, &mut ::std::fmt::Formatter) -> ::std::fmt::Result;
     }
 }
@@ -600,12 +620,12 @@ static Ref<Str> rust_str_from_c_str(const char* input) {
   return CStr::from_ptr(reinterpret_cast<const int8_t*>(input)).to_str().expect("invalid_utf8"_rs);
 }
 
-Result Impl<Inventory, Debug>::fmt(Ref<Inventory> self, RefMut<Formatter> f) {
+Result Impl<Inventory, Debug>::fmt(::cpp_inventory::Inventory &self, RefMut<Formatter> f) {
   ::std::string result = "Inventory { remaining_space: ";
-  result += ::std::to_string(self.cpp().remaining_space);
+  result += ::std::to_string(self.remaining_space);
   result += ", items: [";
   bool is_first = true;
-  for (const auto &item : self.cpp().items) {
+  for (const auto &item : self.items) {
     if (!is_first) {
       result += ", ";
     } else {
@@ -624,24 +644,40 @@ Result Impl<Inventory, Debug>::fmt(Ref<Inventory> self, RefMut<Formatter> f) {
 } // namespace rust
 ```
 
-So now we can write the main function:
+So now we can write the main function. `std::unique_ptr<Inventory>` owns the inventory, and
+implementing `Deref` and `DerefMut` with its `get()` and `get_mut()` makes it work like a
+`Box<Inventory>`:
 
 ```Rust
-use generated::Inventory;
-use generated::Item;
+use generated::cpp_inventory::{Inventory, Item};
+use generated::std::unique_ptr;
+
+impl std::ops::Deref for unique_ptr<Inventory> {
+    type Target = Inventory;
+
+    fn deref(&self) -> &Inventory {
+        self.get().expect("empty std::unique_ptr")
+    }
+}
+
+impl std::ops::DerefMut for unique_ptr<Inventory> {
+    fn deref_mut(&mut self) -> &mut Inventory {
+        self.get_mut().expect("empty std::unique_ptr")
+    }
+}
 
 fn main() {
     let mut inventory = Inventory::new_empty(1000);
     inventory.add_banana(3);
     inventory.add_item(Item::new("apple", 5));
-    dbg!(inventory);
+    dbg!(&*inventory);
 }
 ```
 
 and run it:
 
 ```
-[examples/tutorial_cpp/src/main.rs:12] inventory = Inventory { remaining_space: 974, items: [Item { name: "banana", size: 7 }, Item { name: "banana", size: 7 }, Item { name: "banana", size: 7 }, Item { name: "apple", size: 5 }] }
+[examples/tutorial_cpp/src/main.rs:28:5] &*inventory = Inventory { remaining_space: 974, items: [Item { name: "banana", size: 7 }, Item { name: "banana", size: 7 }, Item { name: "banana", size: 7 }, Item { name: "apple", size: 5 }] }
 ```
 
 You can see the full code at [`examples/tutorial_cpp`](https://github.com/HKalbasi/zngur/blob/main/examples/tutorial_cpp)

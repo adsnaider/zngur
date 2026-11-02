@@ -720,39 +720,6 @@ pub struct ZngurMethodDetails {
     pub cpp_name: Option<String>,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct CppHeapAllocated(pub String);
-
-#[derive(Debug)]
-pub struct CppHeapAllocatedData {
-    pub bridge_fn: String,
-    pub cpp_type: String,
-}
-
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct CppRef(pub String);
-
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct CppStackOwned(pub String);
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CppStackOwnedData {
-    pub destructor_fn: String,
-    pub cpp_type: String,
-}
-
-impl Display for CppStackOwned {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl Display for CppRef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct ZngurType {
     pub ty: RustType,
@@ -770,31 +737,18 @@ pub struct ZngurType {
     pub methods: Vec<ZngurMethodDetails>,
     /// The C++ member functions of a C++ type, which Rust can call.
     pub cpp_methods: Vec<ZngurCppMethod>,
-    /// The C++ constructors of a C++ type that Rust holds by value.
+    /// The C++ constructors of a C++ type that Rust holds by value, which Rust can call.
     pub cpp_constructors: Vec<ZngurCppConstructor>,
-    /// Accessors for the fields of a C++ type.
+    /// Accessors for the fields (data members) of a C++ type.
     pub cpp_fields: Vec<ZngurCppField>,
     pub constructor: Option<ZngurConstructor>,
     pub variants: Vec<ZngurVariant>,
     pub fields: Vec<ZngurField>,
-    pub cpp_heap_allocated: Option<CppHeapAllocated>,
-    pub cpp_ref: Option<CppRef>,
-    pub cpp_stack_owned: Option<CppStackOwned>,
 }
 
 impl ZngurType {
-    /// The C++ name of a C++ type, e.g. `::a::B` (or the explicit name from a legacy
-    /// `#cpp_stack_owned`, `#cpp_ref`, or `#cpp_heap_allocated` directive).
+    /// The C++ name of a C++ (`c++::`) type, e.g. `::std::unique_ptr< ::a::B >`.
     pub fn cpp_name(&self) -> Option<String> {
-        if let Some(c) = &self.cpp_stack_owned {
-            return Some(c.0.clone());
-        }
-        if let Some(c) = &self.cpp_ref {
-            return Some(c.0.clone());
-        }
-        if let Some(c) = &self.cpp_heap_allocated {
-            return Some(c.0.clone());
-        }
         match &self.ty {
             RustType::Cpp(_) => self.ty.cpp_spelling().ok(),
             _ => None,
@@ -803,18 +757,6 @@ impl ZngurType {
 
     /// The size and alignment of a C++ type that Rust holds by value (see [`ZngurType::layout`]).
     pub fn cpp_by_value_layout(&self) -> Option<LayoutPolicy> {
-        if self.cpp_stack_owned.is_some() {
-            return match self.layout {
-                Some(
-                    layout @ (LayoutPolicy::StackAllocated { .. }
-                    | LayoutPolicy::Conservative { .. }),
-                ) => Some(layout),
-                _ => None,
-            };
-        }
-        if self.cpp_ref.is_some() || self.cpp_heap_allocated.is_some() {
-            return None;
-        }
         match (&self.ty, self.layout) {
             (
                 RustType::Cpp(_),
@@ -1120,8 +1062,6 @@ pub struct ModuleImport {
     /// Concrete instantiations of C++ class templates declared in the imported module (with erased
     /// lifetimes). Each entry has non-empty `generics`, and its `path` is also in `cpp_templates`.
     pub cpp_template_instantiations: Vec<CppTypePath>,
-    /// Subset of `cpp_types` declared with `#cpp_heap_allocated`.
-    pub cpp_heap_allocated_types: Vec<Vec<String>>,
     /// The `c++::` types of the imported module that Rust holds by value (including template
     /// instantiations), with their C++ types: C++ functions of this module that take or return
     /// them by value move them like this module's own.

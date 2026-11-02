@@ -639,12 +639,11 @@ impl WriteIDL for crate::ZngurType {
             writeln!(p, " {{")?;
             p.indent();
 
-            // Don't duplicate layout info: `#cpp_ref` and `?Sized` both imply a
-            // layout, and restating it is a parse error.
+            // `?Sized` implies a layout, and restating it is a parse error.
             let is_unsized = self
                 .wellknown_traits
                 .contains(&crate::ZngurWellknownTrait::Unsized);
-            if self.cpp_ref.is_none() && self.layout.is_some() && !is_unsized {
+            if self.layout.is_some() && !is_unsized {
                 p.write_indent()?;
                 p.write_idl(&self.layout)?;
             }
@@ -653,18 +652,6 @@ impl WriteIDL for crate::ZngurType {
             {
                 p.write_indent()?;
                 writeln!(p, "{directive};")?;
-            }
-            if self.cpp_heap_allocated.is_some() {
-                p.write_indent()?;
-                p.write_idl(&self.cpp_heap_allocated)?;
-            }
-            if self.cpp_ref.is_some() {
-                p.write_indent()?;
-                p.write_idl(&self.cpp_ref)?;
-            }
-            if self.cpp_stack_owned.is_some() {
-                p.write_indent()?;
-                p.write_idl(&self.cpp_stack_owned)?;
             }
 
             if p.enabled(&IDLItem::TypeWellknownTrait) {
@@ -845,34 +832,6 @@ impl WriteIDL for crate::LayoutPolicy {
                     writeln!(p, "only_by_ref;")?;
                 }
             }
-        }
-        Ok(())
-    }
-}
-
-impl WriteIDL for crate::CppStackOwned {
-    fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
-        if p.enabled(&IDLItem::TypeLayout) {
-            let ty = &self.0;
-            writeln!(p, r#"#cpp_stack_owned "{ty}";"#)?;
-        }
-        Ok(())
-    }
-}
-impl WriteIDL for crate::CppHeapAllocated {
-    fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
-        if p.enabled(&IDLItem::TypeLayout) {
-            let ty = &self.0;
-            writeln!(p, r#"#cpp_heap_allocated "{ty}";"#)?;
-        }
-        Ok(())
-    }
-}
-impl WriteIDL for crate::CppRef {
-    fn write_idl<W: Write>(&self, p: &mut IDLPrinter<W>) -> std::io::Result<()> {
-        if p.enabled(&IDLItem::TypeLayout) {
-            let ty = &self.0;
-            writeln!(p, r#"#cpp_ref "{ty}";"#)?;
         }
         Ok(())
     }
@@ -1167,9 +1126,6 @@ fn print_spec() {
             cpp_methods: vec![],
             cpp_constructors: vec![],
             cpp_fields: vec![],
-            cpp_heap_allocated: None,
-            cpp_ref: None,
-            cpp_stack_owned: None,
             trivially_relocatable: crate::TriviallyRelocatable::No,
         }],
         traits: indexmap::IndexMap::default(),
@@ -1342,7 +1298,7 @@ fn test_write_cpp_type_idl() {
             crate::ZngurType {
                 ty: crate::RustType::Cpp(vec!["Way".into()].into()),
                 lifetimes: vec![],
-                layout: Some(crate::LayoutPolicy::ZERO_SIZED_TYPE),
+                layout: None,
                 wellknown_traits: vec![],
                 exhaustive: true,
                 constructor: None,
@@ -1352,9 +1308,6 @@ fn test_write_cpp_type_idl() {
                 cpp_methods: vec![],
                 cpp_constructors: vec![],
                 cpp_fields: vec![],
-                cpp_heap_allocated: None,
-                cpp_ref: Some(crate::CppRef("::osmium::Way".into())),
-                cpp_stack_owned: None,
                 trivially_relocatable: crate::TriviallyRelocatable::No,
             },
             crate::ZngurType {
@@ -1384,10 +1337,7 @@ fn test_write_cpp_type_idl() {
                 cpp_methods: vec![],
                 cpp_constructors: vec![],
                 cpp_fields: vec![],
-                cpp_heap_allocated: Some(crate::CppHeapAllocated("::x::Name".into())),
-                cpp_ref: None,
-                cpp_stack_owned: None,
-                trivially_relocatable: crate::TriviallyRelocatable::No,
+                trivially_relocatable: crate::TriviallyRelocatable::Checked,
             },
         ],
         ..Default::default()
@@ -1401,12 +1351,11 @@ fn test_write_cpp_type_idl() {
 
     assert_eq!(
         "type c++::Way {
-    #cpp_ref \"::osmium::Way\";
 }
 
 type c++::a::b::Name {
     #layout(size = 16, align = 8);
-    #cpp_heap_allocated \"::x::Name\";
+    #trivially_relocatable;
 
     fn deref(&self) use ::core::ops::Deref;
 }
@@ -1431,9 +1380,6 @@ fn print_template_type_vars_in_dyn_and_fn_traits() {
         cpp_methods: vec![],
         cpp_constructors: vec![],
         cpp_fields: vec![],
-        cpp_heap_allocated: None,
-        cpp_ref: None,
-        cpp_stack_owned: None,
         trivially_relocatable: crate::TriviallyRelocatable::No,
     };
     let spec = crate::ZngurSpec {

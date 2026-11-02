@@ -175,87 +175,18 @@ type [u8] {
 }
 
 #[test]
-fn reparse_cpp_heap_allocated() {
-    let _ = check_round_trip(
-        r#"
-type crate::Way {
-    #layout(size = 16, align = 8);
-    #cpp_heap_allocated "::osmium::Way";
-}
-    "#,
-        expect![[r#"
-            type crate::Way {
-                #layout(size = 16, align = 8);
-                #cpp_heap_allocated "::osmium::Way";
-            }
-        "#]],
-    );
-}
-#[test]
-fn reparse_cpp_ref() {
-    let _ = check_round_trip(
-        r#"
-type crate::Way {
-    #cpp_ref "::osmium::Way";
-}
-    "#,
-        expect![[r#"
-            type crate::Way {
-                #cpp_ref "::osmium::Way";
-            }
-        "#]],
-    );
-}
-#[test]
-fn reparse_cpp_stack_owned() {
-    let _ = check_round_trip(
-        r#"
-type crate::Way {
-    #layout(size = 16, align = 8);
-    #cpp_stack_owned "::osmium::Way";
-}
-    "#,
-        expect![[r#"
-            type crate::Way {
-                #layout(size = 16, align = 8);
-                #cpp_stack_owned "::osmium::Way";
-            }
-        "#]],
-    );
-}
-
-#[test]
-fn reparse_cpp_stack_owned_conservative() {
-    let _ = check_round_trip(
-        r#"
-type crate::Way {
-    #layout_conservative(size = 16, align = 8);
-    #cpp_stack_owned "::osmium::Way";
-}
-    "#,
-        expect![[r#"
-            type crate::Way {
-                #layout_conservative(size = 16, align = 8);
-                #cpp_stack_owned "::osmium::Way";
-            }
-        "#]],
-    );
-}
-
-#[test]
 fn reparse_cpp_paths_and_modules() {
     let _ = check_round_trip(
         r#"
 use c++::a::b::Item as MyItem;
 
 type c++::Way {
-    #cpp_ref "::osmium::Way";
 }
 
 mod c++::a::b {
     type Item {
         #layout(size = 16, align = 8);
-        #cpp_heap_allocated "::x::Item";
+        #trivially_relocatable;
     }
 }
 
@@ -268,12 +199,11 @@ extern "C++" {
     "#,
         expect![[r#"
             type c++::Way {
-                #cpp_ref "::osmium::Way";
             }
 
             type c++::a::b::Item {
                 #layout(size = 16, align = 8);
-                #cpp_heap_allocated "::x::Item";
+                #trivially_relocatable;
             }
 
             extern "C++" {
