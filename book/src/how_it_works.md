@@ -103,9 +103,9 @@ Then it will call the underlying Rust function,
 and by `__zngur_internal_assume_deinit` it will ensure that the destructor for `i0` is not called.
 `i0` is now semantically moved in Rust, and it's Rust responsibility to destruct it.
 
-## Calling C++ functions from Rust
+## Calling C++ functions written for Rust
 
-Similarly, for exposing a C++ function to Rust,
+Similarly, for exposing a C++ function or `impl` block (from an `extern "C++"` block) to Rust,
 a function will be generated that takes all inputs and output by `uint8_t*`.
 
 ```C++
@@ -143,38 +143,72 @@ pub(crate) fn new_blob_store_client() -> Box<dyn crate::BlobStoreTrait> {
 }
 ```
 
-This could be a free function like the above example, a function in an inherent impl block, or a trait impl block. All of them
+This could be a free function like the above example, a function in an inherent `impl` block, or a trait `impl` block (for either a Rust type or a `c++::` type). All of them
 are implemented in this way.
+
+## How C++ types and direct C++ calls work in Rust
+
+When you declare a `type c++::...` in `main.zng`, Zngur generates a Rust struct parameterized by
+constness (`C: zngur_lib::Constness = zngur_lib::NonConst`, so `Foo` is non-`const` and
+`Foo<Const>` is `const`):
+
+- **Reference-only C++ types** (types without `#trivially_relocatable`) cannot be moved by `memcpy`,
+  so Rust never stores them by value. Zngur generates a zero-sized wrapper containing
+  `UnsafeCell<()>` (since C++ may mutate fields even behind `const` or shared references),
+  `PhantomData<*mut ()>` (`!Send` and `!Sync`), and `PhantomPinned` (`!Unpin`):
+
+  ```Rust
+  pub struct Widget<C: ::zngur_lib::Constness = ::zngur_lib::NonConst> {
+      _constness: ::core::marker::PhantomData<C>,
+      _cell: ::core::cell::UnsafeCell<()>,
+      _no_auto_traits: ::core::marker::PhantomData<*mut ()>,
+      _pinned: ::core::marker::PhantomPinned,
+  }
+  ```
+
+  References to C++ objects (`&Widget<Const>`, `&Widget`, `&mut Widget`) and nullable references
+  (`Option<&Widget>`, via Rust's null-pointer optimization) have the exact address of the C++
+  object (or null) and cross the `extern "C"` boundary as pointers, appearing as `const Widget&`,
+  `Widget&`, `const Widget*`, or `Widget*` in C++.
+
+- **Trivially relocatable C++ types** (types with both `#layout(size = S, align = A)` and
+  `#trivially_relocatable`) can be moved with `memcpy` and owned directly on the Rust stack. Zngur
+  generates an aligned byte buffer wrapped in `UnsafeCell<MaybeUninit<[u8; S]>>` whose `Drop`
+  implementation calls a generated `extern "C"` C++ destructor bridge (`i0->~T()`):
+
+  ```Rust
+  #[repr(C)]
+  #[repr(align(4))]
+  pub struct Point<C: ::zngur_lib::Constness = ::zngur_lib::NonConst> {
+      pub(crate) buffer: ::core::cell::UnsafeCell<::core::mem::MaybeUninit<[u8; 8]>>,
+      _no_auto_traits: ::core::marker::PhantomData<*mut ()>,
+      _pinned: ::core::marker::PhantomPinned,
+      _constness: ::core::marker::PhantomData<C>,
+  }
+  ```
+
+  On the C++ side, Zngur emits `static_assert` checks verifying `sizeof`, `alignof`, and
+  `rust::is_trivially_relocatable<T>::value`.
+
+For C++ member functions, constructors, field accessors, and free `c++::` functions, you do
+not write any C++ glue by hand: Zngur generates both the Rust methods/functions (returning an
+in-place `zngur_lib::CppCtor` closure for constructors) and the `extern "C"` bridge functions in
+`generated.cpp` that cast pointer receivers and references back to C++ pointers/references, move
+by-value `c++::` arguments, call the underlying C++ method, constructor (via placement `new`),
+field, or function, and write the result into the output slot `o`.
 
 ## Implementing Rust traits for C++ classes
 
-C++ types can't exist in Rust by value,
-since it might need a nontrivial move constructor incompatible with Rust moves.
-So for representing them in Rust, Zngur uses the following struct:
+Arbitrary C++ classes aren't necessarily trivially relocatable,
+since they might need a nontrivial move constructor incompatible with Rust moves.
+So when converting a C++ class into a `Box<dyn Trait>`, `make_box` allocates the object on the C++
+heap with `new` and passes its pointer along with a C++ `delete` callback
+(`[](uint8_t *d) { delete (::rust::crate::BlobStoreTrait *)d; }`) into a generated Rust builder.
+On the Rust side, Zngur wraps that pointer and destructor directly in a local `Wrapper` struct —
+essentially a type-erased `unique_ptr` — and implements `Drop` and the trait for it:
 
 ```Rust
-struct ZngurCppOpaqueOwnedObject {
-    data: *mut u8,
-    destructor: extern "C" fn(*mut u8),
-}
-
-impl Drop for ZngurCppOpaqueOwnedObject {
-    fn drop(&mut self) {
-        (self.destructor)(self.data)
-    }
-}
-```
-
-Where `data` is a `new`ed pointer in C++,
-and `destructor` is a function pointer that can `delete` that data,
-i.e. `[](uint8_t *d) { delete (T *)d; }`.
-It's basically a type erased `unique_ptr`.
-
-For converting a C++ class into a `Box<dyn Trait>`,
-Zngur generates a code like this in the Rust side:
-
-```Rust
-extern "C" {
+unsafe extern "C" {
     fn __zngur_crate_BlobStoreTrait_s13_put(data: *mut u8, i0: *mut u8, o: *mut u8);
     fn __zngur_crate_BlobStoreTrait_s13_tag(data: *mut u8, i0: *mut u8, i1: *mut u8, o: *mut u8);
     fn __zngur_crate_BlobStoreTrait_s13_metadata(data: *mut u8, i0: *mut u8, o: *mut u8);
@@ -187,12 +221,18 @@ pub extern "C" fn __zngur_crate_BlobStoreTrait_s13(
     o: *mut u8,
 ) {
     struct Wrapper {
-        value: ZngurCppOpaqueOwnedObject,
+        data: *mut u8,
+        destructor: extern "C" fn(*mut u8),
+    }
+    impl Drop for Wrapper {
+        fn drop(&mut self) {
+            (self.destructor)(self.data)
+        }
     }
     impl crate::BlobStoreTrait for Wrapper {
         fn put(&self, i0: &mut crate::MultiBuf) -> u64 {
             unsafe {
-                let data = self.value.ptr();
+                let data = self.data;
                 let mut i0 = ::core::mem::MaybeUninit::new(i0);
                 let mut r = ::core::mem::MaybeUninit::uninit();
                 __zngur_crate_BlobStoreTrait_s13_put(
@@ -205,7 +245,7 @@ pub extern "C" fn __zngur_crate_BlobStoreTrait_s13(
         }
         fn tag(&self, i0: u64, i1: &::core::primitive::str) -> () {
             unsafe {
-                let data = self.value.ptr();
+                let data = self.data;
                 let mut i0 = ::core::mem::MaybeUninit::new(i0);
                 let mut i1 = ::core::mem::MaybeUninit::new(i1);
                 let mut r = ::core::mem::MaybeUninit::uninit();
@@ -220,7 +260,7 @@ pub extern "C" fn __zngur_crate_BlobStoreTrait_s13(
         }
         fn metadata(&self, i0: u64) -> crate::BlobMetadata {
             unsafe {
-                let data = self.value.ptr();
+                let data = self.data;
                 let mut i0 = ::core::mem::MaybeUninit::new(i0);
                 let mut r = ::core::mem::MaybeUninit::uninit();
                 __zngur_crate_BlobStoreTrait_s13_metadata(
@@ -234,18 +274,17 @@ pub extern "C" fn __zngur_crate_BlobStoreTrait_s13(
     }
     unsafe {
         let this = Wrapper {
-            value: ZngurCppOpaqueOwnedObject::new(data, destructor),
+            data,
+            destructor,
         };
         let r: Box<dyn crate::BlobStoreTrait> = Box::new(this);
-        std::ptr::write(o as *mut _, r)
+        ::std::ptr::write(o as *mut _, r)
     }
 }
 ```
 
-Which constructs a `Wrapper` around `ZngurCppOpaqueOwnedObject`,
-and implements the trait for it.
-Inside of each trait function is very similar to a normal `C++` function used in Rust
-and contains the similar `MaybeUninit`s.
+Each trait method body forwards `self.data` and the `MaybeUninit`-wrapped arguments to the C++
+bridge function, just like an `extern "C++"` function called from Rust.
 
 Using that, `make_box` can be defined:
 

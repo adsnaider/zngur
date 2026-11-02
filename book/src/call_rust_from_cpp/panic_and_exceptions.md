@@ -1,7 +1,9 @@
 # Panic and exceptions
 
-By default, Zngur aborts the process if unwinding (Rust panic or C++ exception)
-reaches the cross-language boundary.
+By default, Zngur aborts the process if a Rust panic reaches the cross-language
+boundary (via Rust's `extern "C"` ABI). Uncaught C++ exceptions, on the other
+hand, must never unwind across the FFI boundary into Rust — doing so is
+undefined behavior (see [Safety](../safety.md)).
 Handling unwinding adds a non-zero performance cost to every function call
 and complicates things as catching unwinding can result in a corrupt state for some objects.
 (See [unwind safety](https://doc.rust-lang.org/std/panic/trait.UnwindSafe.html))

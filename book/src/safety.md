@@ -9,9 +9,10 @@ This page lists the ways that it can break the rules and things to consider for 
 
 ## C++ functions exposed into Rust
 
-Zngur supports multiple ways of calling C++ functions in Rust,
+Zngur supports multiple ways of exposing C++ code to Rust,
 including free functions in the `rust::exported_functions` namespace,
-writing `impl` blocks for Rust types,
+writing `impl` blocks for Rust or `c++::` types,
+converting C++ objects into `&dyn Trait` or `Box<dyn Trait>`,
 and converting a `std::function` into a `Box<dyn FnX()>`.
 In all of these, your C++ function should behave like a safe Rust function that avoids UB in all cases.
 This property is called *soundness*,
@@ -23,12 +24,54 @@ You can assume these things about your parameters:
 - `&T` is a valid reference at least until the end of your function to a `T`,
   but there may exist other threads that are reading it at the same time
   (and even writing on it, if it is an interior mutable type).
+- References to [C++ objects](./call_cpp_from_rust/cpp_objects.md) (`&'a const T`, `&'a var T`,
+  `&'a unique var T`) and nullable references (`Option<&'a ...>`) follow the rules listed in the
+  next section.
 - For `*mut T` and `*const T`, there is no guarantee.
   They may be dangling, null, unaligned, and anything.
   A safe Rust function basically can't do anything useful with a raw pointer in its arguments.
 
+In addition, **no C++ code called from Rust** — whether exposed via `extern "C++"` functions and
+`impl` blocks, `Box<dyn Trait>`, `Box<dyn FnX()>`, or called directly as below — may let a C++
+exception unwind across the FFI boundary into Rust; an uncaught C++ exception reaching Rust is
+undefined behavior.
+
 If your function is unsound and requires some specific preconditions to be called,
 consider making it `unsafe` to prevent Rust code from calling it carelessly.
+
+## Existing C++ functions called from Rust
+
+Rust can also call existing C++ functions and access C++ fields directly:
+[member functions](./call_cpp_from_rust/cpp_methods.md),
+[constructors](./call_cpp_from_rust/cpp_constructors.md),
+[field accessors](./call_cpp_from_rust/cpp_fields.md), and
+[free functions](./call_cpp_from_rust/cpp_functions.md).
+Declaring a function or constructor `safe` (or declaring a `field`, which defaults to safe unless
+written `unsafe field`) promises the same as above: that no arguments or field accesses can cause UB.
+Their C++ references, pointers, and calls come with these requirements:
+
+- A reference to a [C++ object](./call_cpp_from_rust/cpp_objects.md) (`&'a const T`, `&'a var T`)
+  promises that the object is valid for `'a` without data races (`c++::` objects are `!Sync`).
+  `const` vs `var` governs whether mutation is allowed through *that* reference; C++ may still
+  mutate any non-`unique` object meanwhile (even behind `&'a const T`, e.g. through `mutable` fields
+  or another non-`const` alias in C++, which is why Rust stores C++ objects in an `UnsafeCell` and
+  builtins in `zngur_lib::Cpp<T, ...>`). A `unique` reference (`&'a unique var T` or
+  `&'a unique const T`) additionally promises exclusive access for `'a` — nothing else reads or
+  writes the object meanwhile.
+- A reference to a Rust value (`&'a i32`, `&'a mut i32`) promises what Rust references always do:
+  the value isn't mutated (or, for `&mut`, accessed by anything else) meanwhile.
+- A nullable reference (`Option<&'a const T>`, a C++ `const T*`) promises the same as a reference
+  when it isn't null ([Nullable references](./call_cpp_from_rust/cpp_pointers.md#nullable-references)).
+- Zngur can't check any of that against C++: the `.zng` file promises it, so name the lifetimes
+  carefully ([Lifetimes](./lifetimes.md)).
+- A raw pointer (a C++-style `const T&` / `T*` in the `.zng` file) has no guarantee.
+  Zngur warns about `safe` functions that take one and safe mutable `field` accessors to one.
+- As with all C++ code called from Rust, C++ exceptions must not unwind across the FFI boundary into
+  Rust; an uncaught C++ exception reaching Rust is undefined behavior.
+
+Many C++ functions have preconditions beyond that (a valid index, a non-empty container, ...), and
+some C++ fields carry class invariants or raw pointers that safe Rust code must not overwrite freely.
+Declare those `unsafe` (or `unsafe field`).
 
 ## Lifetimes
 

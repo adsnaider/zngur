@@ -173,13 +173,13 @@ Just like with C++ opaque objects, we can define functions on an `extern "C++"` 
 ```zng
 extern "C++" {
     safe fn create_cpp_type(i32, i32) -> c++::MyCppWrapper;
-    safe fn print_cpp_type(&const c++::MyCppWrapper);
+    safe fn print_cpp_type<'a>(&'a const c++::MyCppWrapper);
 }
 ```
 
-In C++, references to C++ objects (`&const c++::MyCppWrapper`) cross directly as C++ references
-(`const ::MyCppWrapper&`), while by-value `rust::cpp::MyCppWrapper` provides `.cpp()` to access the
-inner C++ object.
+In C++, references to C++ objects (`&'a const c++::MyCppWrapper`) cross directly as C++ references
+(`const ::MyCppWrapper&`; see [C++ references and pointers](./cpp_pointers.md#in-c)), while by-value
+`rust::cpp::MyCppWrapper` provides `.cpp()` to access the inner C++ object.
 
 ```rust
 // main.rs

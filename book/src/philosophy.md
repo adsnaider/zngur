@@ -1,15 +1,17 @@
 # Design decisions
 
-## Keep Rust code normal and idiomatic. All glue code should live on the C++ side.
+## Keep Rust code normal and idiomatic, and let glue code live on the C++ side
 
 One of the most important uses of a C++/Rust interop tool like Zngur is in Rust rewrite projects.
 In those projects, most people are C++ experts but have little to no Rust experience.
-Writing glue code in Rust and using `UniquePtr`, `Pin` and similar constructs make Rust code weirder
-and harder than what Rust actually is, creating a not really great first Rust experience for them.
+Direct `c++::` bindings keep Rust types normal (by value when trivially relocatable, or behind
+ordinary references and C++ smart pointers without `Pin` ceremonies), so Rust callers don't have to
+juggle `Pin<&mut T>` everywhere. And when richer glue code is needed to turn a C++ API into an
+idiomatic, safe Rust API, Zngur lets you write that glue on the C++ side as well as in Rust.
 
-Writing glue code in C++ also makes things considerably easier,
-since C++ semantics are a superset of Rust semantics (See [idea](./zngur.md#idea))
-and Rust can't express all C++ things easily.
+Being able to write glue code in C++ makes adaptation considerably easier when C++ APIs rely on
+constructs Rust can't express directly, since C++ semantics are a superset of Rust semantics (See
+[idea](./zngur.md#idea)).
 
 ### Keep `main.zng` in a separate file
 
