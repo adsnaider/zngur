@@ -8,6 +8,7 @@ use cpp::CppPath;
 use cpp::CppTraitDefinition;
 use cpp::CppTypeDefinition;
 use cpp::CppVariant;
+use cpp_template::{CppTemplates, cpp_template, struct_name};
 use indexmap::map::Entry;
 use itertools::Itertools;
 use rust::CoroSupport;
@@ -16,6 +17,7 @@ use rust::IntoCpp;
 
 pub mod cpp;
 mod cpp_method;
+mod cpp_template;
 mod rust;
 mod template;
 
@@ -150,9 +152,10 @@ impl ZngurGenerator {
                 zng.imported_modules
                     .iter()
                     .flat_map(|m| &m.cpp_heap_allocated_types)
-                    .map(|segs| RustType::Cpp(segs.clone())),
+                    .map(|segs| RustType::Cpp(segs.clone().into())),
             )
             .collect();
+        let cpp_templates = CppTemplates::new(&zng.types, &mut rust_file, &mut cpp_tree);
         for mut ty_def in zng.types {
             let raw_lifetimes = ty_def.lifetimes.clone();
             let raw_ty = ty_def.ty.clone();
@@ -287,9 +290,15 @@ impl ZngurGenerator {
             if is_copy {
                 rust_file.add_static_is_copy_assert(&ty);
             }
+            // The Rust wrapper of a C++ type is in the module of its `c++::` path, except for
+            // instantiations of C++ class templates, which are structs at the root that their
+            // template's alias names.
+            let template = cpp_template(ty);
             let (type_name, is_cpp, module_path): (String, bool, Vec<String>) = match &ty {
-                RustType::Cpp(segs) => {
-                    let (name, path) = segs
+                RustType::Cpp(path) if template.is_some() => (struct_name(path), true, vec![]),
+                RustType::Cpp(path) => {
+                    let (name, path) = path
+                        .path
                         .split_last()
                         .expect("Cpp path must have at least one segment");
                     (name.clone(), true, path.to_vec())
@@ -299,6 +308,23 @@ impl ZngurGenerator {
                     false,
                     vec![],
                 ),
+            };
+            let insert_struct = |rust_file: &mut RustFile,
+                                 cpp_tree: &mut CppModuleTree,
+                                 def: &str| {
+                if template.is_some() {
+                    rust_file.text.push_str(def);
+                } else if is_cpp {
+                    cpp_tree.insert(&module_path, def);
+                } else {
+                    rust_file.text.push_str(def);
+                    cpp_tree.insert(
+                        &["cpp".to_owned()],
+                        &format!(
+                            "\n#[allow(dead_code)]\n#[deprecated(note = \"use `{type_name}` directly instead of `cpp::{type_name}`\")]\npub type {type_name} = super::{type_name};\n"
+                        ),
+                    );
+                }
             };
             let mut cpp_stack_owned_data = None;
             if let Some(cpp_type) = cpp_by_value_type {
@@ -379,17 +405,7 @@ impl ZngurGenerator {
     }}
 "#
                 );
-                if is_cpp {
-                    cpp_tree.insert(&module_path, &struct_def);
-                } else {
-                    rust_file.text.push_str(&struct_def);
-                    cpp_tree.insert(
-                        &["cpp".to_owned()],
-                        &format!(
-                            "\n#[allow(dead_code)]\n#[deprecated(note = \"use `{type_name}` directly instead of `cpp::{type_name}`\")]\npub type {type_name} = super::{type_name};\n"
-                        ),
-                    );
-                }
+                insert_struct(&mut rust_file, &mut cpp_tree, &struct_def);
             }
             if ty_def.cpp_heap_allocated.is_some() {
                 let struct_def = format!(
@@ -407,17 +423,7 @@ impl ZngurGenerator {
     }}
 "#
                 );
-                if is_cpp {
-                    cpp_tree.insert(&module_path, &struct_def);
-                } else {
-                    rust_file.text.push_str(&struct_def);
-                    cpp_tree.insert(
-                        &["cpp".to_owned()],
-                        &format!(
-                            "\n#[allow(dead_code)]\n#[deprecated(note = \"use `{type_name}` directly instead of `cpp::{type_name}`\")]\npub type {type_name} = super::{type_name};\n"
-                        ),
-                    );
-                }
+                insert_struct(&mut rust_file, &mut cpp_tree, &struct_def);
             }
             if cpp_ref.is_some() {
                 let struct_def = format!(
@@ -448,17 +454,10 @@ impl ZngurGenerator {
     }}
 "#
                 );
-                if is_cpp {
-                    cpp_tree.insert(&module_path, &struct_def);
-                } else {
-                    rust_file.text.push_str(&struct_def);
-                    cpp_tree.insert(
-                        &["cpp".to_owned()],
-                        &format!(
-                            "\n#[allow(dead_code)]\n#[deprecated(note = \"use `{type_name}` directly instead of `cpp::{type_name}`\")]\npub type {type_name} = super::{type_name};\n"
-                        ),
-                    );
-                }
+                insert_struct(&mut rust_file, &mut cpp_tree, &struct_def);
+            }
+            if let Some(template) = template {
+                cpp_templates.add_instantiation(&mut rust_file, template);
             }
             let mut cpp_methods = vec![];
             let mut constructor = None;
@@ -678,9 +677,24 @@ impl ZngurGenerator {
                 if !reexported.insert((module_crate.clone(), segs.clone())) {
                     continue;
                 }
+                let template_arity = module
+                    .cpp_template_instantiations
+                    .iter()
+                    .find(|inst| inst.path == *segs)
+                    .map(|inst| inst.generics.len());
                 let item = if local_cpp_fn_paths.contains(segs) {
-                    let is_heap = module.cpp_heap_allocated_types.contains(segs);
-                    if is_heap {
+                    if let Some(arity) = template_arity {
+                        let params = (0..arity)
+                            .map(|n| format!("T{n}"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!(
+                            "\n#[allow(dead_code, non_camel_case_types)]\npub type \
+                             {type_name}<{params}, C = ::zngur_lib::NonConst> = \
+                             ::{module_crate}::generated::{}<{params}, C>;\n",
+                            segs.join("::")
+                        )
+                    } else if module.cpp_heap_allocated_types.contains(segs) {
                         format!(
                             "\n#[allow(dead_code, non_camel_case_types)]\npub type {type_name} = \
                              ::{module_crate}::generated::{};\n",
@@ -880,7 +894,7 @@ fn real_inputs_of_method(method: &ZngurMethod, ty: &RustType) -> Vec<RustType> {
 mod tests {
     use zngur_def::*;
 
-    use crate::ZngurGenerator;
+    use crate::{ZngurGenerator, struct_name};
 
     fn minimal_heap_allocated_type(ty: RustType, cpp_path: &str) -> ZngurType {
         ZngurType {
@@ -989,7 +1003,13 @@ mod tests {
     }
 
     fn cpp(segments: &[&str]) -> RustType {
-        RustType::Cpp(segments.iter().map(|s| s.to_string()).collect())
+        RustType::Cpp(
+            segments
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .into(),
+        )
     }
 
     #[test]
@@ -1749,8 +1769,7 @@ pub type Handle = super::Handle;
                 vec!["ns".to_owned(), "Bar".to_owned()],
                 vec!["Top".to_owned()],
             ],
-            cpp_heap_allocated_types: vec![],
-            cpp_by_value_types: vec![],
+            ..Default::default()
         };
         let spec = ZngurSpec {
             // Duplicate `ModuleImport` entries (e.g. from two `merge`d files importing the same
@@ -2122,14 +2141,22 @@ pub type Handle = super::Handle;
     fn cpp_function_sharing_name_with_cpp_type_avoids_value_namespace_collision() {
         let local_foo = cpp(&["ns", "Foo"]);
         let imported_bar = cpp(&["ns", "Bar"]);
+        let imported_baz_path = CppTypePath {
+            path: vec!["ns".to_owned(), "Baz".to_owned()],
+            generics: vec![RustType::Primitive(PrimitiveRustType::Int(32))],
+        };
+        let imported_baz = RustType::Cpp(imported_baz_path.clone());
         let spec = ZngurSpec {
             types: vec![minimal_opaque_cpp_type(local_foo.clone())],
             imported_modules: vec![ModuleImport {
                 path: "./base.zng".into(),
                 crate_name: Some("base".to_owned()),
-                cpp_types: vec![vec!["ns".to_owned(), "Bar".to_owned()]],
-                cpp_heap_allocated_types: vec![],
-                cpp_by_value_types: vec![],
+                cpp_types: vec![
+                    vec!["ns".to_owned(), "Bar".to_owned()],
+                    vec!["ns".to_owned(), "Baz".to_owned()],
+                ],
+                cpp_template_instantiations: vec![imported_baz_path],
+                ..Default::default()
             }],
             cpp_funcs: vec![
                 ZngurCppFn {
@@ -2158,6 +2185,19 @@ pub type Handle = super::Handle;
                     output: RustType::UNIT,
                     is_safe: true,
                 },
+                ZngurCppFn {
+                    lifetimes: vec![Lifetime("a".to_owned())],
+                    namespace: vec!["ns".to_owned()],
+                    cpp_name: "Baz".to_owned(),
+                    rust_name: None,
+                    inputs: vec![RustType::Ref(
+                        Mutability::Not,
+                        Some(Lifetime("a".to_owned())),
+                        Box::new(RustType::CppConst(Box::new(imported_baz))),
+                    )],
+                    output: RustType::UNIT,
+                    is_safe: true,
+                },
             ],
             ..Default::default()
         };
@@ -2175,6 +2215,14 @@ pub type Handle = super::Handle;
             "{rust_code}"
         );
         assert!(!rust_code.contains("pub use ::base::generated::ns::Bar;"));
+        assert!(
+            rust_code.contains(
+                "pub type Baz<T0, C = ::zngur_lib::NonConst> = \
+                 ::base::generated::ns::Baz<T0, C>;"
+            ),
+            "{rust_code}"
+        );
+        assert!(!rust_code.contains("pub use ::base::generated::ns::Baz;"));
     }
 
     #[test]
@@ -2185,8 +2233,8 @@ pub type Handle = super::Handle;
                 path: "./geo.zng".into(),
                 crate_name: Some("geo".to_owned()),
                 cpp_types: vec![vec!["geo".to_owned(), "Point".to_owned()]],
-                cpp_heap_allocated_types: vec![],
                 cpp_by_value_types: vec![(point.clone(), "::geo::Point".to_owned())],
+                ..Default::default()
             }],
             cpp_funcs: vec![ZngurCppFn {
                 lifetimes: vec![],
@@ -2666,7 +2714,7 @@ pub type Handle = super::Handle;
                 crate_name: Some("bar_bindings".to_owned()),
                 cpp_types: vec![vec!["ns".to_owned(), "HeapFoo".to_owned()]],
                 cpp_heap_allocated_types: vec![vec!["ns".to_owned(), "HeapFoo".to_owned()]],
-                cpp_by_value_types: vec![],
+                ..Default::default()
             }],
             extern_cpp_impls: vec![ZngurExternCppImpl {
                 lifetimes: vec![],
@@ -3451,8 +3499,8 @@ pub type Handle = super::Handle;
                 path: "./bar.zng".into(),
                 crate_name: Some("bar_bindings".to_owned()),
                 cpp_types: vec![vec!["ns".to_owned(), "Bar".to_owned()]],
-                cpp_heap_allocated_types: vec![],
                 cpp_by_value_types: vec![(imported_bar, "::ns::Bar".to_owned())],
+                ..Default::default()
             }],
             types: vec![local_ty],
             ..Default::default()
@@ -3799,6 +3847,298 @@ pub type Handle = super::Handle;
                  ::a::B(::rust::__zngur_internal_move_from_rust< ::int32_t >(i0), *"
             ),
             "{cpp_code}"
+        );
+    }
+
+    #[test]
+    fn cpp_template_instantiations_share_an_alias() {
+        let b = cpp(&["a", "B"]);
+        let unique_ptr = |arg: RustType| {
+            RustType::Cpp(CppTypePath {
+                path: vec!["std".to_owned(), "unique_ptr".to_owned()],
+                generics: vec![arg],
+            })
+        };
+        let up_b = unique_ptr(b.clone());
+        let up_i32 = unique_ptr(RustType::Primitive(PrimitiveRustType::Int(32)));
+        let RustType::Cpp(up_b_path) = &up_b else {
+            unreachable!()
+        };
+        let RustType::Cpp(up_i32_path) = &up_i32 else {
+            unreachable!()
+        };
+        let up_b_struct = struct_name(up_b_path);
+        let up_i32_struct = struct_name(up_i32_path);
+        let spec = ZngurSpec {
+            types: vec![
+                minimal_opaque_cpp_type(b.clone()),
+                minimal_by_value_cpp_type(up_b.clone(), 8, 8),
+                minimal_opaque_cpp_type(up_i32.clone()),
+            ],
+            ..Default::default()
+        };
+        let (rust_code, _h, _cpp) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+
+        // One trait and alias for the template, in the template's module.
+        assert!(rust_code.contains("pub mod std {"), "{rust_code}");
+        assert_eq!(
+            rust_code
+                .matches(
+                    "pub trait __ZngurCppTemplate_unique_ptr<C: ::zngur_lib::Constness = \
+                     ::zngur_lib::NonConst> {"
+                )
+                .count(),
+            1,
+            "{rust_code}"
+        );
+        assert_eq!(
+            rust_code
+                .matches(
+                    "pub type unique_ptr<T0, C = ::zngur_lib::NonConst> = <T0 as \
+                     __ZngurCppTemplate_unique_ptr<C>>::Type;"
+                )
+                .count(),
+            1,
+            "{rust_code}"
+        );
+        // Each instantiation is a struct that the trait names for its arguments.
+        assert!(
+            rust_code.contains(&format!(
+                "impl<C: ::zngur_lib::Constness> std::__ZngurCppTemplate_unique_ptr<C> for a::B {{\n    \
+                 type Type = {up_b_struct}<C>;\n}}"
+            )),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(&format!(
+                "impl<C: ::zngur_lib::Constness> std::__ZngurCppTemplate_unique_ptr<C> for i32 {{\n    \
+                 type Type = {up_i32_struct}<C>;\n}}"
+            )),
+            "{rust_code}"
+        );
+        // Only by-value instantiations are `ZngCppStackObject`s.
+        assert!(
+            rust_code.contains(&format!(
+                "unsafe impl<C: ::zngur_lib::Constness> ::zngur_lib::ZngCppStackObject for \
+                 {up_b_struct}<C> {{}}"
+            )),
+            "{rust_code}"
+        );
+        assert!(
+            !rust_code.contains(&format!(
+                "::zngur_lib::ZngCppStackObject for {up_i32_struct}<C>"
+            )),
+            "{rust_code}"
+        );
+    }
+
+    #[test]
+    fn const_cpp_fields_and_template_arguments() {
+        let b = cpp(&["a", "B"]);
+        let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+        let mut ty = minimal_by_value_cpp_type(b, 8, 4);
+        ty.cpp_fields = vec![ZngurCppField {
+            name: "x".to_owned(),
+            rust_name: None,
+            ty: i32.clone(),
+            access: CppFieldAccess::Ref {
+                unique: false,
+                constness: CppConstness::Const,
+            },
+            is_safe: true,
+        }];
+        let span = RustType::Cpp(CppTypePath {
+            path: vec!["std".to_owned(), "span".to_owned()],
+            generics: vec![RustType::CppConst(Box::new(i32))],
+        });
+        let spec = ZngurSpec {
+            types: vec![ty, minimal_by_value_cpp_type(span, 16, 8)],
+            ..Default::default()
+        };
+        let (rust_code, h, cpp_code) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let cpp_code = cpp_code.expect("C++ field accessors need a C++ file");
+
+        assert!(
+            rust_code.contains("pub fn x(&self, ) -> &::zngur_lib::Cpp<i32, ::zngur_lib::Const>"),
+            "{rust_code}"
+        );
+        assert!(
+            cpp_code.contains(
+                "::rust::CppPtr< ::rust::CppConst< ::int32_t > > __zngur_o = \
+                 ::std::addressof((::rust::__zngur_internal_move_from_rust< ::rust::CppPtr< \
+                 ::rust::CppConst< ::rust::cpp::a::B > > >(i0))->x);"
+            ),
+            "{cpp_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "impl<C: ::zngur_lib::Constness> std::__ZngurCppTemplate_span<C> for \
+                 ::zngur_lib::Cpp<i32, ::zngur_lib::Const> {"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            h.contains("static_assert(sizeof(::std::span< const ::int32_t >) == 16"),
+            "{h}"
+        );
+    }
+
+    #[test]
+    fn cpp_template_pointer_args_and_nested_const_names() {
+        // Distinct nested `const` and `::` vs `__` paths produce distinct struct names.
+        let node = cpp(&["Node"]);
+        let span_of = |arg: RustType| CppTypePath {
+            path: vec!["std".to_owned(), "span".to_owned()],
+            generics: vec![arg],
+        };
+        let unique_ptr_of = |arg: RustType| {
+            RustType::Cpp(CppTypePath {
+                path: vec!["std".to_owned(), "unique_ptr".to_owned()],
+                generics: vec![arg],
+            })
+        };
+        let span_const_up = span_of(RustType::CppConst(Box::new(unique_ptr_of(node.clone()))));
+        let span_up_const = span_of(unique_ptr_of(RustType::CppConst(Box::new(node))));
+        assert_ne!(struct_name(&span_const_up), struct_name(&span_up_const));
+
+        let foo_a_b = CppTypePath {
+            path: vec!["Foo".to_owned()],
+            generics: vec![cpp(&["a", "b"])],
+        };
+        let foo_a_double_b = CppTypePath {
+            path: vec!["Foo".to_owned()],
+            generics: vec![cpp(&["a__b"])],
+        };
+        assert_ne!(struct_name(&foo_a_b), struct_name(&foo_a_double_b));
+
+        // Declaring `map<i32, const a::B*>` BEFORE `a::B` still emits `CppTypeOf<a::B>` before
+        // `CppTypeOf<map<...>>` and never emits unmangled `*` in `extern "C"` identifiers.
+        let b = cpp(&["a", "B"]);
+        let map_ty = RustType::Cpp(CppTypePath {
+            path: vec!["std".to_owned(), "map".to_owned()],
+            generics: vec![
+                RustType::Primitive(PrimitiveRustType::Int(32)),
+                RustType::cpp_ptr(Mutability::Not, CppIndirection::Pointer, b.clone()),
+            ],
+        });
+        let mut map_def = minimal_by_value_cpp_type(map_ty, 48, 8);
+        map_def.cpp_methods = vec![ZngurCppMethod {
+            cpp_name: "size".to_owned(),
+            lifetimes: vec![],
+            rust_name: None,
+            receiver: ZngurMethodReceiver::Ref(Mutability::Not),
+            receiver_lifetime: None,
+            receiver_constness: CppConstness::Const,
+            raw_receiver: None,
+            inputs: vec![],
+            output: RustType::Primitive(PrimitiveRustType::Usize),
+            is_safe: true,
+        }];
+        let spec = ZngurSpec {
+            types: vec![map_def, minimal_opaque_cpp_type(b)],
+            ..Default::default()
+        };
+        let (rust_code, h, cpp_code) =
+            ZngurGenerator::build_from_zng(spec, "test_crate".to_owned()).render(false);
+        let cpp_code = cpp_code.expect("C++ methods need a C++ file");
+
+        assert!(
+            rust_code.contains(
+                "pub trait __ZngurCppTemplate_map<T1, C: ::zngur_lib::Constness = \
+                 ::zngur_lib::NonConst> {"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "pub type map<T0, T1, C = ::zngur_lib::NonConst> = <T0 as \
+                 __ZngurCppTemplate_map<T1, C>>::Type;"
+            ),
+            "{rust_code}"
+        );
+        assert!(
+            rust_code.contains(
+                "impl<C: ::zngur_lib::Constness> std::__ZngurCppTemplate_map<*const \
+                 a::B::<::zngur_lib::Const>, C> for i32 {"
+            ),
+            "{rust_code}"
+        );
+        for line in rust_code.lines().chain(h.lines()).chain(cpp_code.lines()) {
+            if let Some(after) = line.split("fn _zngur_").nth(1) {
+                let ident = after.split('(').next().unwrap_or("");
+                assert!(
+                    !ident.contains('*'),
+                    "unmangled `*` in extern symbol `{ident}`: {line}"
+                );
+            }
+        }
+        let pos_b = h
+            .find("struct CppTypeOf< ::rust::cpp::a::B >")
+            .expect("missing CppTypeOf for a::B");
+        let pos_map = h
+            .find("struct CppTypeOf< ::rust::cpp::std::map<")
+            .expect("missing CppTypeOf for std::map");
+        assert!(
+            pos_b < pos_map,
+            "CppTypeOf<a::B> must precede CppTypeOf<std::map<..., const a::B*>>:\n{h}"
+        );
+
+        // `CppTypeOf` specializations must also precede `zngur_is_unsized` specializations so
+        // unsized slice/dyn types mentioning `CppPtr<...>` (e.g. `[c++::View<const c++::Node*>]`)
+        // do not instantiate `CppTypeOf` before its explicit specialization.
+        let node = cpp(&["Node"]);
+        let view_ty = RustType::Cpp(CppTypePath {
+            path: vec!["View".to_owned()],
+            generics: vec![RustType::cpp_ptr(
+                Mutability::Not,
+                CppIndirection::Pointer,
+                node.clone(),
+            )],
+        });
+        let slice_def = ZngurType {
+            ty: RustType::Slice(Box::new(view_ty.clone())),
+            lifetimes: vec![],
+            layout: Some(LayoutPolicy::OnlyByRef),
+            trivially_relocatable: TriviallyRelocatable::No,
+            wellknown_traits: vec![ZngurWellknownTrait::Unsized],
+            exhaustive: true,
+            methods: vec![],
+            cpp_methods: vec![],
+            cpp_constructors: vec![],
+            cpp_fields: vec![],
+            constructor: None,
+            variants: vec![],
+            fields: vec![],
+            cpp_heap_allocated: None,
+            cpp_ref: None,
+            cpp_stack_owned: None,
+        };
+        let (_, unsized_h, _) = ZngurGenerator::build_from_zng(
+            ZngurSpec {
+                types: vec![
+                    slice_def,
+                    minimal_opaque_cpp_type(view_ty),
+                    minimal_opaque_cpp_type(node),
+                ],
+                ..Default::default()
+            },
+            "test_crate".to_owned(),
+        )
+        .render(false);
+        let pos_node_cpp_type = unsized_h
+            .find("struct CppTypeOf< ::rust::cpp::Node >")
+            .expect("missing CppTypeOf for Node");
+        let pos_view_cpp_type = unsized_h
+            .find("struct CppTypeOf< ::rust::cpp::View<")
+            .expect("missing CppTypeOf for View");
+        let pos_unsized = unsized_h
+            .find("struct zngur_is_unsized<")
+            .expect("missing zngur_is_unsized");
+        assert!(
+            pos_node_cpp_type < pos_view_cpp_type && pos_view_cpp_type < pos_unsized,
+            "CppTypeOf specializations must precede zngur_is_unsized:\n{unsized_h}"
         );
     }
 }

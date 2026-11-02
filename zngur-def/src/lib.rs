@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn test_generic_const_input() {
-        let a_b = RustType::Cpp(vec!["a".to_owned(), "B".to_owned()]);
+        let a_b = RustType::Cpp(vec!["a".to_owned(), "B".to_owned()].into());
         let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
         let lt = Some(Lifetime("a".to_owned()));
         let const_ref = |m, l: Option<Lifetime>, t: &RustType| {
@@ -198,7 +198,7 @@ mod tests {
 
     #[test]
     fn test_nullable_cpp_refs() {
-        let a_b = RustType::Cpp(vec!["a".to_owned(), "B".to_owned()]);
+        let a_b = RustType::Cpp(vec!["a".to_owned(), "B".to_owned()].into());
         let lt = Some(Lifetime("a".to_owned()));
         let option = |root: &str, m, constness| {
             RustType::Adt(RustPathAndGenerics {
@@ -282,14 +282,14 @@ mod tests {
         let ty = RustType::cpp_ptr(
             Mutability::Not,
             CppIndirection::Reference,
-            RustType::Cpp(vec!["a".to_owned(), "Name".to_owned()]),
+            RustType::Cpp(vec!["a".to_owned(), "Name".to_owned()].into()),
         );
         // C++-style pointers and references are raw pointers.
         assert_eq!(ty.to_string(), "*const a::Name::<::zngur_lib::Const>");
         let ty = RustType::cpp_ptr(
             Mutability::Mut,
             CppIndirection::Reference,
-            RustType::Cpp(vec!["a".to_owned(), "Name".to_owned()]),
+            RustType::Cpp(vec!["a".to_owned(), "Name".to_owned()].into()),
         );
         assert_eq!(ty.to_string(), "*mut a::Name");
         let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn test_references_to_cpp_objects() {
-        let name = RustType::Cpp(vec!["a".to_owned(), "Name".to_owned()]);
+        let name = RustType::Cpp(vec!["a".to_owned(), "Name".to_owned()].into());
         let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
         let lifetime = Some(Lifetime("a".to_owned()));
         let reference = |m, constness, ty| {
@@ -459,9 +459,45 @@ mod tests {
     }
 
     #[test]
+    fn test_cpp_const_spelling() {
+        let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
+        let span = RustType::Cpp(CppTypePath {
+            path: vec!["std".to_owned(), "span".to_owned()],
+            generics: vec![RustType::CppConst(Box::new(i32.clone()))],
+        });
+        assert_eq!(
+            span.cpp_spelling().unwrap(),
+            "::std::span< const ::int32_t >"
+        );
+        assert_eq!(
+            span.to_string(),
+            "std::span::<::zngur_lib::Cpp<i32, ::zngur_lib::Const>>"
+        );
+        let unique_ptr = RustType::CppConst(Box::new(RustType::Cpp(CppTypePath {
+            path: vec!["std".to_owned(), "unique_ptr".to_owned()],
+            generics: vec![RustType::Cpp(vec!["a".to_owned(), "B".to_owned()].into())],
+        })));
+        assert_eq!(
+            unique_ptr.to_string(),
+            "std::unique_ptr::<a::B, ::zngur_lib::Const>"
+        );
+        let ptr = RustType::cpp_ptr(Mutability::Not, CppIndirection::Pointer, i32.clone());
+        assert_eq!(ptr.cpp_spelling().unwrap(), "const ::int32_t*");
+        let ptr = RustType::cpp_ptr(Mutability::Mut, CppIndirection::Pointer, i32);
+        assert_eq!(ptr.cpp_spelling().unwrap(), "::int32_t*");
+        let const_ptr = RustType::CppConst(Box::new(ptr));
+        assert_eq!(const_ptr.cpp_spelling().unwrap(), "::int32_t* const");
+    }
+
+    #[test]
     fn test_cpp_display() {
-        let cpp = RustType::Cpp(vec!["a".to_owned(), "b".to_owned(), "Name".to_owned()]);
+        let cpp = RustType::Cpp(vec!["a".to_owned(), "b".to_owned(), "Name".to_owned()].into());
         assert_eq!(cpp.to_string(), "a::b::Name");
+        let generic = RustType::Cpp(CppTypePath {
+            path: vec!["std".to_owned(), "unique_ptr".to_owned()],
+            generics: vec![cpp, RustType::Primitive(PrimitiveRustType::Int(32))],
+        });
+        assert_eq!(generic.to_string(), "std::unique_ptr::<a::b::Name, i32>");
     }
 }
 
@@ -759,7 +795,10 @@ impl ZngurType {
         if let Some(c) = &self.cpp_heap_allocated {
             return Some(c.0.clone());
         }
-        self.ty.cpp_spelling()
+        match &self.ty {
+            RustType::Cpp(_) => self.ty.cpp_spelling().ok(),
+            _ => None,
+        }
     }
 
     /// The size and alignment of a C++ type that Rust holds by value (see [`ZngurType::layout`]).
@@ -1039,7 +1078,7 @@ pub struct ConvertPanicToException(pub bool);
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Import(pub std::path::PathBuf);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModuleImport {
     pub path: std::path::PathBuf,
     /// The `#crate` of the imported module, if it has one.
@@ -1047,6 +1086,9 @@ pub struct ModuleImport {
     /// The `c++::` types that the imported module declares (their paths, without `c++::`). Their
     /// Rust wrappers live at `::<crate_name>::generated::<path>`.
     pub cpp_types: Vec<Vec<String>>,
+    /// Concrete instantiations of C++ class templates declared in the imported module (with erased
+    /// lifetimes). Each entry has non-empty `generics`, and its `path` is also in `cpp_types`.
+    pub cpp_template_instantiations: Vec<CppTypePath>,
     /// Subset of `cpp_types` declared with `#cpp_heap_allocated`.
     pub cpp_heap_allocated_types: Vec<Vec<String>>,
     /// The `c++::` types from this module that Rust holds by value, paired with their C++
@@ -1194,7 +1236,9 @@ pub enum RustType {
     Tuple(Vec<RustType>),
     Adt(RustPathAndGenerics),
     TypeVar(TypeVar),
-    Cpp(Vec<String>),
+    /// A C++ type, declared with a `c++::` path. Its C++ name is the path, e.g. `c++::a::B` is
+    /// `::a::B`, and `c++::std::unique_ptr<c++::a::B>` is `::std::unique_ptr< ::a::B >`.
+    Cpp(CppTypePath),
     /// A C++-style pointer or reference (`T*` or `T&` in the `.zng` file) to a C++ object, which is
     /// always a [`RustType::CppConst`] (`const T*`, `const T&`) or a [`RustType::CppVar`] (`T*`,
     /// `T&`). Both are raw pointers in Rust (`*const T<Const>` / `*mut T`, `*const Cpp<i32, Const>`
@@ -1204,12 +1248,41 @@ pub enum RustType {
     /// A `const` C++ object (`const T` in the `.zng` file), where `T` is a `c++::` type, a builtin
     /// or a C++ pointer. It's a `T<Const>` in Rust for `c++::` types, and a
     /// `zngur_lib::Cpp<T, Const>` for builtins and pointers. It's the pointee of C++ references
-    /// and pointers to `const`.
+    /// and pointers to `const`, or a C++ template argument (`c++::std::span<const i32>`).
     CppConst(Box<RustType>),
     /// A non-`const` C++ object (`var T` in a reference, or the pointee of `T*` / `T&`). It's a
     /// `T` in Rust for `c++::` types, and a `zngur_lib::Cpp<T>` for builtins and pointers. It's
     /// only the pointee of references and pointers.
     CppVar(Box<RustType>),
+}
+
+/// The path of a [`RustType::Cpp`] type, without the `c++::` prefix, and its template arguments.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppTypePath {
+    pub path: Vec<String>,
+    /// The template arguments: other C++ types, builtins and C++ pointers.
+    pub generics: Vec<RustType>,
+}
+
+impl From<Vec<String>> for CppTypePath {
+    fn from(path: Vec<String>) -> Self {
+        CppTypePath {
+            path,
+            generics: vec![],
+        }
+    }
+}
+
+impl Display for CppTypePath {
+    /// The Rust path of the wrapper, relative to the generated code's root (e.g.
+    /// `std::unique_ptr::<a::B>`).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.path.join("::"))?;
+        if !self.generics.is_empty() {
+            write!(f, "::<{}>", self.generics.iter().join(", "))?;
+        }
+        Ok(())
+    }
 }
 
 /// Whether a C++ function takes (or returns) a [`RustType::CppPtr`] as a pointer or a reference.
@@ -1320,8 +1393,8 @@ impl RustType {
         }
     }
 
-    /// The type variables in `self` (e.g. `T` in a template `crate::Foo<T>`), in order of
-    /// appearance, without duplicates.
+    /// The type variables in `self` (e.g. `T` in the template `c++::std::unique_ptr<T>`), in order
+    /// of appearance, without duplicates.
     pub fn type_vars(&self) -> Vec<&TypeVar> {
         fn collect<'a>(ty: &'a RustType, out: &mut Vec<&'a TypeVar>) {
             let all = |tys: &'a [RustType], out: &mut Vec<&'a TypeVar>| {
@@ -1345,6 +1418,7 @@ impl RustType {
                     all(&pg.generics, out);
                     pg.named_generics.iter().for_each(|(_, t)| collect(t, out));
                 }
+                RustType::Cpp(path) => all(&path.generics, out),
                 RustType::Dyn(tr, _) | RustType::Impl(tr, _) => match tr {
                     RustTrait::Normal(pg) => {
                         all(&pg.generics, out);
@@ -1355,7 +1429,7 @@ impl RustType {
                         collect(output, out);
                     }
                 },
-                RustType::Primitive(_) | RustType::Cpp(_) => {}
+                RustType::Primitive(_) => {}
             }
         }
         let mut out = vec![];
@@ -1418,8 +1492,9 @@ impl RustType {
                 | RustType::CppVar(t) => go(t, out),
                 RustType::Tuple(tys) => tys.iter().for_each(|t| go(t, out)),
                 RustType::Adt(pg) => go_path(pg, out),
+                RustType::Cpp(path) => path.generics.iter().for_each(|t| go(t, out)),
                 RustType::Dyn(tr, _) | RustType::Impl(tr, _) => go_trait(tr, out),
-                RustType::Primitive(_) | RustType::TypeVar(_) | RustType::Cpp(_) => {}
+                RustType::Primitive(_) | RustType::TypeVar(_) => {}
             }
         }
         let mut out = Vec::new();
@@ -1547,7 +1622,15 @@ impl RustType {
                 RustType::Impl(tr, bounds) => {
                     RustType::Impl(go_trait(tr, in_scope, avoid), bounds.clone())
                 }
-                RustType::Primitive(_) | RustType::TypeVar(_) | RustType::Cpp(_) => ty.clone(),
+                RustType::Cpp(path) => RustType::Cpp(CppTypePath {
+                    path: path.path.clone(),
+                    generics: path
+                        .generics
+                        .iter()
+                        .map(|t| go(t, in_scope, avoid))
+                        .collect(),
+                }),
+                RustType::Primitive(_) | RustType::TypeVar(_) => ty.clone(),
             }
         }
         go(self, outer_in_scope, avoid)
@@ -1588,11 +1671,15 @@ impl RustType {
                 RustType::CppVar(t) => RustType::CppVar(Box::new(go(t, bound, f))),
                 RustType::Tuple(tys) => RustType::Tuple(all(tys, f)),
                 RustType::Adt(pg) => RustType::Adt(go_path(pg, bound, f)),
+                RustType::Cpp(path) => RustType::Cpp(CppTypePath {
+                    path: path.path.clone(),
+                    generics: all(&path.generics, f),
+                }),
                 RustType::Dyn(tr, bounds) => RustType::Dyn(go_trait(tr, bound, f), bounds.clone()),
                 RustType::Impl(tr, bounds) => {
                     RustType::Impl(go_trait(tr, bound, f), bounds.clone())
                 }
-                RustType::Primitive(_) | RustType::TypeVar(_) | RustType::Cpp(_) => ty.clone(),
+                RustType::Primitive(_) | RustType::TypeVar(_) => ty.clone(),
             }
         }
         fn go_path(
@@ -1678,9 +1765,17 @@ impl RustType {
                 RustType::Tuple(tys.iter().map(RustType::with_erased_lifetimes).collect())
             }
             RustType::Adt(pg) => RustType::Adt(pg.with_erased_lifetimes()),
+            RustType::Cpp(path) => RustType::Cpp(CppTypePath {
+                path: path.path.clone(),
+                generics: path
+                    .generics
+                    .iter()
+                    .map(RustType::with_erased_lifetimes)
+                    .collect(),
+            }),
             RustType::Dyn(tr, bounds) => RustType::Dyn(erase_trait(tr), bounds.clone()),
             RustType::Impl(tr, bounds) => RustType::Impl(erase_trait(tr), bounds.clone()),
-            RustType::Primitive(_) | RustType::TypeVar(_) | RustType::Cpp(_) => self.clone(),
+            RustType::Primitive(_) | RustType::TypeVar(_) => self.clone(),
         }
     }
 
@@ -1733,8 +1828,9 @@ impl RustType {
                 | RustType::CppVar(t) => check(t, fn_bound, in_fn),
                 RustType::Tuple(tys) => tys.iter().any(|t| check(t, fn_bound, in_fn)),
                 RustType::Adt(pg) => check_path(pg, fn_bound, in_fn),
+                RustType::Cpp(path) => path.generics.iter().any(|t| check(t, fn_bound, in_fn)),
                 RustType::Dyn(tr, _) | RustType::Impl(tr, _) => check_trait(tr, fn_bound, in_fn),
-                RustType::Primitive(_) | RustType::TypeVar(_) | RustType::Cpp(_) => false,
+                RustType::Primitive(_) | RustType::TypeVar(_) => false,
             }
         }
         check(self, &[], false)
@@ -1815,13 +1911,17 @@ impl RustType {
                     RustType::Tuple(tys.iter().map(|t| go(t, env, depth)).collect())
                 }
                 RustType::Adt(pg) => RustType::Adt(go_path(pg, env, depth)),
+                RustType::Cpp(path) => RustType::Cpp(CppTypePath {
+                    path: path.path.clone(),
+                    generics: path.generics.iter().map(|t| go(t, env, depth)).collect(),
+                }),
                 RustType::Dyn(tr, bounds) => {
                     RustType::Dyn(go_trait(tr, env, depth), bounds.clone())
                 }
                 RustType::Impl(tr, bounds) => {
                     RustType::Impl(go_trait(tr, env, depth), bounds.clone())
                 }
-                RustType::Primitive(_) | RustType::TypeVar(_) | RustType::Cpp(_) => ty.clone(),
+                RustType::Primitive(_) | RustType::TypeVar(_) => ty.clone(),
             }
         }
         let env: Vec<(Lifetime, Lifetime)> = outer
@@ -1832,12 +1932,54 @@ impl RustType {
         go(self, &env, 0)
     }
 
-    /// The C++ spelling of a `c++::` type, e.g. `::a::B` for `c++::a::B`.
-    pub fn cpp_spelling(&self) -> Option<String> {
-        match self {
-            RustType::Cpp(segs) => Some(format!("::{}", segs.join("::"))),
-            _ => None,
-        }
+    /// The C++ spelling of a `c++::` type or of one of its template arguments, e.g. `::a::B`,
+    /// `::std::unique_ptr< ::a::B >` or `const int32_t*`. `Err` explains why `self` can't be a
+    /// C++ template argument.
+    pub fn cpp_spelling(&self) -> Result<String, String> {
+        Ok(match self {
+            RustType::Cpp(path) => {
+                let name = format!("::{}", path.path.join("::"));
+                if path.generics.is_empty() {
+                    name
+                } else {
+                    let args = path
+                        .generics
+                        .iter()
+                        .map(RustType::cpp_spelling)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    // Spaces, so that `<::` and `>>` are never digraphs or shifts, even in C++03.
+                    format!("{name}< {} >", args.join(", "))
+                }
+            }
+            RustType::Primitive(p) => match p {
+                PrimitiveRustType::Int(n @ (8 | 16 | 32 | 64)) => format!("::int{n}_t"),
+                PrimitiveRustType::Uint(n @ (8 | 16 | 32 | 64)) => format!("::uint{n}_t"),
+                PrimitiveRustType::Float(32) => "float".to_owned(),
+                PrimitiveRustType::Float(64) => "double".to_owned(),
+                PrimitiveRustType::Usize => "::size_t".to_owned(),
+                PrimitiveRustType::Bool => "bool".to_owned(),
+                p => return Err(format!("`{p}` has no C++ equivalent")),
+            },
+            RustType::CppPtr(indirection, t) => {
+                let sigil = match indirection {
+                    CppIndirection::Pointer => "*",
+                    CppIndirection::Reference => "&",
+                };
+                format!("{}{sigil}", t.cpp_spelling()?)
+            }
+            // `T* const` for a `const` pointer, rather than `const T*`.
+            RustType::CppConst(t) if matches!(**t, RustType::CppPtr(..)) => {
+                format!("{} const", t.cpp_spelling()?)
+            }
+            RustType::CppConst(t) => format!("const {}", t.cpp_spelling()?),
+            RustType::CppVar(t) => t.cpp_spelling()?,
+            ty => {
+                return Err(format!(
+                    "`{ty}` can't be a C++ template argument (only `c++::` types, builtins and \
+                     C++ pointers and references can, `const` or not)"
+                ));
+            }
+        })
     }
 }
 
@@ -1943,7 +2085,7 @@ impl Display for RustType {
             }
             RustType::Slice(s) => write!(f, "[{s}]"),
             RustType::TypeVar(TypeVar(v)) => write!(f, "{v}"),
-            RustType::Cpp(segs) => write!(f, "{}", segs.join("::")),
+            RustType::Cpp(path) => write!(f, "{path}"),
             // C++-style pointers and references are raw pointers in Rust.
             RustType::CppPtr(_, pointee) => match &**pointee {
                 RustType::CppConst(_) => write!(f, "*const {pointee}"),
@@ -1970,7 +2112,13 @@ fn write_cpp_object(
 ) -> std::fmt::Result {
     match inner {
         // C++ classes have a constness parameter: `a::B::<::zngur_lib::Const>`.
-        RustType::Cpp(segs) => write!(f, "{}::<{constness}>", segs.join("::")),
+        RustType::Cpp(path) => {
+            write!(f, "{}::<", path.path.join("::"))?;
+            for g in &path.generics {
+                write!(f, "{g}, ")?;
+            }
+            write!(f, "{constness}>")
+        }
         // Builtins and pointers.
         inner => write!(f, "::zngur_lib::Cpp<{inner}, {constness}>"),
     }

@@ -240,6 +240,10 @@ impl Merge for crate::ZngurCppMethod {
 
 impl Merge for crate::ZngurCppField {
     fn merge(self, into: &mut Self) -> MergeResult {
+        let unwrap_cpp_const = |ty: &RustType| match ty {
+            RustType::CppConst(inner) => (**inner).clone(),
+            other => other.clone(),
+        };
         let canonical = |f: &Self| crate::ZngurCppField {
             name: f.name.clone(),
             rust_name: f
@@ -247,7 +251,7 @@ impl Merge for crate::ZngurCppField {
                 .as_deref()
                 .filter(|&n| n != f.name)
                 .map(str::to_owned),
-            ty: f.ty.clone(),
+            ty: unwrap_cpp_const(&f.ty),
             access: f.access,
             is_safe: f.is_safe,
         };
@@ -259,6 +263,9 @@ impl Merge for crate::ZngurCppField {
                     ConflictSource::CppField(into.rust_name().to_owned()),
                 ),
             ));
+        }
+        if matches!(self.ty, RustType::CppConst(_)) && !matches!(into.ty, RustType::CppConst(_)) {
+            into.ty = self.ty;
         }
         Ok(())
     }

@@ -91,6 +91,26 @@ inline int64_t twice(int64_t v) { return 2 * v; }
 inline double twice(double v) { return 2 * v; }
 } // namespace geometry
 
+// A class template, whose instantiations Rust uses (declared in `main.zng`).
+template <typename T> struct Pair {
+  T first;
+  T second;
+
+  Pair(T first, T second) : first(first), second(second) {}
+  ~Pair() { std::cout << "Destroyed Pair " << first << " " << second << std::endl; }
+  T sum() const { return first + second; }
+};
+
+// The destructor makes `Pair` not trivially copyable, but it's still trivially relocatable.
+template <typename T>
+struct rust::is_trivially_relocatable<Pair<T>> : std::true_type {};
+
+namespace pairs {
+inline std::unique_ptr<Pair<int32_t>> boxed(int32_t first, int32_t second) {
+  return std::unique_ptr<Pair<int32_t>>(new Pair<int32_t>(first, second));
+}
+} // namespace pairs
+
 // C++ fields of different kinds: `const`, named like a zngur keyword (`type`), and a pointer.
 struct Node {
   const int32_t id;
@@ -99,3 +119,26 @@ struct Node {
 
   explicit Node(int32_t id) : id(id), type(0), next(nullptr) {}
 };
+
+// A view of `T`s, which `View<const int32_t>` can only read: Rust sees it as
+// `View<zngur_lib::Cpp<i32, zngur_lib::Const>>`.
+template <typename T> struct View {
+  T *data;
+  size_t len;
+
+  size_t size() const { return len; }
+  T &at(size_t i) const { return data[i]; }
+};
+
+namespace views {
+inline View<const int32_t> squares() {
+  static const int32_t values[] = {0, 1, 4, 9, 16};
+  return View<const int32_t>{values, 5};
+}
+inline View<const Node *> pair_nodes(const Node *first) {
+  static const Node *items[2];
+  items[0] = first;
+  items[1] = first->next;
+  return View<const Node *>{items, 2};
+}
+} // namespace views

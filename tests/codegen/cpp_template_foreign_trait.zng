@@ -1,0 +1,42 @@
+//@ pass
+
+#cpp_additional_includes "
+template <typename T>
+struct Pair {
+    T a;
+    T b;
+};
+"
+
+type bool {
+    #layout(size = 1, align = 1);
+    wellknown_traits(Copy);
+}
+
+type c++::Pair<i32> {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+
+    safe constructor(i32, i32) as new;
+}
+
+type c++::Pair<const i32> {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+
+    safe constructor(i32, i32) as new;
+}
+
+extern "C++" {
+    impl ::core::default::Default for c++::Pair<i32> {
+        safe fn default() -> c++::Pair<i32>;
+    }
+
+    impl ::core::cmp::PartialEq<c++::Pair<i32>> for c++::Pair<i32> {
+        safe fn eq<'a, 'b>(&'a self, &'b var c++::Pair<i32>) -> bool;
+    }
+
+    impl ::core::convert::From<c++::Pair<const i32>> for i32 {
+        safe fn from(c++::Pair<const i32>) -> i32;
+    }
+}

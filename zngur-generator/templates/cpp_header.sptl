@@ -135,15 +135,8 @@ extern "C" {
 
 namespace {{ self.namespace }} {
 
-{% for td in self.type_defs %}
-  {% if td.has_unsized() %}
-    template<>
-    struct zngur_is_unsized< {{ td.ty }} > : ::std::true_type {};
-  {% endif %}
-{% endfor %}
-
 {# The C++ types behind `CppPtr` / `CppConst` of these wrappers. #}
-{% for td in self.type_defs %}
+{% for td in self.cpp_type_of_defs() %}
   {% if let Some(cpp_type) = td.cpp_object_type() %}
     template<>
     struct CppTypeOf< {{ td.ty }} > {
@@ -153,6 +146,13 @@ namespace {{ self.namespace }} {
     {# Rust only refers to these, but their declared layout (if any) is still checked. #}
     {{ cpp_ref.layout_checks() }}
     {% endif %}
+  {% endif %}
+{% endfor %}
+
+{% for td in self.type_defs %}
+  {% if td.has_unsized() %}
+    template<>
+    struct zngur_is_unsized< {{ td.ty }} > : ::std::true_type {};
   {% endif %}
 {% endfor %}
 

@@ -235,7 +235,15 @@ impl WriteIDL for crate::RustType {
             }
             Self::Adt(pg) => p.write_idl(pg),
             Self::TypeVar(var) => p.write_idl(var),
-            Self::Cpp(segs) => write!(p, "c++::{}", segs.join("::")),
+            Self::Cpp(path) => {
+                write!(p, "c++::{}", path.path.join("::"))?;
+                if !path.generics.is_empty() {
+                    write!(p, "<")?;
+                    p.write_idl(&path.generics)?;
+                    write!(p, ">")?;
+                }
+                Ok(())
+            }
             Self::CppPtr(kind, ty) => {
                 p.write_idl(ty)?;
                 match kind {
@@ -1332,7 +1340,7 @@ fn test_write_cpp_type_idl() {
     let spec = crate::ZngurSpec {
         types: vec![
             crate::ZngurType {
-                ty: crate::RustType::Cpp(vec!["Way".into()]),
+                ty: crate::RustType::Cpp(vec!["Way".into()].into()),
                 lifetimes: vec![],
                 layout: Some(crate::LayoutPolicy::ZERO_SIZED_TYPE),
                 wellknown_traits: vec![],
@@ -1350,7 +1358,7 @@ fn test_write_cpp_type_idl() {
                 trivially_relocatable: crate::TriviallyRelocatable::No,
             },
             crate::ZngurType {
-                ty: crate::RustType::Cpp(vec!["a".into(), "b".into(), "Name".into()]),
+                ty: crate::RustType::Cpp(vec!["a".into(), "b".into(), "Name".into()].into()),
                 lifetimes: vec![],
                 layout: Some(crate::LayoutPolicy::StackAllocated { size: 16, align: 8 }),
                 wellknown_traits: vec![],

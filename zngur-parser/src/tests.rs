@@ -2,8 +2,8 @@ use std::panic::catch_unwind;
 
 use expect_test::{Expect, expect};
 use zngur_def::{
-    CppHeapAllocated, CppIndirection, CppRef, CppStackOwned, LayoutPolicy, Lifetime, Mutability,
-    PrimitiveRustType, RustPathAndGenerics, RustType, TriviallyRelocatable, ZngurSpec,
+    CppHeapAllocated, CppIndirection, CppRef, CppStackOwned, CppTypePath, LayoutPolicy, Lifetime,
+    Mutability, PrimitiveRustType, RustPathAndGenerics, RustType, TriviallyRelocatable, ZngurSpec,
 };
 
 use crate::{
@@ -1185,7 +1185,8 @@ fn assert_cpp(expected: &[&str], ty: &RustType) {
     let RustType::Cpp(segs) = ty else {
         panic!("type `{:?}` is not a c++ type", ty);
     };
-    assert_eq!(segs.as_slice(), expected);
+    assert!(segs.generics.is_empty(), "{segs:?}");
+    assert_eq!(segs.path.as_slice(), expected);
 }
 
 #[test]
@@ -1463,20 +1464,20 @@ mod c++::a {
 }
 
 #[test]
-fn cpp_path_with_generic_arguments_rejected() {
+fn cpp_path_with_lifetime_arguments_rejected() {
     check_fail(
         r#"
 extern "C++" {
-    safe fn make() -> c++::Vec<i32>;
+    safe fn make<'a>() -> c++::Vec<'a, i32>;
 }
     "#,
         expect![[r#"
-            Error: `c++::` paths do not support generic arguments
-               ╭─[ test.zng:3:23 ]
+            Error: `c++::` types don't take lifetime arguments
+               ╭─[ test.zng:3:27 ]
                │
-             3 │     safe fn make() -> c++::Vec<i32>;
-               │                       ────┬───  
-               │                           ╰───── `c++::` paths do not support generic arguments
+             3 │     safe fn make<'a>() -> c++::Vec<'a, i32>;
+               │                           ────────┬────────  
+               │                                   ╰────────── `c++::` types don't take lifetime arguments
             ───╯
         "#]],
     );
@@ -1484,17 +1485,17 @@ extern "C++" {
         r#"
 mod c++::ns {
     extern "C++" {
-        safe fn make() -> Option<i32>;
+        safe fn make<'a>() -> Option<'a, i32>;
     }
 }
     "#,
         expect![[r#"
-            Error: `c++::` paths do not support generic arguments
-               ╭─[ test.zng:4:27 ]
+            Error: `c++::` types don't take lifetime arguments
+               ╭─[ test.zng:4:31 ]
                │
-             4 │         safe fn make() -> Option<i32>;
-               │                           ───┬──  
-               │                              ╰──── `c++::` paths do not support generic arguments
+             4 │         safe fn make<'a>() -> Option<'a, i32>;
+               │                               ───────┬───────  
+               │                                      ╰───────── `c++::` types don't take lifetime arguments
                │ 
                │ Help: inside a `c++::` module, prefix Rust paths with `::` or `crate::`
             ───╯
@@ -1964,7 +1965,7 @@ type c++::a::Explicit {
             .spec
             .types
             .iter()
-            .find(|t| matches!(&t.ty, RustType::Cpp(segs) if segs == path))
+            .find(|t| matches!(&t.ty, RustType::Cpp(segs) if segs.path == path))
             .unwrap_or_else(|| panic!("no type {path:?}"))
     };
     assert_eq!(
@@ -2056,7 +2057,7 @@ type c++::a::Opaque {
             .spec
             .types
             .iter()
-            .find(|t| matches!(&t.ty, RustType::Cpp(segs) if segs.last().unwrap() == name))
+            .find(|t| matches!(&t.ty, RustType::Cpp(segs) if segs.path.last().unwrap() == name))
             .unwrap_or_else(|| panic!("no type {name}"))
     };
     assert_eq!(ty("ByValue").cpp_name().as_deref(), Some("::a::ByValue"));
@@ -2609,7 +2610,7 @@ mod crate {
     assert_eq!(
         module.cpp_by_value_types,
         vec![(
-            RustType::Cpp(vec!["ns".to_owned(), "Bar".to_owned()]),
+            RustType::Cpp(vec!["ns".to_owned(), "Bar".to_owned()].into()),
             "::ns::Bar".to_owned(),
         )]
     );
@@ -3704,7 +3705,7 @@ extern "C++" {
         |_| {},
     );
     let f = &parsed.spec.extern_cpp_funcs[0];
-    let b = || RustType::Cpp(vec!["a".to_owned(), "B".to_owned()]);
+    let b = || RustType::Cpp(vec!["a".to_owned(), "B".to_owned()].into());
     let i32 = || RustType::Primitive(PrimitiveRustType::Int(32));
     assert_eq!(
         f.inputs,
@@ -3745,12 +3746,12 @@ extern "C++" {
 }
 "#,
         expect![[r#"
-            Error: `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`, `&'a const T`)
+            Error: `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`, `&'a const T`) or a C++ template argument
                ╭─[ test.zng:3:15 ]
                │
              3 │     safe fn f(const i32);
                │               ────┬────  
-               │                   ╰────── `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`, `&'a const T`)
+               │                   ╰────── `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`, `&'a const T`) or a C++ template argument
             ───╯
         "#]],
     );
@@ -3765,12 +3766,12 @@ type ::std::vec::Vec<const i32> {
 }
 "#,
         expect![[r#"
-            Error: `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`, `&'a const T`)
+            Error: `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`, `&'a const T`) or a C++ template argument
                ╭─[ test.zng:2:6 ]
                │
              2 │ type ::std::vec::Vec<const i32> {
                │      ─────────────┬────────────  
-               │                   ╰────────────── `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`, `&'a const T`)
+               │                   ╰────────────── `const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`, `&'a const T`) or a C++ template argument
             ───╯
         "#]],
     );
@@ -3815,7 +3816,7 @@ extern "C++" {
         |_| {},
     );
     let funcs = &parsed.spec.extern_cpp_funcs;
-    let b = RustType::Cpp(vec!["B".to_owned()]);
+    let b = RustType::Cpp(vec!["B".to_owned()].into());
     let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
     let reference = |m, constness, ty: &RustType| {
         RustType::Ref(
@@ -4122,7 +4123,7 @@ fn invalid_cpp_pointer_and_reference_combinations_are_rejected() {
         ),
         (
             "type i32& { #layout(size = 8, align = 8); }\n",
-            "C++ reference `i32&` can only be a function parameter or return type",
+            "C++ reference `i32&` can only be a function parameter, return type, or C++ template argument",
         ),
         (
             "type Box<dyn Fn(const i32)> { #layout(size = 16, align = 8); }\n",
@@ -4396,7 +4397,7 @@ type Box<dyn for<'a> Fn(&'a const c++::B) -> &'a const c++::B> {
             .0;
         assert!(
             err.contains(
-                "C++ reference `const c++::B&` can only be a function parameter or return type"
+                "C++ reference `const c++::B&` can only be a function parameter, return type, or C++ template argument"
             ),
             "unexpected error for `{src}`:\n{err}"
         );
@@ -4574,7 +4575,7 @@ extern "C++" {
     );
     let func = &parsed.spec.extern_cpp_funcs[0];
     let lt_a = Lifetime("a".to_owned());
-    let b = RustType::Cpp(vec!["B".to_owned()]);
+    let b = RustType::Cpp(vec!["B".to_owned()].into());
     let i32_ty = RustType::Primitive(PrimitiveRustType::Int(32));
     assert_eq!(
         func.inputs[0].as_nullable_cpp_ref(),
@@ -4726,7 +4727,7 @@ mod c++::a {
         |_| {},
     );
     let ty = parsed.spec.types.first().expect("no type parsed");
-    let b = RustType::Cpp(vec!["a".to_owned(), "B".to_owned()]);
+    let b = RustType::Cpp(vec!["a".to_owned(), "B".to_owned()].into());
     let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
     let methods = &ty.cpp_methods;
     assert_eq!(methods.len(), 4);
@@ -5714,7 +5715,7 @@ type c++::B {
     assert_eq!(ty.cpp_methods[0].cpp_name, "clone_val");
     assert_eq!(
         ty.cpp_methods[0].output,
-        RustType::Cpp(vec!["B".to_owned()])
+        RustType::Cpp(vec!["B".to_owned()].into())
     );
     assert_eq!(ty.cpp_methods[1].cpp_name, "make_default");
 
@@ -5877,7 +5878,7 @@ type c++::B {
         |w| panic!("unexpected warning: {w}"),
     );
     let ty = parsed.spec.types.first().expect("no type parsed");
-    let b = RustType::Cpp(vec!["B".to_owned()]);
+    let b = RustType::Cpp(vec!["B".to_owned()].into());
     let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
     let constructors = &ty.cpp_constructors;
     let names: Vec<_> = constructors.iter().map(|c| c.rust_name.as_str()).collect();
@@ -6430,9 +6431,9 @@ type c++::B {
         vec![RustType::Ref(
             Mutability::Not,
             Some(Lifetime("a".into())),
-            Box::new(RustType::CppConst(Box::new(RustType::Cpp(vec![
-                "B".into()
-            ])))),
+            Box::new(RustType::CppConst(Box::new(RustType::Cpp(
+                vec!["B".into()].into(),
+            )))),
         )]
     );
     assert_eq!(ty.cpp_constructors[1].rust_name, "from_int");
@@ -6578,7 +6579,7 @@ mod crate::r {
     );
     let funcs = &parsed.spec.cpp_funcs;
     assert_eq!(funcs.len(), 7);
-    let b = RustType::Cpp(vec!["a".to_owned(), "B".to_owned()]);
+    let b = RustType::Cpp(vec!["a".to_owned(), "B".to_owned()].into());
     let i32 = RustType::Primitive(PrimitiveRustType::Int(32));
 
     assert_eq!(funcs[0].namespace, ["a", "b"]);
@@ -7346,7 +7347,7 @@ type c++::Node {}
         RustType::cpp_ptr(
             Mutability::Mut,
             CppIndirection::Pointer,
-            RustType::Cpp(vec!["Node".to_owned()])
+            RustType::Cpp(vec!["Node".to_owned()].into())
         )
     );
 
@@ -7591,4 +7592,783 @@ type c++::Point {}
         err.contains("C++ field accessors omit `offset` and say what they return"),
         "unexpected error:\n{err}"
     );
+}
+
+#[test]
+fn cpp_template_instantiations_parse() {
+    let parsed = parse_str(
+        r#"
+type c++::a::B {
+}
+
+type c++::std::unique_ptr<c++::a::B> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+}
+
+type c++::std::map<i32, const c++::a::B*> {
+}
+"#,
+        NullCfg,
+        |_| {},
+    );
+    let b = RustType::Cpp(vec!["a".to_owned(), "B".to_owned()].into());
+    let types = &parsed.spec.types;
+    assert_eq!(
+        types[1].ty,
+        RustType::Cpp(CppTypePath {
+            path: vec!["std".to_owned(), "unique_ptr".to_owned()],
+            generics: vec![b.clone()],
+        })
+    );
+    // The C++ name includes the template arguments, spelled the C++ way.
+    assert_eq!(types[1].cpp_name().unwrap(), "::std::unique_ptr< ::a::B >");
+    assert_eq!(
+        types[2].ty,
+        RustType::Cpp(CppTypePath {
+            path: vec!["std".to_owned(), "map".to_owned()],
+            generics: vec![
+                RustType::Primitive(PrimitiveRustType::Int(32)),
+                RustType::cpp_ptr(Mutability::Not, CppIndirection::Pointer, b),
+            ],
+        })
+    );
+    assert_eq!(
+        types[2].cpp_name().unwrap(),
+        "::std::map< ::int32_t, const ::a::B* >"
+    );
+}
+
+#[test]
+fn cpp_template_with_named_generics_is_rejected() {
+    check_fail(
+        r#"
+type c++::std::vector<T = i32> {
+}
+"#,
+        expect![[r#"
+            Error: C++ template arguments are positional; `Name = T` is only for Rust types
+               ╭─[ test.zng:2:6 ]
+               │
+             2 │ type c++::std::vector<T = i32> {
+               │      ────────────┬────────────  
+               │                  ╰────────────── C++ template arguments are positional; `Name = T` is only for Rust types
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_template_with_rust_type_argument_is_rejected() {
+    check_fail(
+        r#"
+type c++::std::vector<::std::string::String> {
+}
+"#,
+        expect![[r#"
+            Error: `::std::string::String` can't be a C++ template argument (only `c++::` types, builtins and C++ pointers and references can, `const` or not)
+               ╭─[ test.zng:2:6 ]
+               │
+             2 │ type c++::std::vector<::std::string::String> {
+               │      ───────────────────┬───────────────────  
+               │                         ╰───────────────────── `::std::string::String` can't be a C++ template argument (only `c++::` types, builtins and C++ pointers and references can, `const` or not)
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_template_with_unsupported_rust_primitive_is_rejected() {
+    for (prim, expected) in [
+        ("i128", "`i128` has no C++ equivalent"),
+        ("u128", "`u128` has no C++ equivalent"),
+        ("char", "`char` has no C++ equivalent"),
+        ("str", "`str` has no C++ equivalent"),
+        ("f16", "`f16` has no C++ equivalent"),
+        ("isize", "`::isize` can't be a C++ template argument"),
+    ] {
+        for zng in [
+            format!("type c++::Foo<{prim}> {{}}\n"),
+            format!(
+                "#unstable(template_types)\ntype<T> c++::Foo<T> {{}}\ntype c++::Foo<{prim}> {{}}\n"
+            ),
+        ] {
+            let errs = match catch_unwind(|| {
+                let _ = parse_str(&zng, NullCfg, |_| {});
+            }) {
+                Ok(_) => panic!("expected `{prim}` to fail parsing in:\n{zng}"),
+                Err(e) => e.downcast::<ErrorText>().unwrap().0,
+            };
+            assert!(
+                errs.contains(expected),
+                "expected `{expected}` for `{prim}` in C++ class template args, got:\n{errs}"
+            );
+        }
+    }
+}
+
+#[test]
+fn cpp_template_with_different_arities_is_rejected() {
+    check_fail(
+        r#"
+type c++::std::vector<i32> {
+}
+
+type c++::std::vector<i32, c++::MyAlloc> {
+}
+"#,
+        expect![[r#"
+            Error: every instantiation of `c++::std::vector` must have the same number of template arguments as its first instantiation, which has 1
+               ╭─[ test.zng:5:6 ]
+               │
+             5 │ type c++::std::vector<i32, c++::MyAlloc> {
+               │      ─────────────────┬─────────────────  
+               │                       ╰─────────────────── every instantiation of `c++::std::vector` must have the same number of template arguments as its first instantiation, which has 1
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_template_instantiations_of_a_pointer_and_a_reference_are_the_same_rust_type() {
+    // Both are `*const i32` in Rust.
+    check_fail(
+        r#"
+type c++::std::pair<const i32&> {
+}
+
+type c++::std::pair<const i32*> {
+}
+"#,
+        expect![[r#"
+            Error: another instantiation of this C++ class template is the same Rust type
+               ╭─[ test.zng:5:6 ]
+               │
+             5 │ type c++::std::pair<const i32*> {
+               │      ─────────────┬────────────  
+               │                   ╰────────────── another instantiation of this C++ class template is the same Rust type
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_template_implicitly_homed_in_an_import_cant_be_instantiated() {
+    let resolver = MockFilesystem::new(vec![(
+        "./bar.zng",
+        r#"
+#crate bar_bindings
+
+type c++::std::unique_ptr<i32> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+}
+"#,
+    )]);
+    check_import_fail(
+        r#"
+import "./bar.zng";
+
+type c++::std::unique_ptr<i64> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+}
+"#,
+        expect![[r#"
+            Error: `c++::std::unique_ptr` is declared in an imported module, so its instantiations must be declared there too
+               ╭─[ test.zng:4:6 ]
+               │
+             4 │ type c++::std::unique_ptr<i64> {
+               │      ────────────┬────────────  
+               │                  ╰────────────── `c++::std::unique_ptr` is declared in an imported module, so its instantiations must be declared there too
+            ───╯
+        "#]],
+        &resolver,
+    );
+}
+
+#[test]
+fn cpp_template_scope_resolution_and_validation() {
+    // `const` C++ template arguments work inside `mod c++::...` and via `use c++::...`.
+    let parsed = parse_str(
+        r#"
+use c++::std::span as Span;
+
+mod c++::views {
+    type View<const i32> {}
+}
+
+type Span<const i32> {}
+"#,
+        NullCfg,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    assert_eq!(
+        parsed.spec.types[0].cpp_name().as_deref(),
+        Some("::views::View< const ::int32_t >")
+    );
+    assert_eq!(
+        parsed.spec.types[1].cpp_name().as_deref(),
+        Some("::std::span< const ::int32_t >")
+    );
+
+    // Named generics, lifetime arguments, and lifetime parameters are rejected on C++ types even
+    // inside `mod c++::...` or via `use c++::...`, and `const T` is still rejected on aliased Rust
+    // types.
+    for (src, expected) in [
+        (
+            "mod c++::std { type vector<T = i32> {} }\n",
+            "C++ template arguments are positional; `Name = T` is only for Rust types",
+        ),
+        (
+            "mod c++::std { type vector<'static, i32> {} }\n",
+            "`c++::` types don't take lifetime arguments",
+        ),
+        (
+            "mod c++::std { type<'a> vector<i32> {} }\n",
+            "`c++::` types don't have lifetime parameters",
+        ),
+        (
+            "use c++::std::vector as Vec;\ntype Vec<T = i32> {}\n",
+            "C++ template arguments are positional; `Name = T` is only for Rust types",
+        ),
+        (
+            "use ::std::vec::Vec as RustVec;\ntype RustVec<const i32> { #layout(size = 24, align = 8); }\n",
+            "`const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`, `&'a const T`) or a C++ template argument",
+        ),
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(expected),
+            "expected `{expected}` for `{src}`, got:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn cpp_template_arity_zero_and_import_collisions() {
+    for src in [
+        "type c++::a::Foo {}\ntype c++::a::Foo<i32> {}\n",
+        "type c++::a::Foo<i32> {}\ntype c++::a::Foo {}\n",
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains("cannot be declared both as a plain C++ type and as a C++ class template"),
+            "unexpected error for `{src}`:\n{err}"
+        );
+    }
+
+    let resolver = MockFilesystem::new(vec![(
+        "./bar.zng",
+        "#crate bar_bindings\ntype c++::a::Foo<i32> {}\n",
+    )]);
+    let r = catch_unwind(|| {
+        let _ = parse_str_with_resolver(
+            "import \"./bar.zng\";\ntype c++::a::Foo {}\n",
+            NullCfg,
+            &resolver,
+            |_| {},
+        );
+    });
+    let err = r
+        .unwrap_err()
+        .downcast::<ErrorText>()
+        .expect("expected ErrorText")
+        .0;
+    assert!(
+        err.contains("`c++::a::Foo` is already imported from `./bar.zng`"),
+        "unexpected error:\n{err}"
+    );
+}
+
+#[test]
+fn cpp_template_type_definitions_with_const_and_pointer_args() {
+    use zngur_def::CppConstness;
+
+    let parsed = parse_str(
+        r#"
+#unstable(template_types)
+
+type<T> c++::Pair<T> {
+    #layout(size = 16, align = 8);
+    #trivially_relocatable;
+
+    field &const first (type = T);
+    field const first (type = T) as first_copy;
+    unsafe fn get<'a>(&'a const self) -> &'a var T;
+}
+
+type c++::Pair<const i32> {}
+type c++::Pair<const c++::Node*> {}
+type c++::Node {}
+"#,
+        NullCfg,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    let const_pair = &parsed.spec.types[0];
+    assert_eq!(
+        const_pair.cpp_fields[0].ty,
+        RustType::Primitive(PrimitiveRustType::Int(32))
+    );
+    assert_eq!(
+        const_pair.cpp_methods[0].output,
+        RustType::Ref(
+            Mutability::Not,
+            Some(Lifetime("a".to_owned())),
+            Box::new(RustType::cpp_object(
+                CppConstness::Const,
+                RustType::Primitive(PrimitiveRustType::Int(32))
+            ))
+        )
+    );
+
+    // Mutable field accessors and by-value `const T` methods/constructors on `const` template
+    // instantiations are rejected cleanly.
+    for (member, expected) in [
+        (
+            "field &unique var first (type = T);",
+            "the field `first` has `const` type `const i32`, so its reference accessor must be `const`",
+        ),
+        (
+            "field &unique const first (type = T);",
+            "the field `first` has `const` type `const i32`, so `field &unique const` cannot be used",
+        ),
+        (
+            "safe fn take(&const self) -> T;",
+            "`const T` can only be the type of a C++ pointer or reference (`const T&`, `const T*`, `&'a const T`) or a C++ template argument",
+        ),
+    ] {
+        let src = format!(
+            "#unstable(template_types)\n\
+             type<T> c++::Box<T> {{ #layout(size = 4, align = 4); #trivially_relocatable; {member} }}\n\
+             type c++::Box<const i32> {{}}\n"
+        );
+        let r = catch_unwind(|| {
+            let _ = parse_str(&src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(err.contains(expected), "expected `{expected}`, got:\n{err}");
+    }
+}
+
+#[test]
+fn cpp_template_heap_allocated_is_rejected() {
+    check_fail(
+        r#"
+type c++::std::unique_ptr<i32> {
+    #cpp_heap_allocated "::std::unique_ptr<int32_t>";
+    #heap_allocated;
+}
+"#,
+        expect![[r#"
+            Error: instantiations of C++ class templates can't be `#cpp_heap_allocated`
+               ╭─[ test.zng:2:6 ]
+               │
+             2 │ type c++::std::unique_ptr<i32> {
+               │      ────────────┬────────────  
+               │                  ╰────────────── instantiations of C++ class templates can't be `#cpp_heap_allocated`
+            ───╯
+        "#]],
+    );
+}
+
+#[test]
+fn cpp_template_signature_and_nested_uses_are_validated() {
+    for (src, expected) in [
+        (
+            "type c++::Plain {}\ntype c++::Outer<c++::Plain<i32>> {}\n",
+            "`c++::Plain` is declared as a plain C++ type, so it cannot take template arguments",
+        ),
+        (
+            "type c++::Plain {}\nfn f(&const c++::Plain<i32>);\n",
+            "`c++::Plain` is declared as a plain C++ type, so it cannot take template arguments",
+        ),
+        (
+            "type c++::Foo<i32> {}\nfn f(&const c++::Foo<i32, u32>);\n",
+            "`c++::Foo` takes 1 template argument, not 2",
+        ),
+        (
+            "type c++::Foo<i32> {}\nmod c++::ns { safe fn f<'a>(&'a const c++::Foo); }\n",
+            "`c++::Foo` is a C++ class template and needs 1 template argument",
+        ),
+        (
+            "type c++::Foo<i32> {}\nextern \"C++\" { safe fn f<'a>(&'a const c++::Foo<i64>); }\n",
+            "instantiation `c++::Foo<i64>` of C++ class template `c++::Foo` is not declared; add `type c++::Foo<i64> { ... }`",
+        ),
+        (
+            "fn f(&const c++::Unknown<i32>);\n",
+            "instantiation `c++::Unknown<i32>` of C++ class template `c++::Unknown` is not declared; add `type c++::Unknown<i32> { ... }`",
+        ),
+        (
+            "type c++::std::unique_ptr<c++::Undeclared> {}\n",
+            "`c++::Undeclared` is not declared or imported",
+        ),
+        (
+            "type c++::View<const c++::Undeclared*> {}\n",
+            "`c++::Undeclared` is not declared or imported",
+        ),
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(expected),
+            "expected `{expected}` for `{src}`, got:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn cpp_template_imported_instantiation_uses_and_errors() {
+    let resolver = MockFilesystem::new(vec![(
+        "./bar.zng",
+        r#"
+#crate bar_bindings
+
+type c++::Plain {
+    #layout(size = 4, align = 4);
+    #trivially_relocatable;
+}
+
+type c++::Box<i32> {
+    #layout(size = 4, align = 4);
+    #trivially_relocatable;
+}
+"#,
+    )]);
+
+    // Declared instantiations of an imported template can be used both by reference and by value.
+    let parsed = parse_str_with_resolver(
+        r#"
+import "./bar.zng";
+
+mod c++::ns {
+    safe fn borrow<'a>(&'a const c++::Box<i32>) -> c++::Box<i32>;
+}
+"#,
+        NullCfg,
+        &resolver,
+        |w| panic!("unexpected warning: {w}"),
+    );
+    assert_eq!(parsed.spec.cpp_funcs.len(), 1);
+
+    // Undeclared instantiations, wrong arity, missing template arguments, and template arguments
+    // on imported plain C++ types are all rejected cleanly without secondary by-value noise.
+    for (src, expected, unexpected) in [
+        (
+            "import \"./bar.zng\";\nmod c++::ns { safe fn f<'a>(&'a const c++::Box<i64>); }\n",
+            "instantiation `c++::Box<i64>` of C++ class template `c++::Box` is not declared in `./bar.zng`; add `type c++::Box<i64> { ... }` there",
+            Some("cannot be passed or returned by value"),
+        ),
+        (
+            "import \"./bar.zng\";\nmod c++::ns { safe fn f() -> c++::Box<i64>; }\n",
+            "instantiation `c++::Box<i64>` of C++ class template `c++::Box` is not declared in `./bar.zng`; add `type c++::Box<i64> { ... }` there",
+            Some("cannot be passed or returned by value"),
+        ),
+        (
+            "import \"./bar.zng\";\nfn f(&const c++::Box);\n",
+            "`c++::Box` is a C++ class template and needs 1 template argument",
+            None,
+        ),
+        (
+            "import \"./bar.zng\";\nfn f(&const c++::Box<i32, u32>);\n",
+            "`c++::Box` takes 1 template argument, not 2",
+            None,
+        ),
+        (
+            "import \"./bar.zng\";\nfn f(&const c++::Plain<i32>);\n",
+            "`c++::Plain` is declared as a plain C++ type in `./bar.zng`, so it cannot take template arguments",
+            None,
+        ),
+        (
+            "import \"./bar.zng\";\ntype c++::Plain<i32> {}\n",
+            "`c++::Plain` is declared as a plain C++ type in an imported module, so it cannot be declared as a C++ class template",
+            None,
+        ),
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str_with_resolver(src, NullCfg, &resolver, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(expected),
+            "expected `{expected}` for `{src}`, got:\n{err}"
+        );
+        if let Some(unexpected) = unexpected {
+            assert!(
+                !err.contains(unexpected),
+                "did not expect `{unexpected}` for `{src}`, got:\n{err}"
+            );
+        }
+    }
+}
+
+#[test]
+fn cpp_template_merge_const_field_and_empty_angles_and_lifetimes() {
+    // Merging a `type<T>` field `T` with an explicit `i32` field on a `const i32` instantiation
+    // succeeds when the field accessor is `const`, while `&unique var` remains rejected.
+    let must_parse = |src: &str| {
+        catch_unwind(|| parse_str(src, NullCfg, |w| panic!("unexpected warning: {w}")))
+            .unwrap_or_else(|e| {
+                if let Ok(et) = e.downcast::<ErrorText>() {
+                    panic!("unexpected ErrorText for:\n{src}\n---\n{}", et.0);
+                }
+                panic!("unexpected panic for:\n{src}");
+            })
+    };
+    let parsed = must_parse(
+        r#"
+#unstable(template_types)
+
+type<T> c++::Pair<T> {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    field &const first (type = T);
+}
+
+type c++::Pair<const i32> {
+    field &const first (type = i32);
+}
+"#,
+    );
+    assert_eq!(parsed.spec.types.len(), 1);
+    assert_eq!(parsed.spec.types[0].cpp_fields.len(), 1);
+
+    let r = catch_unwind(|| {
+        let _ = parse_str(
+            r#"
+#unstable(template_types)
+
+type<T> c++::Pair<T> {
+    #layout(size = 8, align = 4);
+    #trivially_relocatable;
+    field &unique var first (type = T);
+}
+
+type c++::Pair<const i32> {
+    field &unique var first (type = i32);
+}
+"#,
+            NullCfg,
+            |_| {},
+        );
+    });
+    let err = r
+        .unwrap_err()
+        .downcast::<ErrorText>()
+        .expect("expected ErrorText")
+        .0;
+    assert!(
+        err.contains(
+            "the field `first` has `const` type `const i32`, so its reference accessor must be `const`"
+        ),
+        "unexpected error:\n{err}"
+    );
+
+    // Empty `<>` on `c++::` paths is rejected rather than collapsing into a plain C++ type or a
+    // `type<T>` variable.
+    for src in [
+        "type c++::Box<> {}\n",
+        "fn f(&const c++::Box<>);\n",
+        "#unstable(template_types)\nmod c++::ns { type<T> Holder<T> { unsafe fn f<'a>(&'a const self, &'a const T<>); } }\n",
+    ] {
+        let r = catch_unwind(|| {
+            let _ = parse_str(src, NullCfg, |_| {});
+        });
+        let err = r
+            .unwrap_err()
+            .downcast::<ErrorText>()
+            .expect("expected ErrorText")
+            .0;
+        assert!(
+            err.contains(
+                "C++ class template instantiations in `.zng` must specify at least one template argument"
+            ),
+            "unexpected error for `{src}`:\n{err}"
+        );
+    }
+    // And in Rust scope, `T<>` does not match the `type<T>` variable `T` either (resolving to
+    // `crate::T` rather than substituting `i32`).
+    let parsed_t_empty = must_parse(
+        r#"
+#unstable(template_types)
+type<T> crate::Holder<T> { field x (offset = 0, type = T<>); }
+type crate::Holder<i32> { #layout(size = 4, align = 4); }
+"#,
+    );
+    assert_ne!(
+        parsed_t_empty.spec.types[0].fields[0].ty,
+        RustType::Primitive(PrimitiveRustType::Int(32))
+    );
+
+    // `RustType::Cpp` generic arguments participate in `all_lifetimes` and `for<'a>` binder renaming.
+    let parsed_fn = must_parse("fn call(Box<dyn for<'a> Fn(&'a i32)>);\n");
+    let fn_box_ty = parsed_fn.spec.funcs[0].inputs[0].clone();
+    let cpp_with_binder = RustType::Cpp(zngur_def::CppTypePath {
+        path: vec!["Box".to_owned()],
+        generics: vec![fn_box_ty],
+    });
+    let cpp_with_lt = RustType::Cpp(zngur_def::CppTypePath {
+        path: vec!["Ref".to_owned()],
+        generics: vec![RustType::Ref(
+            Mutability::Not,
+            Some(Lifetime("a".to_owned())),
+            Box::new(RustType::Primitive(PrimitiveRustType::Int(32))),
+        )],
+    });
+    assert!(
+        cpp_with_lt
+            .all_lifetimes()
+            .contains(&Lifetime("a".to_owned()))
+    );
+    let outer = std::collections::HashSet::from([Lifetime("a".to_owned())]);
+    let mut avoid = outer.clone();
+    let renamed = cpp_with_binder.rename_colliding_for_binders(&outer, &mut avoid);
+    assert_ne!(renamed, cpp_with_binder);
+    assert!(avoid.len() > 1);
+}
+
+#[test]
+fn cpp_template_post_substitution_lints_and_scoped_allow() {
+    use std::cell::RefCell;
+
+    let collect_warnings = |src: &str, resolver: &MockFilesystem| -> Vec<String> {
+        let warnings = RefCell::new(Vec::new());
+        let res = parse_str_with_resolver(src, NullCfg, resolver, |w| {
+            warnings.borrow_mut().push(w.to_owned());
+        });
+        assert_eq!(res.errors, 0);
+        warnings.into_inner()
+    };
+
+    let empty_fs = MockFilesystem::new(Vec::<(&str, &str)>::new());
+
+    // Substituting `i32*` into `T` triggers `safe_raw_pointer` on `safe fn`, `safe constructor`,
+    // and mutable-ref `field`, whereas instantiating with `i32` produces zero warnings.
+    let warnings = collect_warnings(
+        r#"
+#unstable(template_types)
+
+type<T> c++::Box<T> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+
+    safe constructor(T) as new;
+    safe fn set<'a>(&'a unique var self, T);
+    field &unique var val (type = T);
+}
+
+type c++::Box<i32> {}
+type c++::Box<i32*> {}
+"#,
+        &empty_fs,
+    );
+    assert_eq!(warnings.len(), 3, "unexpected warnings: {warnings:#?}");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("member function") && w.contains("raw pointer"))
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("constructor") && w.contains("raw pointer"))
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("field accessor") && w.contains("raw pointer"))
+    );
+
+    // Templates that already wrote `T*` warn once at parse time rather than duplicating per
+    // instantiation.
+    let pre_existing_ptr_warnings = collect_warnings(
+        r#"
+#unstable(template_types)
+
+type<T> c++::PtrBox<T> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+
+    safe fn take_ptr<'a>(&'a const self, T*);
+}
+
+type c++::PtrBox<i32> {}
+type c++::PtrBox<u32> {}
+"#,
+        &empty_fs,
+    );
+    assert_eq!(
+        pre_existing_ptr_warnings.len(),
+        1,
+        "expected exactly 1 warning, got: {pre_existing_ptr_warnings:#?}"
+    );
+
+    // `#allow(safe_raw_pointer)` in either the template's file or the instantiation's file
+    // silences post-substitution warnings, while `#allow` in an unrelated `merge`d file does not.
+    let tpl_src = r#"
+#unstable(template_types)
+
+type<T> c++::Box<T> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+
+    safe fn set<'a>(&'a unique var self, T);
+}
+"#;
+    let fs_unrelated_allow = MockFilesystem::new(vec![
+        ("./tpl.zng", tpl_src),
+        (
+            "./unrelated.zng",
+            "#allow(safe_raw_pointer)\ntype c++::Other {}\n",
+        ),
+    ]);
+    let warnings_unrelated = collect_warnings(
+        "merge \"./tpl.zng\";\nmerge \"./unrelated.zng\";\ntype c++::Box<i32*> {}\n",
+        &fs_unrelated_allow,
+    );
+    assert_eq!(warnings_unrelated.len(), 1);
+
+    let warnings_inst_allow = collect_warnings(
+        "#allow(safe_raw_pointer)\nmerge \"./tpl.zng\";\ntype c++::Box<i32*> {}\n",
+        &fs_unrelated_allow,
+    );
+    assert!(warnings_inst_allow.is_empty());
+
+    let fs_tpl_allow = MockFilesystem::new(vec![(
+        "./tpl.zng",
+        &format!("#allow(safe_raw_pointer)\n{tpl_src}"),
+    )]);
+    let warnings_tpl_allow = collect_warnings(
+        "merge \"./tpl.zng\";\ntype c++::Box<i32*> {}\n",
+        &fs_tpl_allow,
+    );
+    assert!(warnings_tpl_allow.is_empty());
 }

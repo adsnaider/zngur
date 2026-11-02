@@ -144,10 +144,11 @@ impl IntoCpp for RustType {
             },
             // The C++ wrappers of `c++::` types are in `rust::cpp`, apart from those of Rust types
             // (`rust::crate`, `rust::std`, ...): `c++::a::B` is `rust::cpp::a::B`.
-            RustType::Cpp(segs) => RustPathAndGenerics {
+            RustType::Cpp(path) => RustPathAndGenerics {
                 path: std::iter::once("cpp".to_owned())
-                    .chain(segs.iter().cloned())
+                    .chain(path.path.iter().cloned())
                     .collect(),
+                generics: path.generics.clone(),
                 ..Default::default()
             }
             .into_cpp(namespace, crate_name),
@@ -280,8 +281,11 @@ fn name_elided_lifetimes(ty: &RustType, fresh: &mut dyn FnMut() -> Lifetime) -> 
             RustTrait::Normal(path_and_generics(pg, fresh)),
             bounds.clone(),
         ),
-        RustType::Cpp(_)
-        | RustType::Dyn(RustTrait::Fn { .. }, _)
+        RustType::Cpp(path) => RustType::Cpp(CppTypePath {
+            path: path.path.clone(),
+            generics: all(&path.generics, fresh),
+        }),
+        RustType::Dyn(RustTrait::Fn { .. }, _)
         | RustType::Impl(..)
         | RustType::Primitive(_)
         | RustType::TypeVar(_) => ty.clone(),
@@ -292,6 +296,10 @@ pub struct RustFile {
     pub text: String,
     pub panic_to_exception: bool,
     pub mangling_base: String,
+    /// The Rust structs of instantiations of C++ class templates, by the Rust type they're
+    /// named by (e.g. `std::unique_ptr::<a::B>`, an alias). Inherent `impl` blocks must name the
+    /// struct itself.
+    pub impl_targets: std::collections::HashMap<String, String>,
 }
 
 impl RustFile {
@@ -504,6 +512,7 @@ macro_rules! __zngur_assert_field_offset {
             .to_owned(),
             panic_to_exception: false,
             mangling_base: mangling_base.to_owned(),
+            impl_targets: Default::default(),
         }
     }
 }
@@ -536,7 +545,7 @@ pub fn hash_of_sig(sig: &[RustType]) -> String {
     hex::encode(&digset[..5])
 }
 
-fn mangle_name(name: &str, mangling_base: &str) -> String {
+pub(crate) fn mangle_name(name: &str, mangling_base: &str) -> String {
     let mut name = "_zngur_"
         .chars()
         .chain(mangling_base.chars())
@@ -700,6 +709,146 @@ impl CoroSupport {
 impl RustFile {
     pub(crate) fn mangle_name(&self, name: &str) -> String {
         mangle_name(name, &self.mangling_base)
+    }
+
+    fn impl_path_and_generics(&self, pg: &RustPathAndGenerics) -> String {
+        let RustPathAndGenerics {
+            path,
+            lifetimes,
+            generics,
+            named_generics,
+        } = pg;
+        let mut out = String::new();
+        for p in path {
+            if p != "crate" {
+                out.push_str("::");
+            }
+            out.push_str(p);
+        }
+        if !lifetimes.is_empty() || !generics.is_empty() || !named_generics.is_empty() {
+            let args = lifetimes
+                .iter()
+                .map(|x| format!("{x}"))
+                .chain(generics.iter().map(|x| self.impl_target(x)))
+                .chain(
+                    named_generics
+                        .iter()
+                        .map(|(k, v)| format!("{k} = {}", self.impl_target(v))),
+                )
+                .join(", ");
+            out.push_str(&format!("::<{args}>"));
+        }
+        out
+    }
+
+    fn impl_trait(&self, tr: &RustTrait) -> String {
+        match tr {
+            RustTrait::Normal(pg) => self.impl_path_and_generics(pg),
+            RustTrait::Fn {
+                name,
+                lifetimes,
+                inputs,
+                output,
+            } => {
+                let mut out = String::new();
+                if !lifetimes.is_empty() {
+                    out.push_str(&format!("for{} ", lifetime_params(lifetimes)));
+                }
+                let inputs = inputs.iter().map(|x| self.impl_target(x)).join(", ");
+                out.push_str(&format!("{name}({inputs})"));
+                if **output != RustType::UNIT {
+                    out.push_str(&format!(" -> {}", self.impl_target(output)));
+                }
+                out
+            }
+        }
+    }
+
+    /// Formats `ty` for an `impl` header, replacing any local C++ class template instantiation
+    /// (`Pair<i32>`, a type alias for `<i32 as __ZngurCppTemplate_Pair>::Type`) with its local
+    /// wrapper struct (`self.impl_targets`) so Rust's orphan rules see the local struct directly.
+    pub(crate) fn impl_target(&self, ty: &RustType) -> String {
+        match ty {
+            RustType::Primitive(s) => format!("{s}"),
+            RustType::Ref(m, lifetime, inner) => {
+                let mut out = String::from("&");
+                if let Some(lifetime) = lifetime {
+                    out.push_str(&format!("{lifetime} "));
+                }
+                if *m == Mutability::Mut {
+                    out.push_str("mut ");
+                }
+                out.push_str(&self.impl_target(inner));
+                out
+            }
+            RustType::Raw(Mutability::Not, inner) => format!("*const {}", self.impl_target(inner)),
+            RustType::Raw(Mutability::Mut, inner) => format!("*mut {}", self.impl_target(inner)),
+            RustType::Boxed(inner) => format!("Box<{}>", self.impl_target(inner)),
+            RustType::Tuple(v) => {
+                format!("({})", v.iter().map(|x| self.impl_target(x)).join(", "))
+            }
+            RustType::Adt(pg) => self.impl_path_and_generics(pg),
+            RustType::Dyn(tr, marker_bounds) => {
+                let mut out = format!("dyn {}", self.impl_trait(tr));
+                for mb in marker_bounds {
+                    out.push_str(&format!("+ {mb}"));
+                }
+                out
+            }
+            RustType::Impl(tr, marker_bounds) => {
+                let mut out = format!("impl {}", self.impl_trait(tr));
+                for mb in marker_bounds {
+                    out.push_str(&format!("+ {mb}"));
+                }
+                out
+            }
+            RustType::Slice(s) => format!("[{}]", self.impl_target(s)),
+            RustType::TypeVar(v) => format!("{}", v.0),
+            RustType::Cpp(path) => {
+                if let Some(struct_name) = self.impl_targets.get(&ty.to_string()) {
+                    return struct_name.clone();
+                }
+                if path.generics.is_empty() {
+                    path.path.join("::")
+                } else {
+                    format!(
+                        "{}::<{}>",
+                        path.path.join("::"),
+                        path.generics.iter().map(|g| self.impl_target(g)).join(", ")
+                    )
+                }
+            }
+            RustType::CppPtr(_, pointee) => match &**pointee {
+                RustType::CppConst(_) => format!("*const {}", self.impl_target(pointee)),
+                pointee => format!("*mut {}", self.impl_target(pointee)),
+            },
+            RustType::CppConst(inner) => match &**inner {
+                RustType::Cpp(path) => {
+                    if let Some(struct_name) = self.impl_targets.get(&inner.to_string()) {
+                        format!("{struct_name}::<::zngur_lib::Const>")
+                    } else {
+                        let mut out = format!("{}::<", path.path.join("::"));
+                        for g in &path.generics {
+                            out.push_str(&format!("{}, ", self.impl_target(g)));
+                        }
+                        out.push_str("::zngur_lib::Const>");
+                        out
+                    }
+                }
+                inner => {
+                    format!(
+                        "::zngur_lib::Cpp<{}, ::zngur_lib::Const>",
+                        self.impl_target(inner)
+                    )
+                }
+            },
+            RustType::CppVar(inner) => match &**inner {
+                RustType::Primitive(_) | RustType::CppPtr(..) => {
+                    format!("::zngur_lib::Cpp<{}>", self.impl_target(inner))
+                }
+                inner => self.impl_target(inner),
+            },
+        }
     }
 
     fn call_cpp_function(&mut self, name: &str, inputs: usize) {
@@ -1208,12 +1357,21 @@ pub extern "C" fn {mn}(i: *const u8) -> usize {{ unsafe {{
         match tr {
             Some(tr) => {
                 let (tr, assocs) = tr.clone().take_assocs();
-                w!(self, r#"impl{impl_lifetimes} {tr} for {owner} {{"#);
+                w!(
+                    self,
+                    r#"impl{impl_lifetimes} {} for {} {{"#,
+                    self.impl_trait(&tr),
+                    self.impl_target(owner)
+                );
                 for (name, ty) in assocs {
                     w!(self, r#"type {name} = {ty};"#);
                 }
             }
-            None => w!(self, r#"impl{impl_lifetimes} {owner} {{"#),
+            None => w!(
+                self,
+                r#"impl{impl_lifetimes} {} {{"#,
+                self.impl_target(owner)
+            ),
         }
         for (mn, method) in mangled_names.iter().zip(methods) {
             if tr.is_none() {
@@ -1296,9 +1454,10 @@ pub {}fn {rust_name}{params}("#,
     }
 
     /// Adds the Rust function for a C++ member function of `owner`, which calls the C++ bridge
-    /// function whose (mangled) name is returned. `const` member functions are in an `impl<C>
-    /// T<C>` block, so both constnesses have them, and the others in an `impl T` (`T<NonConst>`)
-    /// block. `inputs` and `output` are their Rust types.
+    /// function whose (mangled) name is returned. `const` member functions (including `const`
+    /// field accessors and copies) are in an `impl<C> T<C>` block, so both constnesses have them,
+    /// and the others in an `impl T` (`T<NonConst>`) block. `inputs` and `output` are their Rust
+    /// types.
     #[allow(clippy::too_many_arguments)]
     pub fn add_cpp_method(
         &mut self,
@@ -1322,7 +1481,7 @@ unsafe extern "C" {{ fn {mangled_name}("#
             w!(self, "i{n}: *mut u8, ");
         }
         wln!(self, r#"o: *mut u8); }}"#);
-        let target = owner.to_string();
+        let target = self.impl_target(owner);
         let impl_header = if receiver.is_const() {
             format!("impl<__C0: ::zngur_lib::Constness> {target}<__C0>")
         } else {
@@ -1490,9 +1649,10 @@ unsafe extern "C" {{ fn {mangled_name}("#
         w!(
             self,
             r#"
-impl {owner} {{
+impl {} {{
 #[allow(non_snake_case, clippy::too_many_arguments)]
 pub {}fn {name}{params}("#,
+            self.impl_target(owner),
             if constructor.is_safe { "" } else { "unsafe " },
         );
         for (n, ty) in input_tys.iter().enumerate() {
@@ -1916,7 +2076,7 @@ mod tests {
 
     #[test]
     fn test_cpp_into_cpp() {
-        let cpp = RustType::Cpp(vec!["a".to_owned(), "Name".to_owned()]);
+        let cpp = RustType::Cpp(vec!["a".to_owned(), "Name".to_owned()].into());
         let cpp_type = cpp.into_cpp("rust", "my_crate");
         assert_eq!(cpp_type.to_string(), "::rust::cpp::a::Name");
     }

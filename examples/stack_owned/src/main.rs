@@ -226,6 +226,20 @@ fn main() {
     println!("fields = {x} {y}");
     point.print();
 
+    // Instantiations of C++ class templates.
+    let mut ints = generated::Pair::<i32>::new(3, 4).build();
+    let doubles = generated::Pair::<f64>::new(1.5, 2.25).build();
+    ints.first_mut().set(30);
+    println!("pairs = {} {}", ints.sum(), doubles.sum());
+    let mut boxed: generated::std::unique_ptr<generated::Pair<i32>> = generated::pairs::boxed(5, 6);
+    // `get()` returns the owned object, or `None` if the `unique_ptr` is empty (a null C++
+    // pointer), borrowed from the `unique_ptr`.
+    let pair = boxed.get().expect("empty std::unique_ptr");
+    println!("boxed = {}", pair.sum());
+    if let Some(pair) = boxed.get_mut() {
+        pair.first_mut().set(50);
+    }
+
     // Fields of pointer type.
     let mut first = generated::Node::new(1).build();
     let mut second = generated::Node::new(2).build();
@@ -239,10 +253,22 @@ fn main() {
         next.id().get(),
         next_type
     );
+    let node_view: generated::View<*const generated::Node<Const>> =
+        unsafe { generated::views::pair_nodes(first.as_const()) };
+    assert_eq!(node_view.size(), 2);
+    assert_eq!(node_view.len().get(), 2);
+    let second_ptr: *const generated::Node<Const> = unsafe { node_view.at(1) }.get();
+    assert_eq!(unsafe { (*second_ptr).id() }.get(), 2);
 
     // `const` is part of the type: `MyCppWrapper<Const>` is a `const` object, which only has the
     // `const` member functions. Going from a `T` to a `T<Const>` is explicit, apart from passing
     // it to C++ as a `const` object.
+    let squares = generated::views::squares();
+    let len = squares.size();
+    assert_eq!(squares.len().get(), len);
+    let third: i32 = unsafe { squares.at(3) }.get();
+    println!("squares = {len} items, squares[3] = {third}");
+    let _: &generated::View<Cpp<i32, Const>> = &squares;
     let mut point = MyCppWrapper::from_xy(2, 3).build();
     let exclusive: &mut MyCppWrapper<Const> = point.as_const_mut();
     println!("const sum() = {}", exclusive.sum());

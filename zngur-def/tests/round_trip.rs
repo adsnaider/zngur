@@ -946,6 +946,50 @@ type crate::Holder<Box<dyn for<'b> Fn(&'b str)>> {
 }
 
 #[test]
+fn reparse_cpp_templates() {
+    let _ = check_round_trip(
+        r#"
+#crate my_crate
+type c++::a::B {
+}
+type c++::std::unique_ptr<c++::a::B> {
+    #layout(size = 8, align = 8);
+    #trivially_relocatable;
+    unsafe fn get(&const self) -> c++::a::B*;
+}
+type c++::std::map<i32, const c++::a::B*> {
+}
+type c++::std::span<const i32> {
+}
+type c++::View<i32* const> {
+}
+        "#,
+        expect![[r#"
+            #crate my_crate
+
+            type c++::a::B {
+            }
+
+            type c++::std::unique_ptr<c++::a::B> {
+                #layout(size = 8, align = 8);
+                #trivially_relocatable;
+
+                unsafe fn get(&const self) -> c++::a::B*;
+            }
+
+            type c++::std::map<i32, const c++::a::B*> {
+            }
+
+            type c++::std::span<const i32> {
+            }
+
+            type c++::View<i32* const> {
+            }
+        "#]],
+    );
+}
+
+#[test]
 fn reparse_cpp_methods() {
     let _ = check_round_trip(
         r#"
